@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Party Dungeon</title>
+    <meta
+      name="description"
+      content="A top-down 3D party crawler in Bevy. Build a party, portal out, and open your dungeon to the public."
+    />
+    <style>
+      :root {
+        --bg: #0c0f14;
+        --panel: #141a22;
+        --line: #263140;
+        --ink: #e6edf5;
+        --muted: #8b9bb0;
+        --amber: #f0a63c;
+        --violet: #a78bfa;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        min-height: 100%;
+        display: flex;
+        flex-direction: column;
+        background:
+          radial-gradient(1100px 600px at 15% -10%, #17222e 0%, transparent 60%),
+          radial-gradient(900px 500px at 100% 0%, #1b1730 0%, transparent 55%),
+          var(--bg);
+        color: var(--ink);
+        font: 16px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 72px 24px;
+        width: 100%;
+      }
+      .kicker {
+        font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--amber);
+      }
+      h1 {
+        font-size: clamp(40px, 7vw, 72px);
+        line-height: 1;
+        letter-spacing: -0.03em;
+        margin: 18px 0 20px;
+      }
+      .lede {
+        color: var(--muted);
+        font-size: 19px;
+        max-width: 54ch;
+        margin: 0 0 36px;
+      }
+      .actions { display: flex; flex-wrap: wrap; gap: 12px; }
+      button {
+        font: 600 14px/1 ui-sans-serif, system-ui, sans-serif;
+        letter-spacing: 0.02em;
+        padding: 14px 26px;
+        border-radius: 10px;
+        cursor: pointer;
+        border: 1px solid transparent;
+        transition: transform 0.12s ease, background 0.15s ease, border-color 0.15s ease;
+      }
+      button:active { transform: translateY(1px); }
+      .primary {
+        background: var(--amber);
+        color: #1a1305;
+      }
+      .primary:hover { background: #f7b455; }
+      .ghost {
+        background: transparent;
+        color: var(--ink);
+        border-color: var(--line);
+      }
+      .ghost:hover { border-color: #3b4a5e; background: #141a22; }
+      .note {
+        margin: 40px 0 0;
+        font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: #5c6b7e;
+        border-top: 1px solid var(--line);
+        padding-top: 16px;
+        max-width: 44ch;
+      }
+      footer {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+        max-width: 760px;
+        width: 100%;
+        margin: 0 auto;
+        padding: 20px 24px 28px;
+        color: #4a5768;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        border-top: 1px solid #1a222c;
+      }
+      footer a { color: inherit; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="kicker">Web build &middot; placeholder</div>
+      <h1>Party Dungeon</h1>
+      <p class="lede">
+        Assemble a party of classes, portal into procedurally generated maps
+        stacked with verticality, and build a dungeon you can open to the
+        public.
+      </p>
+      <div class="actions">
+        <button class="primary" type="button">Play</button>
+        <button class="ghost" type="button">How it works</button>
+      </div>
+      <p class="note">
+        Both buttons are placeholders &mdash; nothing is wired behind them yet.
+        The engine build and the scene land next.
+      </p>
+    </main>
+    <footer>
+      <span>v0.1.0 &middot; built for web</span>
+      <span>localhost:8082</span>
+    </footer>
+  </body>
+</html>

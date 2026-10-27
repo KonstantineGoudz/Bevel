@@ -564,11 +564,13 @@ git commit -m "feat: run counter hud"
 ### Task 7: Web build
 
 **Files:**
-- Create: `game/web/index.html`, `game/scripts/build-web.sh`
+- Modify: `game/web/index.html` (landing page already exists — this task mounts the game into it)
+- Create: `game/scripts/build-web.sh`, `game/scripts/serve-web.sh` (both may already exist; reconcile rather than overwrite)
 - Modify: nothing in Rust
 
 **Interfaces:**
 - Produces: `game/scripts/build-web.sh` → `game/web/pkg/party_dungeon.js` + `party_dungeon_bg.wasm`, loadable from any static host with no server config.
+- Produces: `game/scripts/serve-web.sh` → the site on `http://localhost:8082/`.
 
 - [ ] **Step 1: Add the wasm target and the bindgen CLI**
 
@@ -580,32 +582,20 @@ wasm-bindgen --version
 
 Expected: a version line. The CLI version must match the `wasm-bindgen` version Bevy resolves (wasm-bindgen errors loudly if it does not; if that happens, `cargo install wasm-bindgen-cli --version <that-version>`).
 
-- [ ] **Step 2: Write the page**
+- [ ] **Step 2: Mount the game into the landing page**
 
-`game/web/index.html`:
+`game/web/index.html` already exists as a placeholder landing page (title, two inert buttons, footer). Add a full-viewport canvas container and, after the `</main>` hero, a module script that boots the engine into it:
 
 ```html
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
-    <title>Party Dungeon</title>
-    <style>
-      html, body { margin: 0; height: 100%; background: #0c0f14; overflow: hidden; }
-      canvas { display: block; width: 100%; height: 100%; }
-    </style>
-  </head>
-  <body>
-    <script type="module">
-      import init from "./pkg/party_dungeon.js";
-      init();
-    </script>
-  </body>
-</html>
+<script type="module">
+  import init from "./pkg/party_dungeon.js";
+  init();
+</script>
 ```
 
-The import is `./pkg/...`, not `/pkg/...` — that is what lets it run from a subpath.
+Bevy's wasm-bindgen glue appends its own `<canvas>` to the document body, so the hero must be a sibling that sits above it, not a wrapper that clips it. Give the hero `position: relative; z-index: 1` and make the canvas `position: fixed; inset: 0`.
+
+The import is `./pkg/...`, not `/pkg/...` — that is what lets it run from a subpath. Keep the two buttons inert; wiring "Play" to start the run is a later task.
 
 - [ ] **Step 3: Write the build script**
 
@@ -622,7 +612,7 @@ wasm-bindgen \
   --out-dir web/pkg \
   --target web \
   target/wasm32-unknown-unknown/wasm-release/party_dungeon.wasm
-echo "Built web/pkg — serve with: python3 -m http.server 8080 -d web"
+echo "Built web/pkg — serve with: python3 -m http.server 8082 -d web"
 ```
 
 `chmod +x game/scripts/build-web.sh`.
@@ -631,9 +621,9 @@ echo "Built web/pkg — serve with: python3 -m http.server 8080 -d web"
 
 ```bash
 ./scripts/build-web.sh
-python3 -m http.server 8080 -d web &
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/            # 200
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/pkg/party_dungeon.js   # 200
+python3 -m http.server 8082 -d web &
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8082/            # 200
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8082/pkg/party_dungeon.js   # 200
 ```
 
 - [ ] **Step 5: Prove the paths are relative**
@@ -643,7 +633,7 @@ Expected: `0` for both files. Any absolute path here breaks the itch.io upload l
 
 - [ ] **Step 6: Check it in a browser**
 
-Open `http://localhost:8080/`, hold W. Expected: the capsule moves, the frame rate is stable, the console has no errors. WebGL2 is Bevy's default; do not add the `webgpu` feature for this slice.
+Open `http://localhost:8082/`, hold W. Expected: the capsule moves, the frame rate is stable, the console has no errors. WebGL2 is Bevy's default; do not add the `webgpu` feature for this slice.
 
 - [ ] **Step 7: Commit**
 
@@ -900,7 +890,7 @@ Pushing needs a remote. If there is none, leave the commit local and report that
 Sections, one command block each, with the prerequisites inline:
 
 - Desktop: `cargo run -p party-dungeon`
-- Web: `./scripts/build-web.sh` then `python3 -m http.server 8080 -d web`
+- Web: `./scripts/build-web.sh` then `python3 -m http.server 8082 -d web`
 - Android: the two commands from Task 8 plus `adb install`
 - iOS: `cd ios && make run` (macOS only)
 - Tests: `cargo test --workspace`
