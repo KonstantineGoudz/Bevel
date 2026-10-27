@@ -187,8 +187,8 @@ const blueprint = `{
   <Section title="Assets are descriptions, not geometry">
     <p class="lede" style="font-size:16px; margin-bottom:18px">
       Meshes, textures, materials and the links between them live in the same
-      database as everything else &mdash; as descriptions. Enough to place,
-      cull, collide with and validate a thing; not enough to be the thing.
+      database as everything else &mdash; as descriptions, plus the handful of
+      vertices that collision actually needs.
     </p>
     <div class="grid">
       <Card status="decided" title="Nothing is ever deleted" tag="Yours">
@@ -202,7 +202,7 @@ const blueprint = `{
       <Card status="decided" title="The row is the description" tag="Yours">
         <p>
           Kind, parameters, bounding box, vertex count, material references.
-          Not a vertex buffer. The database holds what you need to reason about
+          Not a render buffer. The database holds what you need to reason about
           an object without holding the object.
         </p>
       </Card>
@@ -211,44 +211,75 @@ const blueprint = `{
           A kit of primitives with parameters &mdash; box, cylinder, arch,
           bevel &mdash; is enough for the client to generate the mesh at load.
           This is the fork: a kit keeps metadata-only honest, arbitrary uploads
-          would drag the bytes back in.
+          would drag the full bytes back in.
         </p>
       </Card>
-      <Card status="guess" title="Bounds are the server's physics proxy">
+      <Card status="decided" title="Collision gets vertices, but a handful" tag="Yours">
         <p>
-          An AABB or OBB is all the server needs for collision, reachability,
-          spawn checks and culling. Authority never depends on triangles.
+          Bounds are too coarse to walk on. A small convex proxy &mdash; tens of
+          points, not thousands &mdash; is stored per prefab so floors, ramps and
+          ledges can be stood on and blocked correctly.
         </p>
       </Card>
-      <Card status="guess" title="Hash the description">
+    </div>
+    <div class="grid" style="margin-top:16px">
+      <Card status="guess" title="Bounds cull, hulls collide">
         <p>
-          Canonical parameters hashed with <code>sha256</code>. The same crate
-          authored by two players is one row, and references stay stable
-          because the description doesn't change once written.
+          Broadphase stays an AABB/OBB check, which is free. Narrowphase uses a
+          few convex hulls per prefab, quantized to the bounding box so the
+          whole proxy fits in a couple of kilobytes.
         </p>
       </Card>
-      <Card status="guess" title="Forever is affordable at this size">
+      <Card status="guess" title="The proxy is authored, not derived">
         <p>
-          A description row is kilobytes. Keeping every asset, revision and
-          instance forever is a rounding error precisely because the vertices
-          are not in the database. The retention rule and the storage rule
-          depend on each other.
+          If the server built collision from the render mesh at load, it would
+          need the render mesh &mdash; and metadata-only storage would be a
+          fiction. The proxy is baked once at publish and stored.
+        </p>
+      </Card>
+      <Card status="guess" title="One shape, both sides">
+        <p>
+          Client and server collide against the same stored hulls. Anything else
+          and the server's idea of where a player can stand drifts from what
+          they see, which is the bug nobody can reproduce.
+        </p>
+      </Card>
+      <Card status="guess" title="The proxy wins arguments">
+        <p>
+          Where the render mesh and the proxy disagree, movement follows the
+          proxy. A player will occasionally clip a visual edge or walk through a
+          gap that looks solid. That is the price of not shipping vertices.
+        </p>
+      </Card>
+      <Card status="guess" title="Hash the description, proxy included">
+        <p>
+          Canonical parameters plus the collision hull, hashed with
+          <code>sha256</code>. Two players authoring the same crate with the
+          same collision share one row.
+        </p>
+      </Card>
+      <Card status="guess" title="Forever is still affordable">
+        <p>
+          A description plus a quantized hull is kilobytes. Keeping every asset,
+          revision and instance forever stays a rounding error, because the
+          vertices that would have made it expensive are not there.
         </p>
       </Card>
     </div>
     <div class="grid" style="margin-top:16px">
       <Card status="guess" title="Empty of bytes, but not of consequences">
         <p>
-          No vertex data means a blueprint can't be rendered by a client that
-          doesn't know the kit, and a kit change silently restyles old content.
-          Both are acceptable only because the kit is ours and versioned.
+          No render data means a client that doesn't know the kit can't draw a
+          blueprint, and a kit change silently restyles old content. Both are
+          acceptable only because the kit is ours and versioned.
         </p>
       </Card>
       <Card status="guess" title="Validation happens on the description">
         <p>
-          Vertex budgets, texture sizes and bounds checks run before a row is
-          written. Player content is still content from a stranger &mdash; it
-          just arrives as parameters instead of a binary.
+          Vertex budgets, texture sizes, hull counts and bounds checks run
+          before a row is written. Player content is still content from a
+          stranger &mdash; it just arrives as parameters and a hull instead of a
+          binary.
         </p>
       </Card>
     </div>
@@ -267,7 +298,7 @@ const blueprint = `{
         <li><b>dungeon_visits</b> &mdash; traffic through a player's base. The point of opening the doors.</li>
         <li><b>items</b> &mdash; instances: definition, level, runes, stats, crafted_by, location.</li>
         <li><b>item_definitions</b>, <b>runes</b> &mdash; the crafting catalogue, data not code.</li>
-        <li><b>assets</b> &mdash; hash, kind, parameters, bounds, counts, material refs. No vertices.</li>
+        <li><b>assets</b> &mdash; hash, kind, parameters, bounds, counts, material refs, plus a small collision hull. No render mesh.</li>
         <li><b>materials</b> &mdash; the texture slots: albedo, normal, roughness, and their asset ids.</li>
         <li><b>prefabs</b> &mdash; mesh + material + scale + collision. What blueprints place.</li>
         <li><b>runs</b> &mdash; party, instance, outcome. No seed here any more.</li>
@@ -338,10 +369,16 @@ const blueprint = `{
           everyone.
         </li>
         <li>
+          <b>How small is "very small"?</b> A collision proxy of 32 points per
+          prefab and one of 2,000 are both "small" next to a render mesh and
+          behave very differently on a ramp. The budget is a gameplay number,
+          not a storage one.
+        </li>
+        <li>
           <b>Can authors upload a mesh, or only compose the kit?</b> Metadata-only
           storage assumes the kit. The moment someone imports their own model,
-          bytes exist somewhere and the "no vertices" rule has an exception to
-          name.
+          render bytes exist somewhere and the "no vertices" rule has an
+          exception to name.
         </li>
         <li>
           <b>Do visitors' changes persist in someone's base?</b> A visitor
