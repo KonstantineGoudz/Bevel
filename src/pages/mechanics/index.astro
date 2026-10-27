@@ -1,0 +1,55 @@
+---
+import Base from "../../layouts/Base.astro";
+import SubNav from "../../components/SubNav.astro";
+import Section from "../../components/Section.astro";
+import Card from "../../components/Card.astro";
+---
+
+<Base title="Mechanics — Party Dungeon" current="/mechanics/">
+  <SubNav current="/mechanics/" />
+
+  <header>
+    <div class="kicker">How it plays</div>
+    <h1>Mechanics.</h1>
+    <p class="lede">
+      Four systems the game is built on, one page each. Cyan is settled, amber
+      is still my guess.
+    </p>
+  </header>
+
+  <Section title="The systems">
+    <div class="grid">
+      <Card href="/mechanics/party/" title="The party">
+        <p>
+          Classes with their own skills. Building the party is a core verb, not
+          a character-select screen.
+        </p>
+      </Card>
+      <Card href="/mechanics/maps/" title="Maps and portals">
+        <p>
+          Procedurally generated maps, entered only by portal, in real 3D space.
+        </p>
+      </Card>
+      <Card href="/mechanics/dungeon/" title="The dungeon you own">
+        <p>
+          The base is a place you build in, stock, and open to the public.
+        </p>
+      </Card>
+      <Card href="/mechanics/crafting/" title="Crafting">
+        <p>
+          Smithing, cooking, and alchemy, each held by a class. Items are
+          designed by hand, not picked from a recipe.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="Underneath">
+    <Card status="decided" title="Built in Bevy" tag="Yours">
+      <p>
+        Rust + Bevy. Greenfield &mdash; the working directory is empty, so every
+        structure is a choice we still get to make.
+      </p>
+    </Card>
+  </Section>
+</Base>

@@ -1,0 +1,61 @@
+---
+import Base from "../layouts/Base.astro";
+import Section from "../components/Section.astro";
+import Card from "../components/Card.astro";
+---
+
+<Base title="Open questions — Party Dungeon" current="/open/">
+  <header>
+    <div class="kicker">Still undecided</div>
+    <h1>What we don't know yet.</h1>
+    <p class="lede">
+      Questions that change what gets built, listed roughly in the order they
+      need answers.
+    </p>
+  </header>
+
+  <Section title="Still open">
+    <Card>
+      <ul class="plain">
+        <li>
+          <b>Session shape.</b> How long is a run, and what does a full session
+          look like from login to logoff?
+        </li>
+        <li>
+          <b>Who's in the map with you.</b> Allies against the map, or a rival
+          party competing in it?
+        </li>
+        <li>
+          <b>Why visit an open dungeon.</b> Look, fight, trade, steal &mdash;
+          which one is the first one?
+        </li>
+        <li>
+          <b>Combat feel.</b> Real-time action with cooldowns, or something
+          slower?
+        </li>
+        <li>
+          <b>Netcode shape.</b> Client-server, host-authoritative, or
+          peer-to-peer &mdash; and how many players at once?
+        </li>
+        <li>
+          <b>Progression.</b> What carries between runs besides the dungeon
+          itself?
+        </li>
+      </ul>
+    </Card>
+  </Section>
+
+  <Section title="Open thread">
+    <Card>
+      <p class="quote">
+        "The user will have a personal dungeon that can be opened to the
+        public."
+      </p>
+      <p>
+        That sentence puts a door on the base. It means the dungeon is a
+        <strong>venue</strong> with traffic, not a menu with upgrades &mdash;
+        and it's the piece most likely to define what this game is.
+      </p>
+    </Card>
+  </Section>
+</Base>

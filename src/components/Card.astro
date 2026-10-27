@@ -1,0 +1,27 @@
+---
+type Status = "decided" | "guess" | "open";
+
+interface Props {
+  status?: Status;
+  title?: string;
+  tag?: string;
+  href?: string;
+}
+
+const { status, title, tag, href } = Astro.props;
+
+const Tag = href ? "a" : "div";
+---
+
+<Tag class="card" href={href}>
+  {
+    title && (
+      <h3>
+        {status && <span class={`dot ${status}`} />}
+        {title}
+        {tag && <span class={`tag ${status}`}>{tag}</span>}
+      </h3>
+    )
+  }
+  <slot />
+</Tag>

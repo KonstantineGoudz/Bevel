@@ -1,0 +1,133 @@
+---
+import Base from "../../layouts/Base.astro";
+import SubNav from "../../components/SubNav.astro";
+import Section from "../../components/Section.astro";
+import Card from "../../components/Card.astro";
+---
+
+<Base title="Crafting — Party Dungeon" current="/mechanics/crafting/">
+  <SubNav current="/mechanics/crafting/" />
+
+  <header>
+    <div class="kicker"><a href="/mechanics/">Mechanics</a> / Crafting</div>
+    <h1>You don't pick a recipe. You aim a weapon.</h1>
+    <p class="lede">
+      Each class crafts different things. Good gear is designed by hand in a
+      crafting UI, then sold to somebody who can actually hold it.
+    </p>
+  </header>
+
+  <Section title="Three disciplines, held by classes">
+    <div class="grid">
+      <Card status="decided" title="Smithing" tag="Class-locked">
+        <p>
+          Weapons and gear. The discipline with the most visible output, and the
+          one the item designer below is written around.
+        </p>
+      </Card>
+      <Card status="decided" title="Cooking" tag="Class-locked">
+        <p>
+          Food and the buffs that come with it. A party that eats better fights
+          better, for a while.
+        </p>
+      </Card>
+      <Card status="decided" title="Alchemy" tag="Class-locked">
+        <p>
+          Potions and reagents. The consumables you burn through in a run, made
+          at home between them.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="An item is three layers">
+    <div class="grid">
+      <Card status="decided" title="1 · Type" tag="Yours">
+        <p>
+          Pick the kind of weapon to make. The type fixes the base and the
+          <strong>materials</strong> it needs &mdash; a sword and a staff do not
+          share a bill.
+        </p>
+      </Card>
+      <Card status="decided" title="2 · Runes" tag="Yours">
+        <p>
+          Runes add the effects. Each one costs <strong>resources</strong>, so
+          runes compete with each other for the same budget.
+        </p>
+      </Card>
+      <Card status="decided" title="3 · Requirements" tag="Yours">
+        <p>
+          Every rune raises the <strong>stat bar</strong> for whoever wields the
+          finished item &mdash; mana, strength, and the rest.
+        </p>
+      </Card>
+      <Card status="guess" title="Level is the budget, design is the spend">
+        <p>
+          Levels set how much an item <em>can</em> be. The design decides where
+          it goes. An NPC sword spends that budget evenly; a player smith can
+          spend it on one purpose.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="The stat gate">
+    <div class="grid">
+      <Card status="guess" title="No twinking">
+        <p>
+          A low-level player with endless materials still can't kit themselves
+          out in endgame gear. The ceiling isn't gold or skill &mdash; it's their
+          own stat line. Nobody gets carried by a gifted weapon.
+        </p>
+      </Card>
+      <Card status="guess" title="The smith's market points upward">
+        <p>
+          Great designs get sold to players who can hold them, so the best
+          crafters serve the top of the level curve. The bottom buys NPC stock.
+        </p>
+      </Card>
+      <Card status="guess" title="Requirements are the balance lever">
+        <p>
+          Same materials, same level, different rune mix: one sword is a
+          strength weapon, another a mana weapon. That's how one discipline
+          covers every class without a recipe per class.
+        </p>
+      </Card>
+      <Card status="guess" title="Two runes, one wielder">
+        <p>
+          Runes that want the same stats can't coexist, even if the smith can
+          pay for both. The wielder is a slot, and the design has to fit in it.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="Finding a maker">
+    <div class="split">
+      <Card status="decided" title="A party is only half self-sufficient" tag="Yours">
+        <p>
+          Class-gated crafting means your party will always be missing a
+          discipline or two. When you want a new sword and nobody in the party
+          is a smith, you <strong>find one or buy one</strong>.
+        </p>
+      </Card>
+      <Card status="decided" title="Players and NPCs both sell" tag="Yours">
+        <p>
+          NPC vendors set a floor: competent, general, always available. Player
+          crafters are the ones who can outclass them &mdash; with a design
+          aimed at a purpose, not just a higher level.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="Where it happens">
+    <Card status="guess" title="A place, not a menu">
+      <p>
+        The forge, the kitchen, the lab &mdash; stations you build in your own
+        dungeon. Which also means the place you craft in is the place visitors
+        walk into.
+      </p>
+    </Card>
+  </Section>
+</Base>

@@ -1,0 +1,30 @@
+---
+interface Props {
+  current: string;
+}
+
+const { current } = Astro.props;
+
+const items = [
+  { href: "/mechanics/", label: "All" },
+  { href: "/mechanics/party/", label: "The party" },
+  { href: "/mechanics/maps/", label: "Maps and portals" },
+  { href: "/mechanics/dungeon/", label: "Your dungeon" },
+  { href: "/mechanics/crafting/", label: "Crafting" },
+];
+---
+
+<ul class="subnav">
+  {
+    items.map((item) => (
+      <li>
+        <a
+          href={item.href}
+          aria-current={current === item.href ? "page" : undefined}
+        >
+          {item.label}
+        </a>
+      </li>
+    ))
+  }
+</ul>

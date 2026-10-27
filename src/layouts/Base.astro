@@ -1,0 +1,30 @@
+---
+import "../styles/global.css";
+import Nav from "../components/Nav.astro";
+
+interface Props {
+  title: string;
+  current: string;
+}
+
+const { title, current } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+  </head>
+  <body>
+    <div class="wrap">
+      <Nav current={current} />
+      <slot />
+      <footer>
+        <span>Working notes from brainstorming &middot; not a spec yet</span>
+        <span>Updated 27 Oct 2026</span>
+      </footer>
+    </div>
+  </body>
+</html>

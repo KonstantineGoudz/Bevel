@@ -1,0 +1,49 @@
+---
+import Base from "../../layouts/Base.astro";
+import SubNav from "../../components/SubNav.astro";
+import Section from "../../components/Section.astro";
+import Card from "../../components/Card.astro";
+---
+
+<Base title="Your dungeon — Party Dungeon" current="/mechanics/dungeon/">
+  <SubNav current="/mechanics/dungeon/" />
+
+  <header>
+    <div class="kicker"><a href="/mechanics/">Mechanics</a> / Your dungeon</div>
+    <h1>The base is a place, not a menu.</h1>
+    <p class="lede">
+      Everything you find out there comes home to here &mdash; and here has a
+      front door.
+    </p>
+  </header>
+
+  <Section title="The dungeon you own">
+    <div class="grid">
+      <Card status="decided" title="Personal dungeon as base" tag="Yours">
+        <p>
+          The base isn't abstract &mdash; it's a <strong>place</strong>, a
+          dungeon the player owns, builds in, and can
+          <strong>open to the public</strong>.
+        </p>
+      </Card>
+      <Card status="decided" title="Teleport anything home" tag="Yours">
+        <p>
+          While exploring, a player can <strong>send anything back</strong> to
+          their own dungeon. No carry limit standoff &mdash; the risk is being
+          out there, not what fits in a bag.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="What the base is for">
+    <div class="grid">
+      <Card href="/mechanics/crafting/" status="guess" title="A supply line">
+        <p>
+          Everything you send home feeds the disciplines. The dungeon is where
+          loot turns into gear, food, and potions.
+        </p>
+      </Card>
+    </div>
+  </Section>
+</Base>

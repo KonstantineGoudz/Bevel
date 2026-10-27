@@ -1,0 +1,47 @@
+---
+import Base from "../../layouts/Base.astro";
+import SubNav from "../../components/SubNav.astro";
+import Section from "../../components/Section.astro";
+import Card from "../../components/Card.astro";
+---
+
+<Base title="Maps and portals — Party Dungeon" current="/mechanics/maps/">
+  <SubNav current="/mechanics/maps/" />
+
+  <header>
+    <div class="kicker"><a href="/mechanics/">Mechanics</a> / Maps and portals</div>
+    <h1>Every door is a portal.</h1>
+    <p class="lede">
+      Price of entry: maps are generated, not authored. Price of leaving: you
+      walk back through a portal or you send the loot without you.
+    </p>
+  </header>
+
+  <Section title="Maps and portals">
+    <div class="grid">
+      <Card status="decided" title="Portals are the only door" tag="Yours">
+        <p>
+          Maps are <strong>procedurally generated</strong>.
+          <strong>Portals</strong> are how you enter and exit them.
+        </p>
+      </Card>
+      <Card status="decided" title="Verticality is a requirement" tag="Yours">
+        <p>
+          Top-down camera, but real <strong>3D space</strong>: height, ledges,
+          ramps, drops. Not a flat plane with a tilted view.
+        </p>
+      </Card>
+      <Card status="guess" title="Why verticality matters">
+        <p>
+          Height should change the fight: <strong>high ground</strong>,
+          knockbacks off ledges, sight lines, classes that own a layer (the one
+          who flies, the one who climbs, the one who flattens).
+        </p>
+        <p>
+          Which means generated maps have to be <strong>stacked</strong> and
+          connected, not carved flat.
+        </p>
+      </Card>
+    </div>
+  </Section>
+</Base>

@@ -1,0 +1,21 @@
+---
+const steps = [
+  "Prepare at your dungeon",
+  "Take a portal out",
+  "Generated map, real 3D space",
+  "Fight as a party",
+  "Teleport loot home",
+  "Build, upgrade, open the doors",
+];
+---
+
+<div class="loop">
+  {
+    steps.map((step, i) => (
+      <div class="node">
+        <span class="n">{String(i + 1).padStart(2, "0")}</span>
+        <span class="t">{step}</span>
+      </div>
+    ))
+  }
+</div>

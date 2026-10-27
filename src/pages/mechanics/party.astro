@@ -1,0 +1,54 @@
+---
+import Base from "../../layouts/Base.astro";
+import SubNav from "../../components/SubNav.astro";
+import Section from "../../components/Section.astro";
+import Card from "../../components/Card.astro";
+---
+
+<Base title="The party — Party Dungeon" current="/mechanics/party/">
+  <SubNav current="/mechanics/party/" />
+
+  <header>
+    <div class="kicker"><a href="/mechanics/">Mechanics</a> / The party</div>
+    <h1>You build the party, not the character.</h1>
+    <p class="lede">
+      Classes carry their own skills. The interesting unit is the combination,
+      not the individual.
+    </p>
+  </header>
+
+  <Section title="The party">
+    <div class="grid">
+      <Card status="decided" title="Party building" tag="Yours">
+        <p>
+          Different <strong>classes</strong>, each with their own
+          <strong>skills</strong>. Building the party is a core verb, not a
+          character-select screen.
+        </p>
+      </Card>
+      <Card status="guess" title="Why the party matters">
+        <p>
+          The fun comes from <strong>combinations</strong>: skills that set each
+          other up, a party that is more than the sum of its classes. A player
+          alone should feel incomplete.
+        </p>
+        <p>
+          Which means the interesting failure is a <strong>bad party</strong>,
+          not a bad player.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="What the party decides">
+    <div class="grid">
+      <Card href="/mechanics/crafting/" status="decided" title="Which disciplines you have" tag="Yours">
+        <p>
+          Smithing, cooking, and alchemy are held by classes. Your party
+          composition decides what you can make &mdash; and what you have to
+          buy.
+        </p>
+      </Card>
+    </div>
+  </Section>
+</Base>

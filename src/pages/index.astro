@@ -1,0 +1,28 @@
+---
+import Base from "../layouts/Base.astro";
+import Section from "../components/Section.astro";
+import Loop from "../components/Loop.astro";
+---
+
+<Base title="Party Dungeon — Design Notes" current="/">
+  <header>
+    <div class="kicker">Design notes &middot; 27 Oct 2026 &middot; working</div>
+    <h1>A party you build, a dungeon you own.</h1>
+    <p class="lede">
+      Top-down 3D multiplayer in Bevy. You assemble a party of classes, portal
+      into procedurally generated maps, fight through levels stacked with
+      verticality, and send everything you find home &mdash; to a personal
+      dungeon you can open to other players.
+    </p>
+    <div class="status">
+      <span class="chip"><b>Engine</b> Bevy &middot; Rust</span>
+      <span class="chip"><b>View</b> Top-down 3D</span>
+      <span class="chip"><b>Mode</b> Multiplayer</span>
+      <span class="chip"><b>Status</b> Brainstorm &mdash; not approved</span>
+    </div>
+  </header>
+
+  <Section title="The loop, as understood">
+    <Loop />
+  </Section>
+</Base>
