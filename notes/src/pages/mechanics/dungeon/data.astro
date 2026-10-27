@@ -10,6 +10,7 @@ const instanceState = `{
   "seed": 18446744073709551615,      // nullable: authored maps have none
   "born_at": "2026-10-27T17:40:00Z",
   "expires_at": "2026-10-27T18:40:00Z",
+  "status": "live",                  // live -> closing -> closed
   "state": {
     "taken":        ["chest-12", "chest-19"],
     "opened":       ["door-east"],
@@ -158,25 +159,26 @@ const blueprint = `{
           a running timer.
         </p>
       </Card>
-      <Card status="guess" title="The reaper is a query">
+      <Card status="decided" title="Expiry closes the door, not the run" tag="Yours">
         <p>
-          Expiry needs no scheduler: anything with
-          <code>expires_at &lt; now()</code> and <code>status = 'live'</code> is
-          closed, its delta archived, and its row kept for the record.
+          When the clock runs out, <strong>nobody new gets in</strong>. Everyone
+          already inside stays until they choose to leave &mdash; no ejection,
+          no forfeited loot. The instance ends when the last of them walks out.
         </p>
       </Card>
-      <Card status="bet" title="Open: what expiry does to the people inside">
+      <Card status="guess" title="The reaper is a query, and it waits">
         <p>
-          Ejected with their loot, killed where they stand, or given a warning
-          and a countdown? This is a gameplay decision and it changes the
-          schema's <code>status</code> values.
+          <code>expires_at &lt; now()</code> on a live instance flips it to
+          <code>closing</code>, not <code>closed</code>. It only closes when it
+          has no participants left, so the state machine is three values and
+          no timers.
         </p>
       </Card>
-      <Card status="bet" title="Open: does the clock run while empty">
+      <Card status="guess" title="One door check, no special cases">
         <p>
-          A hard deadline is simple. A clock that pauses when nobody is inside
-          is kinder, and needs a second column to accumulate
-          <code>time_spent</code>.
+          Entry is allowed exactly while <code>status = 'live'</code>. Expiry
+          and exclusivity both become the same guard, instead of two rules that
+          can disagree under load.
         </p>
       </Card>
     </div>
@@ -190,8 +192,8 @@ const blueprint = `{
         <li><b>parties</b> &mdash; the assembled roster. Shape still open, see below.</li>
         <li><b>dungeons</b> &mdash; a player's base: owner, layout, door policy. Never expires.</li>
         <li><b>blueprints</b> &mdash; procedural params, authored parts, author, reusable flag.</li>
-        <li><b>instances</b> &mdash; blueprint, optional seed, state <code>jsonb</code>, born/expires, status.</li>
-        <li><b>instance_participants</b> &mdash; who is or was inside, and when they left.</li>
+        <li><b>instances</b> &mdash; blueprint, optional seed, state <code>jsonb</code>, born/expires, status: live, closing, closed.</li>
+        <li><b>instance_participants</b> &mdash; who entered, when they left. "No participants" is what closes an instance.</li>
         <li><b>dungeon_visits</b> &mdash; traffic through a player's base. The point of opening the doors.</li>
         <li><b>items</b> &mdash; instances: definition, level, runes, stats, crafted_by, location.</li>
         <li><b>item_definitions</b>, <b>runes</b> &mdash; the crafting catalogue, data not code.</li>
@@ -233,6 +235,19 @@ const blueprint = `{
   <Section title="Open questions">
     <Card>
       <ul class="plain">
+        <li>
+          <b>What if nobody ever leaves?</b> A closing instance waits for its
+          last participant, and a disconnected or AFK player is still a
+          participant. Force-close after a grace period, or on disconnect
+          timeout &mdash; the schema needs an answer before a dungeon can hang
+          open forever.
+        </li>
+        <li>
+          <b>Does the clock run while the dungeon is empty?</b> An instance can
+          expire with nobody inside, which closes it immediately. Pausing the
+          clock when empty is kinder, and costs a <code>time_spent</code>
+          column.
+        </li>
         <li>
           <b>Is a party one player's roster, or four players?</b> Decides
           whether <code>parties</code> points at an account or a join table.
