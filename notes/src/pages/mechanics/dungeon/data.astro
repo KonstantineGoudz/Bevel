@@ -4,30 +4,32 @@ import SubNav from "../../../components/SubNav.astro";
 import Section from "../../../components/Section.astro";
 import Card from "../../../components/Card.astro";
 
-const runMap = `{
-  "generator": "stacked-rooms@1",   // bump when output changes
-  "seed": 18446744073709551615,     // u64, from the server only
-  "params": {
-    "depth": 3,                     // stacked floors
-    "level_band": [4, 7],           // party level the map is aimed at
-    "biome": "crypt",
-    "party_size": 4
-  },
-  "spawn": [0.0, 0.0, 0.0],
-  "exit":  [12.0, 6.5, -3.0]        // the way home, always a portal
+const instanceState = `{
+  "instance_id": "01J9...",          // one live copy
+  "blueprint_id": "crypt-03",
+  "seed": 18446744073709551615,      // nullable: authored maps have none
+  "born_at": "2026-10-27T17:40:00Z",
+  "expires_at": "2026-10-27T18:40:00Z",
+  "state": {
+    "taken":        ["chest-12", "chest-19"],
+    "opened":       ["door-east"],
+    "cleared":      ["boss-03"],
+    "portal":       "open"
+  }
 }`;
 
-const dungeonLayout = `{
-  "layout_version": 3,
-  "extent": [48, 24, 48],           // metres, one plot per player
-  "floors": 2,
-  "stations": [
-    { "kind": "forge",   "at": [6.0, 0.0, 2.0] },
-    { "kind": "kitchen", "at": [9.0, 0.0, 2.0] },
-    { "kind": "lab",     "at": [12.0, 0.0, 2.0] }
-  ],
-  "portal_anchor": [24.0, 0.0, 40.0],
-  "door": { "policy": "public", "listed": true }
+const blueprint = `{
+  "id": "crypt-03",
+  "kind": "hybrid",                  // procedural | authored | hybrid
+  "generator": "stacked-rooms@1",
+  "params": { "depth": 3, "level_band": [4, 7], "biome": "crypt" },
+  "template": {                       // authored parts, reused verbatim
+    "entrance": "crypt-mouth-a",
+    "boss_room": "ossuary-b",
+    "modules": ["well-shaft", "collapsed-hall"]
+  },
+  "author": null,                     // a player for hand-built dungeons
+  "reusable": true
 }`;
 ---
 
@@ -39,100 +41,142 @@ const dungeonLayout = `{
       <a href="/mechanics/">Mechanics</a> /
       <a href="/mechanics/dungeon/">Your dungeon</a> / Data &amp; schema
     </div>
-    <h1>Two maps, and only one of them is stored.</h1>
+    <h1>A dungeon is a blueprint, a clock, and a list of what's gone.</h1>
     <p class="lede">
-      A run map is a seed. Your dungeon is a document. They look like the same
-      kind of thing and behave nothing alike &mdash; mixing them up is the
-      expensive mistake in this schema.
+      Generated maps were never the hard part &mdash; a seed could rebuild one.
+      A dungeon with a timed life and loot already taken can't be rebuilt from
+      anything but itself.
     </p>
   </header>
 
-  <Section title="Two kinds of map data">
-    <div class="split">
-      <Card status="decided" title="Run maps are generated" tag="Yours">
-        <p>
-          Maps you portal into are <strong>procedurally generated</strong>.
-          Nobody authored them, and no two runs need the same one.
-        </p>
-      </Card>
-      <Card status="guess" title="So a run map is stored as a seed">
-        <p>
-          The server keeps <code>seed</code>, <code>generator_version</code>,
-          and the parameters it was called with &mdash; then regenerates the
-          geometry on demand. The map itself is never a row.
-        </p>
-      </Card>
-      <Card status="decided" title="Your dungeon is authored" tag="Yours">
-        <p>
-          The base is a <strong>place you build in</strong>. A seed cannot
-          reproduce edits nobody has made yet.
-        </p>
-      </Card>
-      <Card status="guess" title="So your dungeon is a document">
-        <p>
-          Its layout is stored, versioned, and loaded back verbatim. This is
-          the only dungeon geometry that touches the database.
-        </p>
-      </Card>
-    </div>
-  </Section>
-
-  <Section title="What a run map is made of">
-    <p class="lede" style="font-size:16px; margin-bottom:18px">
-      Deterministic input, one output. Same version and same seed must produce
-      the same map on every machine, or replays and anti-cheat both fall apart.
-    </p>
-    <pre><code>{runMap}</code></pre>
-    <div class="grid" style="margin-top:16px">
-      <Card status="guess" title="Version is part of the identity">
-        <p>
-          Changing the generator changes every map. Old runs keep the version
-          they were created with, so <code>generator_version</code> is a
-          column, not a constant.
-        </p>
-      </Card>
-      <Card status="guess" title="The server hands out the seed">
-        <p>
-          A client that picks its own seed picks its own loot. The seed is
-          generated server-side and returned with the run record.
-        </p>
-      </Card>
-    </div>
-  </Section>
-
-  <Section title="What your dungeon is made of">
-    <pre><code>{dungeonLayout}</code></pre>
-    <div class="grid" style="margin-top:16px">
-      <Card status="guess" title="One document, not twenty tables">
-        <p>
-          Placed objects are a list inside one <code>jsonb</code> column.
-          Normalising every chair into a row buys nothing while the editor is
-          still being designed.
-        </p>
-      </Card>
-      <Card status="guess" title="Versioned on every save">
-        <p>
-          <code>layout_version</code> increments per write. Visitors load a
-          snapshot; if the owner edits mid-visit, the visit keeps what it
-          entered.
-        </p>
-      </Card>
-    </div>
-  </Section>
-
-  <Section title="Who owns the truth">
+  <Section title="Three things we were calling a dungeon">
     <div class="grid">
-      <Card status="guess" title="The server simulates, the client renders">
+      <Card status="decided" title="The blueprint" tag="Yours">
         <p>
-          Loot is teleported home, dungeons are opened to strangers, items are
-          sold. Every one of those is a trust boundary, so the server decides
-          and the database is the record.
+          What the map <em>is</em>: a generator call, a hand-built layout, or a
+          mix. Reusable, versioned, never mutates in play.
         </p>
       </Card>
-      <Card status="guess" title="Runs are records, not state">
+      <Card status="decided" title="The instance" tag="Yours">
         <p>
-          A run is a row that opens and closes. Its live state lives in memory
-          on the server; only the outcome is written.
+          One live copy, with a <strong>timed life</strong>. It changes as
+          people play in it, and those changes have to outlive the process
+          that served them.
+        </p>
+      </Card>
+      <Card status="decided" title="The base" tag="Yours">
+        <p>
+          A player's own dungeon: an authored blueprint that never expires,
+          because it's the place you come home to.
+        </p>
+      </Card>
+      <Card status="bet" title="Revised: a seed is not enough">
+        <p>
+          The first pass of this page said a run map could be stored as a seed.
+          That held only while the map was read-only. With a clock and loot
+          that stays taken, the instance is the record.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="Blueprints come from three places">
+    <pre style="margin-bottom:16px"><code>{blueprint}</code></pre>
+    <div class="split">
+      <Card status="decided" title="Procedural" tag="Yours">
+        <p>
+          Seed plus generator plus params. Rebuilding it is cheap and exact, so
+          the blueprint stores the call, not the geometry.
+        </p>
+      </Card>
+      <Card status="decided" title="Authored" tag="Yours">
+        <p>
+          Hand-built, start to finish. It cannot be regenerated at all, so the
+          layout <strong>is</strong> stored &mdash; and can be reused to spawn
+          many instances of the same place.
+        </p>
+      </Card>
+      <Card status="decided" title="Hybrid, and reuse" tag="Yours">
+        <p>
+          Hand-authored pieces &mdash; an entrance, a boss room, a set of
+          modules &mdash; stitched together by the generator. The same authored
+          room can appear in a hundred different maps.
+        </p>
+      </Card>
+      <Card status="guess" title="A blueprint is a row, a layout is a document">
+        <p>
+          One table of blueprints, each holding its authored parts as
+          <code>jsonb</code>. Reference them by id from any instance; edit one
+          and every future instance changes, which is exactly what reuse means.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="An instance is a delta">
+    <p class="lede" style="font-size:16px; margin-bottom:18px">
+      Rebuild the static world from the blueprint, then replay what happened to
+      it. The expensive half is cheap again; only the changes are stored.
+    </p>
+    <pre><code>{instanceState}</code></pre>
+    <div class="grid" style="margin-top:16px">
+      <Card status="guess" title="Store what stays true after a restart">
+        <p>
+          Looted containers, opened doors, dead bosses, portal state. Not
+          players, not mobs, not physics &mdash; those live in memory and die
+          with the process, which is the correct outcome.
+        </p>
+      </Card>
+      <Card status="guess" title="Checkpoint on events, not on a tick">
+        <p>
+          A chest opens, a boss dies, a door unlocks: write then, plus a slow
+          heartbeat. A crash costs the last few seconds of play, never the
+          whole run.
+        </p>
+      </Card>
+      <Card status="guess" title="Claims are idempotent">
+        <p>
+          Loot is claimed by id. If a crash rolls the delta back, the same
+          chest cannot pay out twice to two different parties.
+        </p>
+      </Card>
+      <Card status="guess" title="The instance is the join point">
+        <p>
+          Runs, participants, and loot all point at the instance. The seed is
+          one nullable column on its blueprint, not the identity of anything.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="The clock">
+    <div class="grid">
+      <Card status="decided" title="Every instance expires" tag="Yours">
+        <p>
+          Dungeons have a timed life. <code>expires_at</code> is set when the
+          instance is born and survives restarts, because it's a timestamp, not
+          a running timer.
+        </p>
+      </Card>
+      <Card status="guess" title="The reaper is a query">
+        <p>
+          Expiry needs no scheduler: anything with
+          <code>expires_at &lt; now()</code> and <code>status = 'live'</code> is
+          closed, its delta archived, and its row kept for the record.
+        </p>
+      </Card>
+      <Card status="bet" title="Open: what expiry does to the people inside">
+        <p>
+          Ejected with their loot, killed where they stand, or given a warning
+          and a countdown? This is a gameplay decision and it changes the
+          schema's <code>status</code> values.
+        </p>
+      </Card>
+      <Card status="bet" title="Open: does the clock run while empty">
+        <p>
+          A hard deadline is simple. A clock that pauses when nobody is inside
+          is kinder, and needs a second column to accumulate
+          <code>time_spent</code>.
         </p>
       </Card>
     </div>
@@ -144,41 +188,43 @@ const dungeonLayout = `{
         <li><b>accounts</b> &mdash; one per player. Owns characters, dungeons, items.</li>
         <li><b>characters</b> &mdash; class, level, stats. The thing a run puts at risk.</li>
         <li><b>parties</b> &mdash; the assembled roster. Shape still open, see below.</li>
-        <li><b>dungeons</b> &mdash; owner, layout <code>jsonb</code>, <code>layout_version</code>, door policy.</li>
-        <li><b>dungeon_visits</b> &mdash; who walked in, when, what they bought. Traffic is the point of opening the doors.</li>
+        <li><b>dungeons</b> &mdash; a player's base: owner, layout, door policy. Never expires.</li>
+        <li><b>blueprints</b> &mdash; procedural params, authored parts, author, reusable flag.</li>
+        <li><b>instances</b> &mdash; blueprint, optional seed, state <code>jsonb</code>, born/expires, status.</li>
+        <li><b>instance_participants</b> &mdash; who is or was inside, and when they left.</li>
+        <li><b>dungeon_visits</b> &mdash; traffic through a player's base. The point of opening the doors.</li>
         <li><b>items</b> &mdash; instances: definition, level, runes, stats, crafted_by, location.</li>
         <li><b>item_definitions</b>, <b>runes</b> &mdash; the crafting catalogue, data not code.</li>
-        <li><b>runs</b> &mdash; seed, generator version, params, party, outcome.</li>
+        <li><b>runs</b> &mdash; party, instance, outcome. No seed here any more.</li>
         <li><b>listings</b> &mdash; market rows: item, seller, price, state.</li>
       </ul>
     </Card>
     <div class="grid" style="margin-top:16px">
       <Card status="guess" title="Postgres, and jsonb where it will churn">
         <p>
-          The game logic is Rust with <code>sqlx</code>. Layouts, stats, and
-          rune effects are <code>jsonb</code> until their shape stops moving;
-          anything queried or joined on gets a real column.
+          Rust and <code>sqlx</code>. Blueprint templates, instance state, and
+          item stats are <code>jsonb</code> until their shape stops moving;
+          anything joined or filtered on gets a real column.
         </p>
       </Card>
       <Card status="guess" title="Items are immutable; ownership moves">
         <p>
-          Runes and level are fixed at craft time. Selling or stashing changes
-          <code>owner</code> and <code>location</code> only &mdash; never the
-          item's identity. Otherwise a "used" sword means something different
-          every patch.
+          Runes and level are fixed at craft time. Selling or stashing rewrites
+          <code>owner</code> and <code>location</code> only, never the item's
+          identity.
         </p>
       </Card>
-      <Card status="guess" title="Dungeons soft-delete">
+      <Card status="guess" title="Instances archive, they don't vanish">
         <p>
-          Visitors have been there, items point at it, and runs reference it.
-          Deleting the plot leaves the record and marks it closed.
+          Expired state is kept, not deleted: it is the only witness to what a
+          party claims it found. Cheap rows, and disputes stop being he-said.
         </p>
       </Card>
-      <Card status="guess" title="No sharding yet">
+      <Card status="guess" title="Bases and instances stay separate tables">
         <p>
-          One database. A player owns one plot and a handful of items; the
-          write rate is nothing until dungeons get busy. Revisit when
-          <code>dungeon_visits</code> is the biggest table.
+          A player's dungeon is permanent and owned; an instance is temporary
+          and shared. One table with a nullable clock would invite queries that
+          forget which is which.
         </p>
       </Card>
     </div>
@@ -188,21 +234,24 @@ const dungeonLayout = `{
     <Card>
       <ul class="plain">
         <li>
-          <b>Is a party one player's roster, or four players?</b> This decides
-          whether <code>parties</code> points at an account or at a set of
-          accounts. Everything downstream changes with it.
+          <b>Is a party one player's roster, or four players?</b> Decides
+          whether <code>parties</code> points at an account or a join table.
+          Everything downstream moves with it.
         </li>
         <li>
-          <b>Do items need provenance?</b> "Crafted by the smith who sold it to
-          you" is a nice story and a join table. Is it a feature?
+          <b>Who authors a reusable dungeon, and who gets paid?</b> If players
+          can hand-build maps others run, the blueprint needs an owner and a
+          payout rule.
         </li>
         <li>
-          <b>Does the market hold escrow?</b> Listing an item has to take it
-          out of circulation, or two players sell the same sword.
+          <b>Do visitors' changes persist in someone's base?</b> A visitor
+          looting a chest in your open dungeon is either a permanent loss or a
+          reset on exit. Both are defensible; only one is cheap.
         </li>
         <li>
-          <b>What happens to a run when the server dies?</b> Roll back the run,
-          keep the loot, or keep nothing? This is the player-facing one.
+          <b>What happens to a run when the server dies?</b> Restore from the
+          last checkpoint, roll the run back, or keep nothing? This is the
+          player-facing one.
         </li>
       </ul>
     </Card>

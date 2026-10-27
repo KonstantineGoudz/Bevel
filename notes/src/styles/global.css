@@ -152,6 +152,7 @@ section { margin-bottom: 56px; }
 .dot.decided { background: var(--cyan); box-shadow: 0 0 0 4px #4fd1c522; }
 .dot.guess   { background: var(--amber); box-shadow: 0 0 0 4px #f0a63c22; }
 .dot.open    { background: var(--red);   box-shadow: 0 0 0 4px #f2707a22; }
+.dot.bet     { background: var(--violet); box-shadow: 0 0 0 4px #a78bfa22; }
 .card p { margin: 0; color: var(--muted); }
 .card p + p { margin-top: 10px; }
 .card strong { color: var(--ink); font-weight: 600; }
@@ -187,6 +188,7 @@ ul.plain li b { color: var(--ink); font-weight: 600; }
 .tag.decided { color: var(--cyan); }
 .tag.guess { color: var(--amber); }
 .tag.open { color: var(--red); }
+.tag.bet { color: var(--violet); }
 
 .split { display: grid; grid-template-columns: 1.05fr .95fr; gap: 16px; }
 @media (max-width: 820px) { .split { grid-template-columns: 1fr; } }
