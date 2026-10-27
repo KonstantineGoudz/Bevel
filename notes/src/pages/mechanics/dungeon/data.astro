@@ -184,6 +184,63 @@ const blueprint = `{
     </div>
   </Section>
 
+  <Section title="Assets are rows too">
+    <p class="lede" style="font-size:16px; margin-bottom:18px">
+      Meshes, textures, materials and the links between them live in the same
+      database as everything else. That is the requirement, and it is what makes
+      player-built dungeons possible at all &mdash; content nobody has shipped
+      cannot be a file in the build.
+    </p>
+    <div class="grid">
+      <Card status="decided" title="The asset graph is relational" tag="Yours">
+        <p>
+          A mesh points at a material, a material points at its textures, a
+          blueprint points at prefabs. Those edges are rows, not conventions
+          inside a folder layout.
+        </p>
+      </Card>
+      <Card status="guess" title="Content-addressed by hash">
+        <p>
+          <code>sha256</code> is the identity. Two players uploading the same
+          crate store one blob, and the client can cache forever because the
+          bytes behind a hash never change.
+        </p>
+      </Card>
+      <Card status="guess" title="Assets are immutable; edits are new assets">
+        <p>
+          Repainting a wall creates a new row and a new hash. Blueprints pin the
+          ids they were built with, so an edit never silently changes a dungeon
+          someone is standing in.
+        </p>
+      </Card>
+      <Card status="guess" title="The client never ships player content">
+        <p>
+          On entering an instance the client asks for a manifest of asset ids and
+          hashes, fetches the misses, and caches by hash. That loader is a
+          Bevy asset source, not game code.
+        </p>
+      </Card>
+    </div>
+    <div class="grid" style="margin-top:16px">
+      <Card status="guess" title="Bytes in the row until they aren't">
+        <p>
+          Small assets sit in <code>assets.bytes</code> as <code>bytea</code>.
+          A 4K texture is 8&ndash;20 MB, and a thousand of those in the same
+          database you query is a different problem from a thousand rows. The
+          table stays the index either way &mdash; a <code>storage</code> column
+          can move large blobs out later without touching a caller.
+        </p>
+      </Card>
+      <Card status="guess" title="Validation is the gate, not trust">
+        <p>
+          Uploads are checked before they become rows: vertex and texture
+          budgets, no custom shaders, no external fetches. Player content is
+          content from a stranger, and the server is the one paying for it.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
   <Section title="Database shape">
     <Card>
       <ul class="plain">
@@ -197,6 +254,9 @@ const blueprint = `{
         <li><b>dungeon_visits</b> &mdash; traffic through a player's base. The point of opening the doors.</li>
         <li><b>items</b> &mdash; instances: definition, level, runes, stats, crafted_by, location.</li>
         <li><b>item_definitions</b>, <b>runes</b> &mdash; the crafting catalogue, data not code.</li>
+        <li><b>assets</b> &mdash; mesh, texture, audio: hash, kind, bytes, size, uploader, moderation state.</li>
+        <li><b>materials</b> &mdash; the texture slots: albedo, normal, roughness, and their asset ids.</li>
+        <li><b>prefabs</b> &mdash; mesh + material + scale + collision. What blueprints place.</li>
         <li><b>runs</b> &mdash; party, instance, outcome. No seed here any more.</li>
         <li><b>listings</b> &mdash; market rows: item, seller, price, state.</li>
       </ul>
@@ -257,6 +317,17 @@ const blueprint = `{
           <b>Who authors a reusable dungeon, and who gets paid?</b> If players
           can hand-build maps others run, the blueprint needs an owner and a
           payout rule.
+        </li>
+        <li>
+          <b>What is one dungeon's asset budget?</b> Meshes and textures per
+          blueprint decide both storage and how long a visitor waits at the
+          door. Without a cap, the first ambitious author sets the ceiling for
+          everyone.
+        </li>
+        <li>
+          <b>Who owns uploaded assets when the account goes?</b> Content built
+          into other people's blueprints cannot simply vanish with its uploader
+          &mdash; so deletion has to be a policy, not a cascade.
         </li>
         <li>
           <b>Do visitors' changes persist in someone's base?</b> A visitor
