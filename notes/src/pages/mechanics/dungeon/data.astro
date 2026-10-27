@@ -1,0 +1,210 @@
+---
+import Base from "../../../layouts/Base.astro";
+import SubNav from "../../../components/SubNav.astro";
+import Section from "../../../components/Section.astro";
+import Card from "../../../components/Card.astro";
+
+const runMap = `{
+  "generator": "stacked-rooms@1",   // bump when output changes
+  "seed": 18446744073709551615,     // u64, from the server only
+  "params": {
+    "depth": 3,                     // stacked floors
+    "level_band": [4, 7],           // party level the map is aimed at
+    "biome": "crypt",
+    "party_size": 4
+  },
+  "spawn": [0.0, 0.0, 0.0],
+  "exit":  [12.0, 6.5, -3.0]        // the way home, always a portal
+}`;
+
+const dungeonLayout = `{
+  "layout_version": 3,
+  "extent": [48, 24, 48],           // metres, one plot per player
+  "floors": 2,
+  "stations": [
+    { "kind": "forge",   "at": [6.0, 0.0, 2.0] },
+    { "kind": "kitchen", "at": [9.0, 0.0, 2.0] },
+    { "kind": "lab",     "at": [12.0, 0.0, 2.0] }
+  ],
+  "portal_anchor": [24.0, 0.0, 40.0],
+  "door": { "policy": "public", "listed": true }
+}`;
+---
+
+<Base title="Dungeon data & schema — Party Dungeon" current="/mechanics/dungeon/">
+  <SubNav current="/mechanics/dungeon/" />
+
+  <header>
+    <div class="kicker">
+      <a href="/mechanics/">Mechanics</a> /
+      <a href="/mechanics/dungeon/">Your dungeon</a> / Data &amp; schema
+    </div>
+    <h1>Two maps, and only one of them is stored.</h1>
+    <p class="lede">
+      A run map is a seed. Your dungeon is a document. They look like the same
+      kind of thing and behave nothing alike &mdash; mixing them up is the
+      expensive mistake in this schema.
+    </p>
+  </header>
+
+  <Section title="Two kinds of map data">
+    <div class="split">
+      <Card status="decided" title="Run maps are generated" tag="Yours">
+        <p>
+          Maps you portal into are <strong>procedurally generated</strong>.
+          Nobody authored them, and no two runs need the same one.
+        </p>
+      </Card>
+      <Card status="guess" title="So a run map is stored as a seed">
+        <p>
+          The server keeps <code>seed</code>, <code>generator_version</code>,
+          and the parameters it was called with &mdash; then regenerates the
+          geometry on demand. The map itself is never a row.
+        </p>
+      </Card>
+      <Card status="decided" title="Your dungeon is authored" tag="Yours">
+        <p>
+          The base is a <strong>place you build in</strong>. A seed cannot
+          reproduce edits nobody has made yet.
+        </p>
+      </Card>
+      <Card status="guess" title="So your dungeon is a document">
+        <p>
+          Its layout is stored, versioned, and loaded back verbatim. This is
+          the only dungeon geometry that touches the database.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="What a run map is made of">
+    <p class="lede" style="font-size:16px; margin-bottom:18px">
+      Deterministic input, one output. Same version and same seed must produce
+      the same map on every machine, or replays and anti-cheat both fall apart.
+    </p>
+    <pre><code>{runMap}</code></pre>
+    <div class="grid" style="margin-top:16px">
+      <Card status="guess" title="Version is part of the identity">
+        <p>
+          Changing the generator changes every map. Old runs keep the version
+          they were created with, so <code>generator_version</code> is a
+          column, not a constant.
+        </p>
+      </Card>
+      <Card status="guess" title="The server hands out the seed">
+        <p>
+          A client that picks its own seed picks its own loot. The seed is
+          generated server-side and returned with the run record.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="What your dungeon is made of">
+    <pre><code>{dungeonLayout}</code></pre>
+    <div class="grid" style="margin-top:16px">
+      <Card status="guess" title="One document, not twenty tables">
+        <p>
+          Placed objects are a list inside one <code>jsonb</code> column.
+          Normalising every chair into a row buys nothing while the editor is
+          still being designed.
+        </p>
+      </Card>
+      <Card status="guess" title="Versioned on every save">
+        <p>
+          <code>layout_version</code> increments per write. Visitors load a
+          snapshot; if the owner edits mid-visit, the visit keeps what it
+          entered.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="Who owns the truth">
+    <div class="grid">
+      <Card status="guess" title="The server simulates, the client renders">
+        <p>
+          Loot is teleported home, dungeons are opened to strangers, items are
+          sold. Every one of those is a trust boundary, so the server decides
+          and the database is the record.
+        </p>
+      </Card>
+      <Card status="guess" title="Runs are records, not state">
+        <p>
+          A run is a row that opens and closes. Its live state lives in memory
+          on the server; only the outcome is written.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="Database shape">
+    <Card>
+      <ul class="plain">
+        <li><b>accounts</b> &mdash; one per player. Owns characters, dungeons, items.</li>
+        <li><b>characters</b> &mdash; class, level, stats. The thing a run puts at risk.</li>
+        <li><b>parties</b> &mdash; the assembled roster. Shape still open, see below.</li>
+        <li><b>dungeons</b> &mdash; owner, layout <code>jsonb</code>, <code>layout_version</code>, door policy.</li>
+        <li><b>dungeon_visits</b> &mdash; who walked in, when, what they bought. Traffic is the point of opening the doors.</li>
+        <li><b>items</b> &mdash; instances: definition, level, runes, stats, crafted_by, location.</li>
+        <li><b>item_definitions</b>, <b>runes</b> &mdash; the crafting catalogue, data not code.</li>
+        <li><b>runs</b> &mdash; seed, generator version, params, party, outcome.</li>
+        <li><b>listings</b> &mdash; market rows: item, seller, price, state.</li>
+      </ul>
+    </Card>
+    <div class="grid" style="margin-top:16px">
+      <Card status="guess" title="Postgres, and jsonb where it will churn">
+        <p>
+          The game logic is Rust with <code>sqlx</code>. Layouts, stats, and
+          rune effects are <code>jsonb</code> until their shape stops moving;
+          anything queried or joined on gets a real column.
+        </p>
+      </Card>
+      <Card status="guess" title="Items are immutable; ownership moves">
+        <p>
+          Runes and level are fixed at craft time. Selling or stashing changes
+          <code>owner</code> and <code>location</code> only &mdash; never the
+          item's identity. Otherwise a "used" sword means something different
+          every patch.
+        </p>
+      </Card>
+      <Card status="guess" title="Dungeons soft-delete">
+        <p>
+          Visitors have been there, items point at it, and runs reference it.
+          Deleting the plot leaves the record and marks it closed.
+        </p>
+      </Card>
+      <Card status="guess" title="No sharding yet">
+        <p>
+          One database. A player owns one plot and a handful of items; the
+          write rate is nothing until dungeons get busy. Revisit when
+          <code>dungeon_visits</code> is the biggest table.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="Open questions">
+    <Card>
+      <ul class="plain">
+        <li>
+          <b>Is a party one player's roster, or four players?</b> This decides
+          whether <code>parties</code> points at an account or at a set of
+          accounts. Everything downstream changes with it.
+        </li>
+        <li>
+          <b>Do items need provenance?</b> "Crafted by the smith who sold it to
+          you" is a nice story and a join table. Is it a feature?
+        </li>
+        <li>
+          <b>Does the market hold escrow?</b> Listing an item has to take it
+          out of circulation, or two players sell the same sword.
+        </li>
+        <li>
+          <b>What happens to a run when the server dies?</b> Roll back the run,
+          keep the loot, or keep nothing? This is the player-facing one.
+        </li>
+      </ul>
+    </Card>
+  </Section>
+</Base>
