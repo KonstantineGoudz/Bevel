@@ -1,3 +1,25 @@
-node_modules/
-dist/
-.astro/
+# Rust
+/target/
+**/target/
+
+# Node (notes/)
+notes/node_modules/
+notes/dist/
+notes/.astro/
+
+# Android
+game/android/.gradle/
+game/android/local.properties
+game/android/app/build/
+game/android/app/src/main/jniLibs/
+
+# iOS
+game/ios/build/
+game/ios/DerivedData/
+
+# Web
+game/web/pkg/
+
+# Editors
+.idea/
+.vscode/
