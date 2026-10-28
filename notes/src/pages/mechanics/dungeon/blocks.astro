@@ -4,27 +4,22 @@ import SubNav from "../../../components/SubNav.astro";
 import Section from "../../../components/Section.astro";
 import Card from "../../../components/Card.astro";
 
-const placement = `{
-  "block": "gate.portcullis",
-  "occupies": "edge",              // cell | edge | face | point
-  "between": [[4,7,0], [5,7,0]],   // the two cells it joins
-  "ports": [
-    { "side": "w", "kind": "through", "width": 1 },
-    { "side": "e", "kind": "through", "width": 1 }
+const fragment = `{
+  "fragment": "ossuary-b",
+  "hexes":    [ { "q": 0, "r": 0, "surface": "floor" }, ... ],
+  "edges":    [
+    { "a": [0,0], "b": [1,0], "kind": "wall" },
+    { "a": [0,0], "b": [0,1], "kind": "door", "port": "entry" }
   ],
-  "traversal": "conditional",      // walk | climb | fall | swim | teleport | blocked
-  "blocks_sight": false,
-  "condition": { "kind": "lever", "id": "lever-3" },
-  "rotation": [0, 180],
-  "clearance": 2,                  // cells of headroom
-  "tags": ["metal", "noisy"]
+  "occupants":[ { "at": [0,0], "block": "altar" } ],
+  "points":   [ { "at": [1,0], "role": "spawn", "ref": "skeleton" } ]
 }`;
 
-const cellShape = `one cell (x, y, z)
-  surface    floor | ramp | stairs | water | pit | void
-  occupant   wall | chest | trap | vein | spawn      (at most one)
-  faces      torch | lever | banner | mural          (one per side)
-  points     marker | patrol node | trigger | light  (any number)`;
+const hexShape = `one hex (q, r, z)
+  surface     floor | water | pit | void
+  occupant    altar | chest | trap | vein | spawn     (at most one)
+  edge[0..5]  wall | door | gate | window | curtain | none
+  points      marker | patrol node | trigger | light   (any number)`;
 ---
 
 <Base title="Dungeon building blocks — Party Dungeon" current="/mechanics/dungeon/">
@@ -35,11 +30,10 @@ const cellShape = `one cell (x, y, z)
       <a href="/mechanics/">Mechanics</a> /
       <a href="/mechanics/dungeon/">Your dungeon</a> / Building blocks
     </div>
-    <h1>A dungeon is cells, ports, and the things standing in them.</h1>
+    <h1>A dungeon is a hex, six edges, and the things standing on it.</h1>
     <p class="lede">
-      The kit is smaller than it looks. Nine behaviours cover everything you
-      place &mdash; and rooms, entrances and exits turn out to be roles rather
-      than types.
+      Nine behaviours on a hex grid. The grid changes the model more than the
+      angle: walls stop being cells, and the map is already the graph.
     </p>
   </header>
 
@@ -47,14 +41,15 @@ const cellShape = `one cell (x, y, z)
     <div class="grid">
       <Card status="decided" title="A room is not a building block" tag="Yours">
         <p>
-          A room is made of floor, walls and a threshold. Making it a type means
-          a block that secretly contains other blocks &mdash; and then two ways to
-          say the same thing, which always drift apart.
+          A room is a cluster of hexes, the edges around them, and a door.
+          Making it a type means a block that secretly contains other blocks
+          &mdash; and then two ways to say the same thing, which always drift
+          apart.
         </p>
       </Card>
       <Card status="guess" title="A room is a region the generator derives">
         <p>
-          After placement, flood-fill the walkable cells bounded by walls and
+          After placement, flood-fill the walkable hexes bounded by walls and
           closed thresholds. That region is what spawning, lighting, AI and loot
           budgets refer to. It is computed, never stored as a thing you can place.
         </p>
@@ -62,16 +57,16 @@ const cellShape = `one cell (x, y, z)
       <Card status="guess" title="A reusable room is a saved arrangement">
         <p>
           The authored <code>boss_room: "ossuary-b"</code> on the data page is a
-          fragment: placed blocks with coordinates, kept in the blueprint
-          document. It is a <em>layout</em>, not a type &mdash; reuse without
-          inventing a composite.
+          fragment: hexes, edges and occupants with coordinates, kept in the
+          blueprint document. It is a <em>layout</em>, not a type &mdash; reuse
+          without inventing a composite.
         </p>
       </Card>
       <Card status="guess" title="Naming is not typing">
         <p>
           A generator can still require "one boss region, three treasure
           regions". The name hangs on a region query, so it costs nothing and
-          cannot contradict the blocks on the grid.
+          cannot contradict the hexes on the grid.
         </p>
       </Card>
     </div>
@@ -86,29 +81,28 @@ const cellShape = `one cell (x, y, z)
     <div class="grid">
       <Card status="guess" title="Surface">
         <p>
-          The cell's ground: floor, ramp, stairs, bridge, water, pit. Owns level
-          changes &mdash; a stair is a surface with a height delta, not a
-          separate kind of thing.
+          The hex's ground: floor, water, pit, void. Owns level changes &mdash;
+          a ramp is a surface with a height delta, not a separate kind of thing.
         </p>
       </Card>
       <Card status="guess" title="Barrier">
         <p>
-          Wall, pillar, fence, window. Occupies a cell and refuses passage. Two
-          independent flags: <code>blocks_movement</code> and
+          Wall, fence, window. Lives on an <strong>edge</strong>, not in a hex.
+          Two independent flags: <code>blocks_movement</code> and
           <code>blocks_sight</code>.
         </p>
       </Card>
       <Card status="decided" title="Threshold" tag="Yours">
         <p>
-          Door, gate, secret door, portcullis, rubble, curtain, ladder, shaft,
-          portal. Crosses an edge when a condition holds &mdash; the only type
-          whose runtime state has to persist.
+          Door, gate, secret door, portcullis, rubble, curtain, ladder, portal.
+          Crosses an edge when a condition holds &mdash; the only type whose
+          runtime state has to persist.
         </p>
       </Card>
       <Card status="guess" title="Fixture">
         <p>
-          Chest, lever, pressure plate, altar, brazier, workbench, bed. Sits on
-          a cell or a wall face and can be operated. A chest is a fixture with
+          Chest, lever, pressure plate, altar, brazier, workbench, bed. Sits in
+          a hex or on an edge and can be operated. A chest is a fixture with
           contents; a lever is a fixture that opens a threshold.
         </p>
       </Card>
@@ -134,7 +128,7 @@ const cellShape = `one cell (x, y, z)
       </Card>
       <Card status="decided" title="Item" tag="Yours">
         <p>
-          Loose drop, key, quest object. A portable reference sitting on a cell
+          Loose drop, key, quest object. A portable reference sitting in a hex
           or inside a container. Keys are items that satisfy a threshold
           condition.
         </p>
@@ -142,83 +136,99 @@ const cellShape = `one cell (x, y, z)
       <Card status="guess" title="Marker">
         <p>
           Entry, exit, patrol node, trigger volume, arena bounds, light, sound.
-          Invisible authoring data. Occupies a point and can share a cell with
+          Invisible authoring data. Occupies a point and can share a hex with
           anything.
         </p>
       </Card>
     </div>
   </Section>
 
-  <Section title="A cell holds a surface, an occupant, and four faces">
-    <pre style="margin-bottom:16px"><code>{cellShape}</code></pre>
+  <Section title="One hex, six edges">
+    <p class="lede" style="font-size:16px; margin-bottom:18px">
+      On a square grid the wall was a cell and the boundary belonged to nobody.
+      A hex has six sides, so the boundary becomes the natural place to put it.
+    </p>
+    <pre style="margin-bottom:16px"><code>{hexShape}</code></pre>
     <div class="grid">
-      <Card status="guess" title="Four occupancy classes">
-        <ul class="plain">
-          <li><b>Cell</b> &mdash; one occupant, exclusive (wall, chest, trap, spawn).</li>
-          <li><b>Edge</b> &mdash; between two cells, coexists with both (door, gate, window).</li>
-          <li><b>Face</b> &mdash; one wall side (torch, lever, banner).</li>
-          <li><b>Point</b> &mdash; anywhere, any number (markers, patrol nodes).</li>
-        </ul>
-      </Card>
-      <Card status="guess" title="One occupant per cell">
+      <Card status="decided" title="Hexes, axial coordinates" tag="Yours">
         <p>
-          "Is this cell free" becomes a single check, and chests can't stack into
-          a pile of loot nobody can see. Anything that needs company uses a face
-          or a point instead of arguing for an exception.
+          Cells are hexes, addressed as <code>(q, r)</code>, with
+          <code>z</code> for level. Six neighbours, distance
+          <code>(|dq| + |dr| + |dq+dr|) / 2</code>, and 60&deg; turns instead of
+          90&deg;.
         </p>
       </Card>
-      <Card status="guess" title="Faces are per side">
+      <Card status="guess" title="Walls are edges, not hexes">
         <p>
-          A torch on the north face and a lever on the east face of the same wall
-          coexist, because they are not in the cell &mdash; they are on its skin.
-          This is what keeps decoration from fighting furniture.
+          A wall is a thin object on the boundary between two hexes. The other
+          choice &mdash; solid rock hexes &mdash; doubles the map and makes a
+          thin wall impossible. Here every hex is playable space or void.
         </p>
       </Card>
-      <Card status="guess" title="A surface cannot block">
+      <Card status="guess" title="Three occupancy classes, not four">
         <p>
-          Barriers are occupants, so "walkable" and "solid" never disagree. A
-          pit is a surface you can see into and not stand on, which is why it is
-          a surface and not a hole in the grid.
+          <b>Cell</b> &mdash; one occupant, exclusive. <b>Edge</b> &mdash; walls,
+          doors and everything that hangs on them. <b>Point</b> &mdash;
+          anywhere, any number. The square model's fourth class collapsed
+          because walls moved to where torches were always going to hang.
+        </p>
+      </Card>
+      <Card status="guess" title="An edge belongs to a pair, not a side">
+        <p>
+          Identify an edge by the two hexes it separates, not by "north side of
+          this hex". Two neighbours then cannot disagree about whether there is
+          a wall between them, because there is only one row.
+        </p>
+      </Card>
+      <Card status="guess" title="Cube maths is solved">
+        <p>
+          Store axial, compute in cube (<code>x + y + z = 0</code>). Rotation,
+          rings, lines and distance are all standard; the <code>hexx</code> crate
+          covers conversions, lines, rings and distance so none of this is
+          bespoke.
         </p>
       </Card>
     </div>
   </Section>
 
-  <Section title="Snapping is port agreement">
-    <pre style="margin-bottom:16px"><code>{placement}</code></pre>
+  <Section title="Snapping is fragment ports, not prefab sides">
+    <pre style="margin-bottom:16px"><code>{fragment}</code></pre>
     <div class="grid">
       <Card status="decided" title="Blocks declare how they join" tag="Yours">
         <p>
-          Snapping is object metadata, not editor magic. A block publishes what
-          each side offers; two neighbours fit when the offers agree.
+          Snapping is object metadata, not editor magic. On a hex grid it moves
+          up a level: a wall or a door is placed on an edge, and an arrangement
+          publishes the doors it is willing to be entered through.
         </p>
       </Card>
-      <Card status="guess" title="Ports, not proximity">
+      <Card status="guess" title="Fragments carry the ports">
         <p>
-          Every side presents one of <code>through</code>, <code>blocked</code>,
-          <code>window</code> or <code>vertical</code>, with a width in cells.
-          Two neighbours connect when kind and width match &mdash; a 2-wide
-          corridor will not meet a 1-wide door by accident.
+          A saved arrangement declares which boundary edges are
+          <code>entry</code>, <code>exit</code> or <code>through</code>. Two
+          fragments connect when a port meets a port of the same kind and width.
+          Nothing else has to match, so a doorway never needs to be in a set
+          position.
         </p>
       </Card>
-      <Card status="guess" title="Mismatch is capped, not rejected">
+      <Card status="guess" title="Rotation is 60&deg;, and symmetry removes options">
         <p>
-          An opening that meets a wall gets capped by the wall. The generator must
-          never leave a hole in the world, so the default resolution is "close it",
-          and only a width mismatch between two openings is a hard error.
+          Six orientations, but only the distinct ones. A through-corridor has
+          two, not six; a round pillar has one. The editor offers distinct
+          rotations so authors don't cycle through identical copies.
         </p>
       </Card>
-      <Card status="guess" title="Rotation is quarter turns on an integer grid">
+      <Card status="guess" title="Footprints are sets of hexes">
         <p>
-          Cells and 90&deg; steps. Stairs and ramps move you a level, which is why
-          <code>z</code> is part of the coordinate rather than an afterthought.
+          A three-hex altar or an L-shaped ledge is a footprint expressed as
+          offsets from an anchor hex, not a rectangle. Hex footprints have no
+          convenient bounding box, so the set <em>is</em> the footprint.
         </p>
       </Card>
-      <Card status="guess" title="Clearance is its own axis">
+      <Card status="guess" title="Attachments are anchored ids">
         <p>
-          A door needs two cells of headroom; a banner needs a wall face; a
-          bookshelf needs one free cell in front. Footprint says where a thing
-          stands, clearance says what it refuses to stand next to.
+          A torch is "edge between (0,0) and (0,1), height 2"; a chest is
+          "(1,1)". Edge and hex coordinates are stable ids, which is exactly
+          what instance state needs to say "this gate is open".
         </p>
       </Card>
       <Card status="guess" title="Entry is required, exit is optional">
@@ -231,20 +241,21 @@ const cellShape = `one cell (x, y, z)
     </div>
   </Section>
 
-  <Section title="Gates are thresholds with a condition">
+  <Section title="Gates are edges with a condition">
     <div class="grid">
       <Card status="decided" title="Gates are not special" tag="Yours">
         <p>
           A gate is a threshold whose condition is unsatisfied at spawn. Nothing
-          about the block changes &mdash; only whether the door opens, and what
-          has to happen first.
+          about the edge changes &mdash; only whether it opens, and what has to
+          happen first.
         </p>
       </Card>
       <Card status="guess" title="Conditions are data; state is instance">
         <p>
           Lever, key, event (boss dead), timer, party size, puzzle. Which one is
-          a field on the block. Whether it is open is a row in the instance
-          delta, so it survives a restart and dies with the instance.
+          a field on the edge. Whether it is open is a row in the instance
+          delta, keyed by the hex pair &mdash; so it survives a restart and dies
+          with the instance.
         </p>
       </Card>
       <Card status="guess" title="Every gate must be solvable at generation">
@@ -258,34 +269,41 @@ const cellShape = `one cell (x, y, z)
       <Card status="guess" title="Sight and movement are different gates">
         <p>
           A portcullis stops your feet but not your eyes. A curtain does the
-          reverse. Two flags on every threshold, and they decide whether the mob
-          on the other side has noticed you.
+          reverse. Two flags on every edge, and they decide whether the mob on
+          the other side has noticed you.
         </p>
       </Card>
     </div>
   </Section>
 
-  <Section title="The map becomes a graph">
+  <Section title="The map is already the graph">
     <div class="grid">
-      <Card status="guess" title="Blocks are the input; the graph is the product">
+      <Card status="guess" title="The dual is literal">
         <p>
-          Nodes are walkable regions, edges are open thresholds. Generation,
-          validation, pathfinding and spawning all read the same graph, so an
-          authored map and a generated one are checked identically.
+          Hexes are nodes, edges are edges. On a square grid the layout had to be
+          converted into a graph for pathfinding; here it already is one, so
+          there is no second representation to drift out of sync.
         </p>
       </Card>
-      <Card status="guess" title="Derived at publish, stored with the blueprint">
+      <Card status="guess" title="Distance is hex distance">
         <p>
-          Generating the graph on every join would make load time a function of
-          map size. Compute once when the blueprint is saved, store the nodes and
-          edges, rebuild only on edit.
+          Aggro radius, leash length and "is this reachable" all use cube
+          distance, not a Euclidean approximation. A radius-4 alert is six rings
+          of hexes, which is what the player sees.
         </p>
       </Card>
-      <Card status="guess" title="A drafted map has to be playable">
+      <Card status="guess" title="Line of sight is an edge walk">
         <p>
-          Entry reachable, exit reachable, no orphan regions unless explicitly
-          marked optional or secret, every required resource reachable. The
-          editor can refuse to save a room that goes nowhere.
+          Draw the line between hex centres; every edge it crosses is checked
+          once. A wall blocks sight, a portcullis does not. On a hex grid this
+          is exact rather than a sampled ray, which is why hexes suit stealth.
+        </p>
+      </Card>
+      <Card status="guess" title="Corridors zigzag, and that is the look">
+        <p>
+          A straight run of hexes alternates direction &mdash; there is no
+          straight line of hex centres. Long halls need two rows, or a hall
+          surface that deliberately breaks the pattern.
         </p>
       </Card>
     </div>
@@ -295,14 +313,14 @@ const cellShape = `one cell (x, y, z)
     <div class="grid">
       <Card status="guess" title="Spawn points outlive the mobs">
         <p>
-          The spawn is a block on the grid; the mob is a runtime actor. Instance
-          state records which spawns are cleared, so re-entering does not respawn
-          the boss and does not need the boss in the record.
+          The spawn is a point on the grid; the mob is a runtime actor. Instance
+          state records which spawns are cleared, so re-entering does not
+          respawn the boss and does not need the boss in the record.
         </p>
       </Card>
       <Card status="guess" title="Items have two homes">
         <p>
-          On the floor, as a cell placement. Or inside a container, where the
+          In a hex, as a cell placement. Or inside a container, where the
           contents come from a loot table plus a seed &mdash; and the instance
           only stores what was taken, not what could have been.
         </p>
@@ -310,8 +328,8 @@ const cellShape = `one cell (x, y, z)
       <Card status="guess" title="Harvest flags are the same as loot flags">
         <p>
           A picked herb patch, an opened chest and a dead boss are all "this
-          thing is spent" in the instance delta. One mechanism, three names,
-          no separate persistence path.
+          thing is spent" in the instance delta. One mechanism, three names, no
+          separate persistence path.
         </p>
       </Card>
     </div>
@@ -320,31 +338,33 @@ const cellShape = `one cell (x, y, z)
   <Section title="Database shape">
     <Card>
       <ul class="plain">
-        <li><b>block_definitions</b> &mdash; kind, footprint, ports, traversal, placement rules, prefab reference.</li>
-        <li><b>blueprints.layout</b> &mdash; placed blocks: cell, edge, face or point, rotation, parameters.</li>
+        <li><b>block_definitions</b> &mdash; kind, footprint hexes, traversal, placement rules, prefab reference.</li>
+        <li><b>fragments</b> &mdash; a saved arrangement: hexes, edges, occupants, points, boundary ports.</li>
+        <li><b>blueprints.layout</b> &mdash; the same four lists, plus fragment placements and rotations.</li>
         <li><b>blueprints.graph</b> &mdash; nodes and edges, derived at publish, stored for validation and load.</li>
-        <li><b>instance.state.thresholds</b> &mdash; open, closed, locked, broken, per gate.</li>
+        <li><b>instance.state.edges</b> &mdash; open, closed, locked, broken, keyed by hex pair.</li>
         <li><b>instance.state.spent</b> &mdash; chests opened, spawns cleared, nodes harvested.</li>
       </ul>
     </Card>
     <div class="grid" style="margin-top:16px">
-      <Card status="guess" title="A block is a prefab plus behaviour">
+      <Card status="guess" title="Edges are rows too">
         <p>
-          The <code>prefabs</code> row still owns mesh, material and collision.
-          The block row adds ports, traversal and placement rules. One visual can
-          back several blocks &mdash; the same door, locked and unlocked.
+          One row per hex pair, not a bitmap. "Every door in this blueprint" and
+          "every gate this lever opens" become queries instead of decodes, and
+          an edge inherits the immutability of everything around it.
         </p>
       </Card>
-      <Card status="guess" title="Layout is a list, not a grid blob">
+      <Card status="guess" title="Fragments are first-class, rooms are not">
         <p>
-          Rows of placements are queryable ("every chest in this blueprint") and
-          diff cleanly. A serialised grid is smaller and useless for exactly the
-          questions the editor asks.
+          Fragments get ids, owners and versions because authors reuse them.
+          Rooms stay derived because nobody can agree where one ends &mdash; and
+          a stored room would have to be updated every time a hex next to it
+          changed.
         </p>
       </Card>
       <Card status="guess" title="Retired, not deleted, again">
         <p>
-          A block definition that falls out of use gets <code>retired_at</code>.
+          A block or fragment that falls out of use gets <code>retired_at</code>.
           Old blueprints still render, and old instances still validate, because
           nothing they point at has vanished.
         </p>
@@ -356,34 +376,35 @@ const cellShape = `one cell (x, y, z)
     <Card>
       <ul class="plain">
         <li>
-          <b>How big is a cell?</b> Two metres makes tight corridors and honest
-          mobs; four metres makes rooms need fewer pieces and corridors feel like
-          halls. Every block is authored against this number.
+          <b>Is the hex a building unit, or a movement grid?</b> Authoring on
+          hexes with continuous free movement is fine &mdash; collision still
+          comes from hulls. Step-by-step movement is a different game and a much
+          larger one.
         </li>
         <li>
-          <b>Orthogonal kit, or organic caves?</b> Ports assume walls on a grid.
-          A carved cave has no ports &mdash; it has a surface, and the snapping
-          model has to be replaced rather than extended.
+          <b>How big is a hex?</b> Two metres across makes tight corridors and
+          honest mobs; four metres makes rooms need fewer pieces. Every block and
+          every mob is authored against this number.
         </li>
         <li>
-          <b>Can a block change size?</b> A wall of length 1&ndash;8 as one
-          parametric block saves authoring and breaks the "one cell" rule. Length
-          classes (1, 2, 4) are the usual compromise.
+          <b>Rooms can't be rectangular any more.</b> A long hall is two rows of
+          hexes or a special surface. Is that the look, or do some spaces need to
+          opt out of the grid?
         </li>
         <li>
-          <b>How much verticality?</b> A level index handles stairs and ramps. A
-          bridge over a pit needs two surfaces in one column, which the current
-          cell shape does not allow.
+          <b>How thick is a wall?</b> Extruded edges are thin; too thin and a
+          corridor of adjacent hexes reads as one wide space instead of two
+          narrow ones.
+        </li>
+        <li>
+          <b>Do fragments rotate freely?</b> A fragment rotated 60&deg; moves its
+          entry port somewhere else, which may be fine for a generator and wrong
+          for an authored setpiece.
         </li>
         <li>
           <b>Do players build with the same kit as the generator?</b> If yes, the
           editor needs the port rules and validation. If no, two kits drift and
           the authored ones rot.
-        </li>
-        <li>
-          <b>What stops a player walling in the exit?</b> Validation catches it
-          at save, or the server catches it at entry. One of them has to, and it
-          is cheaper at save.
         </li>
       </ul>
     </Card>
