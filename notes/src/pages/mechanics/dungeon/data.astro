@@ -191,59 +191,76 @@ const blueprint = `{
     </div>
   </Section>
 
-  <Section title="Assets are descriptions, not geometry">
+  <Section title="Assets: payload in a bucket, truth in the database">
     <p class="lede" style="font-size:16px; margin-bottom:18px">
-      Meshes, textures, materials and the links between them live in the same
-      database as everything else &mdash; as descriptions, plus the handful of
-      vertices that collision actually needs.
+      GLB files live in object storage. The database holds the collision shape
+      and everything the server needs to simulate an object without ever
+      downloading its pixels.
     </p>
     <div class="grid">
+      <Card status="decided" title="GLB in object storage, metadata in the database" tag="Yours">
+        <p>
+          The file is the render payload. The row is the authoritative
+          description: identity, bounds, collision, counts, material slots.
+          Two stores, one asset.
+        </p>
+      </Card>
+      <Card status="decided" title="Collision is stored, not read from the GLB" tag="Yours">
+        <p>
+          The server has no renderer. Deriving hulls from a GLB at load would
+          mean pulling megabytes over the wire to move one mob, so the shape is
+          extracted once and kept in the row.
+        </p>
+      </Card>
       <Card status="decided" title="Nothing is ever deleted" tag="Yours">
         <p>
-          Every table works this way: rows <strong>retire</strong>
-          (<code>retired_at</code>, <code>superseded_by</code>), they don't
-          vanish. A closed account keeps its attribution, and content built
-          into someone else's blueprint never disappears from under them.
-        </p>
-      </Card>
-      <Card status="decided" title="The row is the description" tag="Yours">
-        <p>
-          Kind, parameters, bounding box, vertex count, material references.
-          Not a render buffer. The database holds what you need to reason about
-          an object without holding the object.
-        </p>
-      </Card>
-      <Card status="bet" title="Meshes are built from the description">
-        <p>
-          A kit of primitives with parameters &mdash; box, cylinder, arch,
-          bevel &mdash; is enough for the client to generate the mesh at load.
-          This is the fork: a kit keeps metadata-only honest, arbitrary uploads
-          would drag the full bytes back in.
-        </p>
-      </Card>
-      <Card status="decided" title="Collision gets vertices, but a handful" tag="Yours">
-        <p>
-          Bounds are too coarse to walk on. A small convex proxy &mdash; tens of
-          points, not thousands &mdash; is stored per prefab so floors, ramps and
-          ledges can be stood on and blocked correctly.
+          Rows still <strong>retire</strong> (<code>retired_at</code>,
+          <code>superseded_by</code>) rather than vanish. Whether the bytes in
+          the bucket are equally immortal is now a separate question, because
+          they cost actual money.
         </p>
       </Card>
     </div>
     <div class="grid" style="margin-top:16px">
+      <Card status="guess" title="Content-addressed by the file hash">
+        <p>
+          <code>sha256</code> of the GLB is the object key and the row's
+          identity. Two players uploading the same crate store one file, and the
+          client can cache forever because those bytes never change.
+        </p>
+      </Card>
+      <Card status="guess" title="The server never fetches a GLB">
+        <p>
+          Authority runs on hulls and metadata, so the bucket can be a public
+          CDN origin the game server has no credentials for. It also means the
+          server keeps running when the asset host is down.
+        </p>
+      </Card>
+      <Card status="guess" title="One file per object, LODs as extra keys">
+        <p>
+          Textures stay inside the GLB, so loading an object is one GET. A row
+          per texture is a filesystem rebuilt in SQL, and it makes every fetch a
+          graph traversal. LODs and variants are separate keys under the same
+          asset row.
+        </p>
+      </Card>
       <Card status="guess" title="Bounds cull, hulls collide">
         <p>
           Broadphase stays an AABB/OBB check, which is free. Narrowphase uses a
-          few convex hulls per prefab, quantized to the bounding box so the
-          whole proxy fits in a couple of kilobytes.
+          few convex hulls per prefab, quantized to the bounding box so the whole
+          proxy fits in a couple of kilobytes.
         </p>
       </Card>
-      <Card status="guess" title="The proxy is authored, not derived">
+      <Card status="guess" title="The proxy wins arguments">
         <p>
-          If the server built collision from the render mesh at load, it would
-          need the render mesh &mdash; and metadata-only storage would be a
-          fiction. The proxy is baked once at publish and stored.
+          Where the GLB and the stored hull disagree, movement follows the hull.
+          A player will occasionally clip a visible edge or walk through a gap
+          that looks solid. That is the price of an authoritative shape that
+          isn't the render mesh.
         </p>
       </Card>
+    </div>
+    <div class="grid" style="margin-top:16px">
       <Card status="guess" title="One shape, both sides">
         <p>
           Client and server collide against the same stored hulls. Anything else
@@ -251,42 +268,84 @@ const blueprint = `{
           they see, which is the bug nobody can reproduce.
         </p>
       </Card>
-      <Card status="guess" title="The proxy wins arguments">
+      <Card status="guess" title="Validation happens at bake">
         <p>
-          Where the render mesh and the proxy disagree, movement follows the
-          proxy. A player will occasionally clip a visual edge or walk through a
-          gap that looks solid. That is the price of not shipping vertices.
+          The inputs are ours, so the hostile-binary problem is gone. What's left
+          is geometry: manifold inputs, a vertex budget after decimation, and
+          hull extraction that produces something an agent can actually walk on.
         </p>
       </Card>
-      <Card status="guess" title="Hash the description, proxy included">
+      <Card status="guess" title="Materials survive as slots">
         <p>
-          Canonical parameters plus the collision hull, hashed with
-          <code>sha256</code>. Two players authoring the same crate with the
-          same collision share one row.
+          Textures ride inside the GLB, but the row keeps the material slot
+          names. That lets a blueprint recolour a crate or swap a wall's surface
+          without re-exporting a model for every variant.
         </p>
       </Card>
-      <Card status="guess" title="Forever is still affordable">
+      <Card status="bet" title="Revised: forever stopped being affordable">
         <p>
-          A description plus a quantized hull is kilobytes. Keeping every asset,
-          revision and instance forever stays a rounding error, because the
-          vertices that would have made it expensive are not there.
+          The previous pass said keeping everything forever was a rounding error
+          because there were no render bytes. A 20&nbsp;MB GLB kept forever is a
+          bill. Metadata is still cheap; the payload is the part with a price.
         </p>
       </Card>
     </div>
-    <div class="grid" style="margin-top:16px">
-      <Card status="guess" title="Empty of bytes, but not of consequences">
+  </Section>
+
+  <Section title="New meshes are recipes, not uploads">
+    <p class="lede" style="font-size:16px; margin-bottom:18px">
+      Nobody uploads a model. Players combine the ones we ship &mdash; union,
+      subtract, intersect, then change the surface &mdash; and the result is a
+      recipe with a baked mesh behind it.
+    </p>
+    <div class="grid">
+      <Card status="decided" title="The library is the vocabulary" tag="Yours">
         <p>
-          No render data means a client that doesn't know the kit can't draw a
-          blueprint, and a kit change silently restyles old content. Both are
-          acceptable only because the kit is ours and versioned.
+          Every new mesh is made of meshes we made. Moderation stops being a
+          queue of strangers' files and becomes a property of the starting kit:
+          if it is in the library, it has already been looked at.
         </p>
       </Card>
-      <Card status="guess" title="Validation happens on the description">
+      <Card status="guess" title="A derived asset is a recipe plus a bake">
         <p>
-          Vertex budgets, texture sizes, hull counts and bounds checks run
-          before a row is written. Player content is still content from a
-          stranger &mdash; it just arrives as parameters and a hull instead of a
-          binary.
+          <code>derived_from</code>, the operations, their transforms, material
+          overrides. The recipe is the identity; the baked GLB is the payload,
+          cached under that identity. Both immutable, both kept.
+        </p>
+      </Card>
+      <Card status="guess" title="Booleans need watertight inputs">
+        <p>
+          CSG on a mesh with holes either fails or produces new holes, and the
+          hole is discovered three boolean steps later. The library has to be
+          manifold as a hard constraint on how we author it, not a nice-to-have.
+        </p>
+      </Card>
+      <Card status="guess" title="Booleans are lossy, so bake once">
+        <p>
+          Every cut shreds topology and multiplies vertices. Decimate to a budget
+          at bake time, never at load, and never re-run a chain at runtime &mdash;
+          the result would drift between sessions.
+        </p>
+      </Card>
+      <Card status="guess" title="Texture changes are material overrides">
+        <p>
+          No new image files. Swap a slot, tint it, remap the UVs through the
+          material. Variants then share geometry and the bucket stays small,
+          which is also why the texture step is the cheap one.
+        </p>
+      </Card>
+      <Card status="guess" title="One canonical bake, server-side">
+        <p>
+          Floating-point booleans do not agree across machines, so one bake
+          produces the GLB everyone loads. The editor previews locally and
+          publishes when the server's bake lands; a preview is never the truth.
+        </p>
+      </Card>
+      <Card status="guess" title="Provenance is the derivation graph">
+        <p>
+          Who built what out of whose work is an edge in the graph, permanently.
+          That is exactly what a payout rule needs, and the reason "nothing is
+          ever deleted" stops being sentiment and starts being bookkeeping.
         </p>
       </Card>
     </div>
@@ -305,9 +364,11 @@ const blueprint = `{
         <li><b>dungeon_visits</b> &mdash; traffic through a player's base. The point of opening the doors.</li>
         <li><b>items</b> &mdash; instances: definition, level, runes, stats, crafted_by, location.</li>
         <li><b>item_definitions</b>, <b>runes</b> &mdash; the crafting catalogue, data not code.</li>
-        <li><b>assets</b> &mdash; hash, kind, parameters, bounds, counts, material refs, plus a small collision hull. No render mesh.</li>
-        <li><b>materials</b> &mdash; the texture slots: albedo, normal, roughness, and their asset ids.</li>
-        <li><b>prefabs</b> &mdash; mesh + material + scale + collision. Blocks add behaviour and placement rules on top.</li>
+        <li><b>assets</b> &mdash; identity, bounds, collision hulls, counts, material slots, moderation, retired_at. No render bytes.</li>
+        <li><b>asset_objects</b> &mdash; object-store key (the sha256), byte size, mime, LOD, storage class.</li>
+        <li><b>asset_recipes</b> &mdash; derived_from, boolean ops, transforms, material overrides, bake version.</li>
+        <li><b>materials</b> &mdash; named slots a blueprint can override: tint, swap, remap. Textures live in the GLB.</li>
+        <li><b>prefabs</b> &mdash; GLB object key, stored collision, scale. Blocks add behaviour and placement rules on top.</li>
         <li><b>runs</b> &mdash; party, instance, outcome. No seed here any more.</li>
         <li><b>listings</b> &mdash; market rows: item, seller, price, state.</li>
       </ul>
@@ -370,10 +431,9 @@ const blueprint = `{
           payout rule.
         </li>
         <li>
-          <b>What is one dungeon's asset budget?</b> Meshes and textures per
-          blueprint decide both storage and how long a visitor waits at the
-          door. Without a cap, the first ambitious author sets the ceiling for
-          everyone.
+          <b>What is one dungeon's asset budget?</b> Not just storage now &mdash;
+          it is the download a visitor waits through at the door. Without a cap,
+          the first ambitious author sets the ceiling for everyone.
         </li>
         <li>
           <b>How small is "very small"?</b> A collision proxy of 32 points per
@@ -382,10 +442,16 @@ const blueprint = `{
           not a storage one.
         </li>
         <li>
-          <b>Can authors upload a mesh, or only compose the kit?</b> Metadata-only
-          storage assumes the kit. The moment someone imports their own model,
-          render bytes exist somewhere and the "no vertices" rule has an
-          exception to name.
+          <b>Are blobs immortal too?</b> Rows never die, but a 20&nbsp;MB GLB
+          kept for a deleted account and an abandoned blueprint is a bill that
+          grows forever. Either "nothing is deleted" means the bytes as well, or
+          it means the record survives and the payload may not.
+        </li>
+        <li>
+          <b>How deep can a derivation go?</b> Two booleans keep meshes clean;
+          ten turn them into gravel. A depth cap is also a licence to stop
+          supporting old bakes, so it is a policy about the past, not just about
+          triangles.
         </li>
         <li>
           <b>Do visitors' changes persist in someone's base?</b> A visitor
