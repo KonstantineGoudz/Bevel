@@ -2,13 +2,18 @@
 
 use bevy::prelude::*;
 
+mod editor;
+mod model;
+
 /// Entry point for every target. `bevy_main` generates the Android glue.
 #[bevy_main]
 pub fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Party Dungeon".into(),
+                title: "Party Dungeon — editor".into(),
+                canvas: Some("#bevy".into()),
+                fit_canvas_to_parent: true,
                 ..default()
             }),
             ..default()
@@ -17,9 +22,19 @@ pub fn main() {
         .run();
 }
 
+/// wasm entry point. `#[bevy_main]` only wires Android; a cdylib has no
+/// `main` for wasm-bindgen to call, so export one explicitly.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(start)]
+pub fn wasm_start() {
+    main();
+}
+
 /// Everything the game adds to the default app.
 pub struct GamePlugin;
 
 impl Plugin for GamePlugin {
-    fn build(&self, _app: &mut App) {}
+    fn build(&self, app: &mut App) {
+        app.add_plugins(editor::EditorPlugin);
+    }
 }
