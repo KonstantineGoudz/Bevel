@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Level editor — Party Dungeon</title>
+    <link rel="stylesheet" href="./editor.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <span class="mark">PARTY DUNGEON</span>
+        <span class="sep">/</span>
+        <span class="sub">level editor</span>
+      </div>
+      <div class="tools">
+        <button type="button" data-act="undo" title="Ctrl+Z">Undo</button>
+        <button type="button" data-act="grid" class="on" title="G">Grid</button>
+        <button type="button" data-act="snap" class="on" title="S">Snap</button>
+        <span class="spacer"></span>
+        <button type="button" data-act="clear">Clear</button>
+        <button type="button" data-act="save">Save .json</button>
+        <button type="button" data-act="load">Load</button>
+        <input id="file" type="file" accept="application/json" hidden />
+      </div>
+    </header>
+
+    <main>
+      <aside id="palette">
+        <div class="palette-head">
+          <h1>Components</h1>
+          <span id="count">0 placed</span>
+        </div>
+        <div id="groups"></div>
+        <div class="legend">
+          <span><i class="dot edge"></i>edge</span>
+          <span><i class="dot end"></i>end</span>
+          <span><i class="dot slot"></i>slot</span>
+        </div>
+      </aside>
+
+      <section id="stage">
+        <canvas id="canvas"></canvas>
+        <div id="hud"><span id="hint">Pick a component on the left, then click the grid</span></div>
+      </section>
+    </main>
+
+    <footer>
+      <span id="status">—</span>
+      <span class="keys">R rotate · shift+R back · Del remove · Esc cancel · Space+drag pan · wheel zoom</span>
+    </footer>
+
+    <script type="module" src="./editor.js"></script>
+  </body>
+</html>
