@@ -1,25 +1,32 @@
 //! The editor's data model: hex maths, the shape catalogue, snapping.
 //!
 //! No Bevy systems live here — this is plain geometry so it can be unit-tested
-//! without a window. `editor.rs` renders it with gizmos and Bevy UI.
+//! without a window. Everything is in metres: `Vec2` is the ground plane
+//! (`x`, `z`), and each shape carries the vertical extent used to extrude it
+//! into a solid in `mesh.rs`.
 
 use std::sync::LazyLock;
 
 use bevy::color::Color;
 use bevy::math::Vec2;
 
-/// Circumradius of one hex, in world units.
-pub const HEX_SIZE: f32 = 56.0;
+/// Circumradius of one hex, in metres. Edge length comes out at ~2.08 m.
+pub const HEX_SIZE: f32 = 1.2;
 /// Rotation increment offered by the editor.
 pub const ANCHOR_STEP: f32 = std::f32::consts::PI / 6.0;
 /// Width of the component palette, in logical pixels.
 pub const PANEL_WIDTH: f32 = 250.0;
+/// How far apart two anchors may be and still snap, in metres.
+pub const SNAP_THRESHOLD: f32 = 0.4;
+/// Extra slack when clicking a piece, in metres.
+pub const HIT_PAD: f32 = 0.1;
 
 const SQRT3: f32 = 1.732_050_8;
 
-/// Length of a hex edge: a wall bar is exactly this long.
+/// Length of a hex edge: a wall bar is exactly this long. For a regular
+/// hexagon the side length equals the circumradius (not the width across flats).
 pub fn edge_len() -> f32 {
-    HEX_SIZE * SQRT3
+    HEX_SIZE
 }
 
 // ---------------------------------------------------------------------------
@@ -99,7 +106,12 @@ pub fn nearest_edge(p: Vec2) -> (Vec2, f32) {
             best_angle = std::f32::consts::PI / 3.0 * i as f32;
         }
     }
-    (best, best_angle.rem_euclid(std::f32::consts::PI))
+    // The midpoint's bearing points at the edge; the edge itself runs at a
+    // right angle to it.
+    (
+        best,
+        (best_angle + std::f32::consts::FRAC_PI_2).rem_euclid(std::f32::consts::PI),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -146,8 +158,16 @@ fn hex_anchors(r: f32) -> Vec<Anchor> {
 
 fn end_anchors(len: f32) -> Vec<Anchor> {
     vec![
-        Anchor { local: Vec2::new(-len / 2.0, 0.0), normal: Vec2::NEG_X, kind: AnchorKind::End },
-        Anchor { local: Vec2::new(len / 2.0, 0.0), normal: Vec2::X, kind: AnchorKind::End },
+        Anchor {
+            local: Vec2::new(-len / 2.0, 0.0),
+            normal: Vec2::NEG_X,
+            kind: AnchorKind::End,
+        },
+        Anchor {
+            local: Vec2::new(len / 2.0, 0.0),
+            normal: Vec2::X,
+            kind: AnchorKind::End,
+        },
     ]
 }
 
@@ -212,10 +232,28 @@ pub struct Shape {
     pub geom: Geometry,
     pub style: Style,
     pub anchors: Vec<Anchor>,
+    /// How tall the solid is, in metres.
+    pub height: f32,
+    /// Where its bottom sits; a floor's top is at zero, so its base is negative.
+    pub base: f32,
 }
 
-pub const CATEGORIES: [&str; 6] = ["Surface", "Barrier", "Threshold", "Fixture", "Resource", "Marker"];
+impl Shape {
+    pub fn top(&self) -> f32 {
+        self.base + self.height
+    }
+}
 
+pub const CATEGORIES: [&str; 6] = [
+    "Surface",
+    "Barrier",
+    "Threshold",
+    "Fixture",
+    "Resource",
+    "Marker",
+];
+
+#[allow(clippy::too_many_arguments)]
 fn shape(
     id: &'static str,
     name: &'static str,
@@ -224,6 +262,8 @@ fn shape(
     color: u32,
     geom: Geometry,
     style: Style,
+    height: f32,
+    base: f32,
     anchors: Vec<Anchor>,
 ) -> Shape {
     Shape {
@@ -235,38 +275,260 @@ fn shape(
         geom,
         style,
         anchors,
+        height,
+        base,
     }
 }
 
 static SHAPES: LazyLock<Vec<Shape>> = LazyLock::new(|| {
     let len = edge_len();
     vec![
-        // Surfaces
-        shape("floor", "Floor", "Surface", SnapMode::Center, 0x46586d, Geometry::Hex { r: HEX_SIZE }, Style::Plain, hex_anchors(HEX_SIZE)),
-        shape("pit", "Pit", "Surface", SnapMode::Center, 0x272e38, Geometry::Hex { r: HEX_SIZE }, Style::Dashed, hex_anchors(HEX_SIZE)),
-        shape("water", "Water", "Surface", SnapMode::Center, 0x2a6a86, Geometry::Hex { r: HEX_SIZE }, Style::Waves, hex_anchors(HEX_SIZE)),
-        shape("bridge", "Bridge", "Surface", SnapMode::Center, 0x5c4730, Geometry::Hex { r: HEX_SIZE }, Style::Planks, hex_anchors(HEX_SIZE)),
+        // Surfaces. Tops sit at y = 0 so everything else stands on the floor.
+        shape(
+            "floor",
+            "Floor",
+            "Surface",
+            SnapMode::Center,
+            0x4e6076,
+            Geometry::Hex { r: HEX_SIZE },
+            Style::Plain,
+            0.12,
+            -0.12,
+            hex_anchors(HEX_SIZE),
+        ),
+        shape(
+            "pit",
+            "Pit",
+            "Surface",
+            SnapMode::Center,
+            0x272e38,
+            Geometry::Hex { r: HEX_SIZE },
+            Style::Dashed,
+            0.12,
+            -1.4,
+            hex_anchors(HEX_SIZE),
+        ),
+        shape(
+            "water",
+            "Water",
+            "Surface",
+            SnapMode::Center,
+            0x2a6a86,
+            Geometry::Hex { r: HEX_SIZE },
+            Style::Waves,
+            0.08,
+            -0.4,
+            hex_anchors(HEX_SIZE),
+        ),
+        shape(
+            "bridge",
+            "Bridge",
+            "Surface",
+            SnapMode::Center,
+            0x5c4730,
+            Geometry::Hex { r: HEX_SIZE },
+            Style::Planks,
+            0.18,
+            0.0,
+            hex_anchors(HEX_SIZE),
+        ),
         // Barriers
-        shape("wall", "Wall", "Barrier", SnapMode::Edge, 0x8d9aab, Geometry::Bar { len, thick: 14.0 }, Style::Plain, end_anchors(len)),
-        shape("fence", "Fence", "Barrier", SnapMode::Edge, 0x6f7f92, Geometry::Bar { len, thick: 6.0 }, Style::Rail, end_anchors(len)),
-        shape("window", "Window", "Barrier", SnapMode::Edge, 0x7fb3c8, Geometry::Bar { len, thick: 14.0 }, Style::Window, end_anchors(len)),
-        shape("pillar", "Pillar", "Barrier", SnapMode::Center, 0x8d9aab, Geometry::Circle { r: 20.0 }, Style::Plain, ring_anchors(4, 26.0, std::f32::consts::FRAC_PI_4)),
+        shape(
+            "wall",
+            "Wall",
+            "Barrier",
+            SnapMode::Edge,
+            0x8d9aab,
+            Geometry::Bar { len, thick: 0.18 },
+            Style::Plain,
+            2.8,
+            0.0,
+            end_anchors(len),
+        ),
+        shape(
+            "fence",
+            "Fence",
+            "Barrier",
+            SnapMode::Edge,
+            0x6f7f92,
+            Geometry::Bar { len, thick: 0.07 },
+            Style::Rail,
+            1.05,
+            0.0,
+            end_anchors(len),
+        ),
+        shape(
+            "window",
+            "Window",
+            "Barrier",
+            SnapMode::Edge,
+            0x7fb3c8,
+            Geometry::Bar { len, thick: 0.18 },
+            Style::Window,
+            2.8,
+            0.0,
+            end_anchors(len),
+        ),
+        shape(
+            "pillar",
+            "Pillar",
+            "Barrier",
+            SnapMode::Center,
+            0x8d9aab,
+            Geometry::Circle { r: 0.24 },
+            Style::Plain,
+            2.8,
+            0.0,
+            ring_anchors(4, 0.3, std::f32::consts::FRAC_PI_4),
+        ),
         // Thresholds
-        shape("door", "Door", "Threshold", SnapMode::Edge, 0xc9924a, Geometry::Bar { len, thick: 14.0 }, Style::Door, end_anchors(len)),
-        shape("gate", "Gate", "Threshold", SnapMode::Edge, 0xb47a3f, Geometry::Bar { len, thick: 16.0 }, Style::Gate, end_anchors(len)),
-        shape("secret", "Secret", "Threshold", SnapMode::Edge, 0x9b8fc4, Geometry::Bar { len, thick: 14.0 }, Style::Secret, end_anchors(len)),
-        shape("rubble", "Rubble", "Threshold", SnapMode::Edge, 0x7d7261, Geometry::Bar { len, thick: 18.0 }, Style::Rubble, end_anchors(len)),
+        shape(
+            "door",
+            "Door",
+            "Threshold",
+            SnapMode::Edge,
+            0xc9924a,
+            Geometry::Bar { len, thick: 0.18 },
+            Style::Door,
+            2.4,
+            0.0,
+            end_anchors(len),
+        ),
+        shape(
+            "gate",
+            "Gate",
+            "Threshold",
+            SnapMode::Edge,
+            0xb47a3f,
+            Geometry::Bar { len, thick: 0.22 },
+            Style::Gate,
+            2.6,
+            0.0,
+            end_anchors(len),
+        ),
+        shape(
+            "secret",
+            "Secret",
+            "Threshold",
+            SnapMode::Edge,
+            0x9b8fc4,
+            Geometry::Bar { len, thick: 0.18 },
+            Style::Secret,
+            2.8,
+            0.0,
+            end_anchors(len),
+        ),
+        shape(
+            "rubble",
+            "Rubble",
+            "Threshold",
+            SnapMode::Edge,
+            0x7d7261,
+            Geometry::Bar { len, thick: 0.36 },
+            Style::Rubble,
+            0.55,
+            0.0,
+            end_anchors(len),
+        ),
         // Fixtures
-        shape("crate", "Crate", "Fixture", SnapMode::Center, 0x8a6334, Geometry::Rect { w: 38.0, h: 38.0 }, Style::Plain, ring_anchors(4, 27.0, 0.0)),
-        shape("chest", "Chest", "Fixture", SnapMode::Center, 0x9c7440, Geometry::Rect { w: 48.0, h: 32.0 }, Style::Plain, ring_anchors(4, 30.0, 0.0)),
-        shape("altar", "Altar", "Fixture", SnapMode::Center, 0x6e7f9c, Geometry::Rect { w: 44.0, h: 28.0 }, Style::Plain, ring_anchors(4, 28.0, 0.0)),
-        shape("brazier", "Brazier", "Fixture", SnapMode::Center, 0xb4622f, Geometry::Circle { r: 15.0 }, Style::Plain, ring_anchors(4, 20.0, std::f32::consts::FRAC_PI_4)),
+        shape(
+            "crate",
+            "Crate",
+            "Fixture",
+            SnapMode::Center,
+            0x8a6334,
+            Geometry::Rect { w: 0.85, h: 0.85 },
+            Style::Plain,
+            0.85,
+            0.0,
+            ring_anchors(4, 0.6, 0.0),
+        ),
+        shape(
+            "chest",
+            "Chest",
+            "Fixture",
+            SnapMode::Center,
+            0x9c7440,
+            Geometry::Rect { w: 1.0, h: 0.62 },
+            Style::Plain,
+            0.7,
+            0.0,
+            ring_anchors(4, 0.62, 0.0),
+        ),
+        shape(
+            "altar",
+            "Altar",
+            "Fixture",
+            SnapMode::Center,
+            0x6e7f9c,
+            Geometry::Rect { w: 0.9, h: 0.55 },
+            Style::Plain,
+            1.0,
+            0.0,
+            ring_anchors(4, 0.6, 0.0),
+        ),
+        shape(
+            "brazier",
+            "Brazier",
+            "Fixture",
+            SnapMode::Center,
+            0xb4622f,
+            Geometry::Circle { r: 0.3 },
+            Style::Plain,
+            0.85,
+            0.0,
+            ring_anchors(4, 0.38, std::f32::consts::FRAC_PI_4),
+        ),
         // Resources
-        shape("herb", "Herbs", "Resource", SnapMode::Center, 0x5d8a4a, Geometry::Circle { r: 13.0 }, Style::Plain, ring_anchors(1, 19.0, -std::f32::consts::FRAC_PI_2)),
-        shape("ore", "Ore", "Resource", SnapMode::Center, 0x6f8fa3, Geometry::Diamond { r: 18.0 }, Style::Plain, ring_anchors(1, 24.0, -std::f32::consts::FRAC_PI_2)),
+        shape(
+            "herb",
+            "Herbs",
+            "Resource",
+            SnapMode::Center,
+            0x5d8a4a,
+            Geometry::Circle { r: 0.26 },
+            Style::Plain,
+            0.3,
+            0.0,
+            ring_anchors(1, 0.34, -std::f32::consts::FRAC_PI_2),
+        ),
+        shape(
+            "ore",
+            "Ore",
+            "Resource",
+            SnapMode::Center,
+            0x6f8fa3,
+            Geometry::Diamond { r: 0.32 },
+            Style::Plain,
+            0.5,
+            0.0,
+            ring_anchors(1, 0.4, -std::f32::consts::FRAC_PI_2),
+        ),
         // Markers
-        shape("spawn", "Spawn", "Marker", SnapMode::Center, 0xb4565c, Geometry::Cross { r: 18.0 }, Style::Plain, ring_anchors(1, 24.0, -std::f32::consts::FRAC_PI_2)),
-        shape("entry", "Entry", "Marker", SnapMode::Center, 0x57b39a, Geometry::Flag { r: 20.0 }, Style::Plain, ring_anchors(1, 26.0, -std::f32::consts::FRAC_PI_2)),
+        shape(
+            "spawn",
+            "Spawn",
+            "Marker",
+            SnapMode::Center,
+            0xb4565c,
+            Geometry::Cross { r: 0.35 },
+            Style::Plain,
+            0.02,
+            0.01,
+            ring_anchors(1, 0.45, -std::f32::consts::FRAC_PI_2),
+        ),
+        shape(
+            "entry",
+            "Entry",
+            "Marker",
+            SnapMode::Center,
+            0x57b39a,
+            Geometry::Flag { r: 0.4 },
+            Style::Plain,
+            0.02,
+            0.01,
+            ring_anchors(1, 0.5, -std::f32::consts::FRAC_PI_2),
+        ),
     ]
 });
 
@@ -279,7 +541,7 @@ pub fn shape_index(id: &str) -> Option<usize> {
     shapes().iter().position(|s| s.id == id)
 }
 
-/// Outline of a shape in local space.
+/// Outline of a shape in local space, on the ground plane.
 pub fn shape_points(shape: &Shape) -> Vec<Vec2> {
     match &shape.geom {
         Geometry::Hex { r } => (0..6)
@@ -300,7 +562,9 @@ pub fn shape_points(shape: &Shape) -> Vec<Vec2> {
             Vec2::new(w / 2.0, h / 2.0),
             Vec2::new(-w / 2.0, h / 2.0),
         ],
-        Geometry::Circle { r } => (0..24).map(|i| Vec2::from_angle(std::f32::consts::TAU * i as f32 / 24.0) * *r).collect(),
+        Geometry::Circle { r } => (0..24)
+            .map(|i| Vec2::from_angle(std::f32::consts::TAU * i as f32 / 24.0) * *r)
+            .collect(),
         Geometry::Diamond { r } => vec![
             Vec2::new(0.0, *r),
             Vec2::new(r * 0.7, 0.0),
@@ -310,14 +574,27 @@ pub fn shape_points(shape: &Shape) -> Vec<Vec2> {
         Geometry::Cross { r } => {
             let w = r * 0.34;
             vec![
-                Vec2::new(-w, -*r), Vec2::new(w, -*r), Vec2::new(w, -w), Vec2::new(*r, -w),
-                Vec2::new(*r, w), Vec2::new(w, w), Vec2::new(w, *r), Vec2::new(-w, *r),
-                Vec2::new(-w, w), Vec2::new(-*r, w), Vec2::new(-*r, -w), Vec2::new(-w, -w),
+                Vec2::new(-w, -*r),
+                Vec2::new(w, -*r),
+                Vec2::new(w, -w),
+                Vec2::new(*r, -w),
+                Vec2::new(*r, w),
+                Vec2::new(w, w),
+                Vec2::new(w, *r),
+                Vec2::new(-w, *r),
+                Vec2::new(-w, w),
+                Vec2::new(-*r, w),
+                Vec2::new(-*r, -w),
+                Vec2::new(-w, -w),
             ]
         }
+        // A chevron pointing along +x. Simple (no vertex lands on another
+        // edge), which the ear clipper in `mesh.rs` needs.
         Geometry::Flag { r } => vec![
-            Vec2::new(-2.0, -*r), Vec2::new(2.0, -*r), Vec2::new(2.0, *r),
-            Vec2::new(r * 0.9, r * 0.35), Vec2::new(2.0, r * 0.05),
+            Vec2::new(-0.6 * r, -*r),
+            Vec2::new(*r, 0.0),
+            Vec2::new(-0.6 * r, *r),
+            Vec2::new(-0.2 * r, 0.0),
         ],
     }
 }
@@ -330,7 +607,9 @@ pub fn shape_points(shape: &Shape) -> Vec<Vec2> {
 pub struct Piece {
     pub id: u32,
     pub shape: usize,
+    /// Ground position: `x` and `z` in metres.
     pub pos: Vec2,
+    /// Yaw in radians, counter-clockwise seen from above.
     pub rot: f32,
 }
 
@@ -341,15 +620,31 @@ pub struct WorldAnchor {
     pub kind: AnchorKind,
 }
 
+/// World-space yaw as a quaternion: the mesh is rotated by `-rot` about +Y so
+/// that the model's `(x, y)` plane lands on the world's `(x, z)` plane.
+pub fn yaw_quat(rot: f32) -> bevy::math::Quat {
+    bevy::math::Quat::from_rotation_y(-rot)
+}
+
 pub fn world_anchors(piece: &Piece, shape: &Shape) -> Vec<WorldAnchor> {
     let (sin, cos) = piece.rot.sin_cos();
     shape
         .anchors
         .iter()
         .map(|a| {
-            let rotated = Vec2::new(a.local.x * cos - a.local.y * sin, a.local.x * sin + a.local.y * cos);
-            let normal = Vec2::new(a.normal.x * cos - a.normal.y * sin, a.normal.x * sin + a.normal.y * cos);
-            WorldAnchor { pos: piece.pos + rotated, normal, kind: a.kind }
+            let rotated = Vec2::new(
+                a.local.x * cos - a.local.y * sin,
+                a.local.x * sin + a.local.y * cos,
+            );
+            let normal = Vec2::new(
+                a.normal.x * cos - a.normal.y * sin,
+                a.normal.x * sin + a.normal.y * cos,
+            );
+            WorldAnchor {
+                pos: piece.pos + rotated,
+                normal,
+                kind: a.kind,
+            }
         })
         .collect()
 }
@@ -366,8 +661,7 @@ fn point_in_polygon(points: &[Vec2], p: Vec2) -> bool {
     for i in 0..points.len() {
         let pi = points[i];
         let pj = points[j];
-        if (pi.y > p.y) != (pj.y > p.y)
-            && p.x < (pj.x - pi.x) * (p.y - pi.y) / (pj.y - pi.y) + pi.x
+        if (pi.y > p.y) != (pj.y > p.y) && p.x < (pj.x - pi.x) * (p.y - pi.y) / (pj.y - pi.y) + pi.x
         {
             inside = !inside;
         }
@@ -413,7 +707,9 @@ pub fn anchor_snap(piece: &Piece, shape: &Shape, others: &[Piece], threshold: f3
         if other.id == piece.id {
             continue;
         }
-        let Some(other_shape) = shapes().get(other.shape) else { continue };
+        let Some(other_shape) = shapes().get(other.shape) else {
+            continue;
+        };
         for target in world_anchors(other, other_shape) {
             for m in &moving {
                 if m.kind != target.kind {
@@ -444,13 +740,17 @@ pub fn grid_snap(piece: &Piece, shape: &Shape) -> Snap {
     match shape.mode {
         SnapMode::Edge => {
             let (pos, rot) = nearest_edge(piece.pos);
-            Snap { pos, rot, kind: SnapKind::Grid }
+            Snap {
+                pos,
+                rot,
+                kind: SnapKind::Grid,
+            }
         }
         SnapMode::Center => Snap {
             pos: nearest_hex(piece.pos),
             rot: piece.rot,
             kind: SnapKind::Grid,
-            },
+        },
     }
 }
 
@@ -470,7 +770,11 @@ pub fn snap_piece(
     if grid {
         return grid_snap(piece, shape);
     }
-    Snap { pos: piece.pos, rot: piece.rot, kind: SnapKind::Free }
+    Snap {
+        pos: piece.pos,
+        rot: piece.rot,
+        kind: SnapKind::Free,
+    }
 }
 
 pub fn normalize_angle(a: f32) -> f32 {
@@ -487,6 +791,11 @@ mod tests {
 
     fn near(a: f32, b: f32, eps: f32) {
         assert!((a - b).abs() <= eps, "{a} !~ {b}");
+    }
+
+    fn shape_by_id(id: &str) -> &'static Shape {
+        let i = shape_index(id).unwrap_or_else(|| panic!("no shape {id}"));
+        &shapes()[i]
     }
 
     #[test]
@@ -506,30 +815,46 @@ mod tests {
     #[test]
     fn nearest_edge_finds_the_edge_and_folds_its_angle() {
         let d = HEX_SIZE * SQRT3 / 2.0;
-        let (pos, angle) = nearest_edge(Vec2::new(d - 6.0, 0.0));
-        near(pos.x, d, 0.5);
-        near(angle, 0.0, 0.001);
+        let (pos, angle) = nearest_edge(Vec2::new(d - 0.15, 0.0));
+        near(pos.x, d, 0.01);
+        // The +x edge is vertical, so the bar runs along +y in model space.
+        near(angle, std::f32::consts::FRAC_PI_2, 0.001);
         // The same physical edge from the other side must not flip the bar.
-        let (_, angle) = nearest_edge(Vec2::new(d + 6.0, 0.0));
-        near(angle, 0.0, 0.001);
+        let (_, angle) = nearest_edge(Vec2::new(d + 0.15, 0.0));
+        near(angle, std::f32::consts::FRAC_PI_2, 0.001);
     }
 
     #[test]
     fn a_wall_snaps_end_to_end() {
-        let wall = shape_index("wall").map(|i| &shapes()[i]).unwrap();
-        let a = Piece { id: 1, shape: shape_index("wall").unwrap(), pos: Vec2::ZERO, rot: 0.0 };
-        let ghost = Piece { id: 2, shape: shape_index("wall").unwrap(), pos: Vec2::new(edge_len() - 2.0, 1.0), rot: 0.0 };
+        let wall = shape_by_id("wall");
+        let a = Piece {
+            id: 1,
+            shape: shape_index("wall").unwrap(),
+            pos: Vec2::ZERO,
+            rot: 0.0,
+        };
+        let ghost = Piece {
+            id: 2,
+            shape: shape_index("wall").unwrap(),
+            pos: Vec2::new(edge_len() - 0.05, 0.02),
+            rot: 0.0,
+        };
 
-        let snap = anchor_snap(&ghost, wall, &[a], 24.0).expect("anchor snap");
-        near(snap.pos.x, edge_len(), 0.5);
-        near(snap.pos.y, 0.0, 0.5);
+        let snap = anchor_snap(&ghost, wall, &[a], SNAP_THRESHOLD).expect("anchor snap");
+        near(snap.pos.x, edge_len(), 0.02);
+        near(snap.pos.y, 0.0, 0.02);
         assert_eq!(snap.kind, SnapKind::Anchor);
     }
 
     #[test]
     fn a_wall_on_the_next_edge_does_not_weld() {
-        let wall = shape_index("wall").map(|i| &shapes()[i]).unwrap();
-        let a = Piece { id: 1, shape: shape_index("wall").unwrap(), pos: Vec2::ZERO, rot: 0.0 };
+        let wall = shape_by_id("wall");
+        let a = Piece {
+            id: 1,
+            shape: shape_index("wall").unwrap(),
+            pos: Vec2::ZERO,
+            rot: 0.0,
+        };
         // Rotate the ghost by 60° and place its left anchor exactly on a's right anchor.
         let off = Vec2::from_angle(std::f32::consts::PI / 3.0) * Vec2::new(-edge_len() / 2.0, 0.0);
         let ghost = Piece {
@@ -538,41 +863,72 @@ mod tests {
             pos: Vec2::new(edge_len() / 2.0, 0.0) - off,
             rot: std::f32::consts::PI / 3.0,
         };
-        assert_eq!(anchor_snap(&ghost, wall, &[a], 24.0).is_none(), true);
+        assert!(anchor_snap(&ghost, wall, &[a], SNAP_THRESHOLD).is_none());
     }
 
     #[test]
     fn a_crate_clicks_into_a_crate() {
-        let crate_shape = shape_index("crate").map(|i| &shapes()[i]).unwrap();
-        let a = Piece { id: 1, shape: shape_index("crate").unwrap(), pos: Vec2::ZERO, rot: 0.0 };
-        let ghost = Piece { id: 2, shape: shape_index("crate").unwrap(), pos: Vec2::new(57.0, 2.0), rot: 0.0 };
-        let snap = anchor_snap(&ghost, crate_shape, &[a], 24.0).expect("crate snap");
-        near(snap.pos.x, 54.0, 0.01);
+        let crate_shape = shape_by_id("crate");
+        let a = Piece {
+            id: 1,
+            shape: shape_index("crate").unwrap(),
+            pos: Vec2::ZERO,
+            rot: 0.0,
+        };
+        let ghost = Piece {
+            id: 2,
+            shape: shape_index("crate").unwrap(),
+            pos: Vec2::new(1.25, 0.02),
+            rot: 0.0,
+        };
+        let snap = anchor_snap(&ghost, crate_shape, &[a], SNAP_THRESHOLD).expect("crate snap");
+        near(snap.pos.x, 1.2, 0.01);
         near(snap.pos.y, 0.0, 0.01);
     }
 
     #[test]
     fn grid_snap_orients_walls_and_leaves_props_alone() {
-        let wall = shape_index("wall").map(|i| &shapes()[i]).unwrap();
+        let wall = shape_by_id("wall");
         let d = HEX_SIZE * SQRT3 / 2.0;
-        let snap = grid_snap(&Piece { id: 1, shape: 0, pos: Vec2::new(d + 3.0, 2.0), rot: 1.2 }, wall);
+        let snap = grid_snap(
+            &Piece {
+                id: 1,
+                shape: 0,
+                pos: Vec2::new(d + 0.15, 0.05),
+                rot: 1.2,
+            },
+            wall,
+        );
         assert_eq!(snap.kind, SnapKind::Grid);
-        near(snap.rot, 0.0, 0.001);
+        near(snap.rot, std::f32::consts::FRAC_PI_2, 0.001);
 
-        let crate_shape = shape_index("crate").map(|i| &shapes()[i]).unwrap();
-        let snap = grid_snap(&Piece { id: 1, shape: 0, pos: Vec2::new(7.0, -9.0), rot: 0.5 }, crate_shape);
+        let crate_shape = shape_by_id("crate");
+        let snap = grid_snap(
+            &Piece {
+                id: 1,
+                shape: 0,
+                pos: Vec2::new(0.06, -0.08),
+                rot: 0.5,
+            },
+            crate_shape,
+        );
         near(snap.rot, 0.5, 0.001);
         near(snap.pos.x, hex_center(0, 0).x, 0.01);
     }
 
     #[test]
     fn hit_testing_follows_the_shape() {
-        let crate_shape = shape_index("crate").map(|i| &shapes()[i]).unwrap();
-        let p = Piece { id: 1, shape: shape_index("crate").unwrap(), pos: Vec2::ZERO, rot: 0.0 };
+        let crate_shape = shape_by_id("crate");
+        let p = Piece {
+            id: 1,
+            shape: shape_index("crate").unwrap(),
+            pos: Vec2::ZERO,
+            rot: 0.0,
+        };
         assert!(hit_test(crate_shape, &p, Vec2::ZERO, 0.0));
-        assert!(!hit_test(crate_shape, &p, Vec2::new(100.0, 0.0), 4.0));
-        assert!(!hit_test(crate_shape, &p, Vec2::new(22.0, 22.0), 0.0));
-        assert!(hit_test(crate_shape, &p, Vec2::new(15.0, 15.0), 0.0));
+        assert!(!hit_test(crate_shape, &p, Vec2::new(2.0, 0.0), HIT_PAD));
+        assert!(!hit_test(crate_shape, &p, Vec2::new(0.5, 0.5), 0.0));
+        assert!(hit_test(crate_shape, &p, Vec2::new(0.3, 0.3), 0.0));
     }
 
     #[test]
@@ -592,12 +948,46 @@ mod tests {
 
     #[test]
     fn anchors_rotate_with_the_piece() {
-        let crate_shape = shape_index("crate").map(|i| &shapes()[i]).unwrap();
-        let p = Piece { id: 1, shape: shape_index("crate").unwrap(), pos: Vec2::new(10.0, 20.0), rot: std::f32::consts::FRAC_PI_2 };
+        let crate_shape = shape_by_id("crate");
+        let p = Piece {
+            id: 1,
+            shape: shape_index("crate").unwrap(),
+            pos: Vec2::new(0.2, 0.4),
+            rot: std::f32::consts::FRAC_PI_2,
+        };
         let a = world_anchors(&p, crate_shape);
-        near(a[0].pos.x, 10.0, 0.01);
-        near(a[0].pos.y, 47.0, 0.01);
+        near(a[0].pos.x, 0.2, 0.01);
+        near(a[0].pos.y, 1.0, 0.01);
         near(a[0].normal.x, 0.0, 0.01);
         near(a[0].normal.y, 1.0, 0.01);
+    }
+
+    #[test]
+    fn pieces_have_the_vertical_extent_the_scene_expects() {
+        let floor = shape_by_id("floor");
+        near(floor.top(), 0.0, 1e-4);
+        assert!(floor.base < 0.0);
+
+        let wall = shape_by_id("wall");
+        near(wall.base, 0.0, 1e-4);
+        assert!(wall.height > 2.0, "a wall should be over two metres");
+
+        let crate_shape = shape_by_id("crate");
+        near(crate_shape.base, 0.0, 1e-4);
+        assert!(crate_shape.height > 0.5);
+
+        for s in shapes() {
+            assert!(s.height > 0.0, "{} has no height", s.id);
+            assert!(s.top() > -2.0, "{} is buried too deep", s.id);
+        }
+    }
+
+    #[test]
+    fn walls_are_exactly_one_hex_edge_long() {
+        let wall = shape_by_id("wall");
+        let Geometry::Bar { len, .. } = wall.geom else {
+            panic!("wall is not a bar")
+        };
+        near(len, edge_len(), 1e-4);
     }
 }
