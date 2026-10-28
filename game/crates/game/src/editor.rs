@@ -34,6 +34,8 @@ const PILL_COLOR: Color = Color::srgb_u8(0x3f, 0xd0, 0xb0);
 /// Eye height and capsule half-height, in metres.
 const EYE_HEIGHT: f32 = 1.55;
 const PILL_HALF: f32 = 0.87;
+/// Walking pace, in metres per second.
+const WALK_SPEED: f32 = 2.2;
 
 pub struct EditorPlugin;
 
@@ -47,6 +49,7 @@ impl Plugin for EditorPlugin {
             .add_systems(
                 Update,
                 (
+                    walk,
                     camera_control,
                     update_cursor,
                     interact,
@@ -72,6 +75,7 @@ struct Editor {
     actor_tool: Option<ActorTool>,
     character: Option<Character>,
     route: Option<Route>,
+    walk: Option<Walk>,
     selected: Option<u32>,
     next_id: u32,
     snap: bool,
@@ -90,6 +94,7 @@ impl Default for Editor {
             actor_tool: None,
             character: None,
             route: None,
+            walk: None,
             selected: None,
             next_id: 1,
             snap: true,
@@ -115,11 +120,17 @@ struct Character {
     yaw: f32,
 }
 
-/// A routed path, already flattened for drawing.
+/// A routed path with arc length, so the walker moves at a constant speed.
 struct Route {
-    points: Vec<Vec2>,
+    track: path::Track,
     target: Vec2,
     hexes: usize,
+}
+
+#[derive(Clone, Copy)]
+struct Walk {
+    distance: f32,
+    speed: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -489,6 +500,46 @@ fn solid_parts(shape: &model::Shape) -> Vec<(Vec<Vec2>, f32, f32, u8)> {
 }
 
 // ---------------------------------------------------------------------------
+// Walking
+// ---------------------------------------------------------------------------
+
+/// Advance the character along the drawn route at a constant walking pace.
+/// The camera's orbit centre follows in third/top view; in first person the
+/// look direction follows the tangent.
+fn walk(time: Res<Time>, mut editor: ResMut<Editor>, mut orbit: ResMut<Orbit>) {
+    let Some(mut current) = editor.walk else {
+        return;
+    };
+    let Some(route) = editor.route.as_ref() else {
+        editor.walk = None;
+        return;
+    };
+
+    let total = route.track.total();
+    current.distance = (current.distance + current.speed * time.delta_secs()).min(total);
+    let (pos, forward) = route.track.at(current.distance);
+    let yaw = (-forward.x).atan2(-forward.y);
+
+    if let Some(character) = editor.character.as_mut() {
+        character.pos = pos;
+        character.yaw = yaw;
+    }
+
+    if orbit.mode == ViewMode::First {
+        orbit.yaw = yaw;
+    } else {
+        orbit.target = Vec3::new(pos.x, 0.0, pos.y);
+    }
+
+    if current.distance >= total - 1e-4 {
+        editor.walk = None;
+        editor.note = "arrived";
+    } else {
+        editor.walk = Some(current);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Camera
 // ---------------------------------------------------------------------------
 
@@ -692,6 +743,7 @@ fn interact(
         editor.ghost = None;
         editor.drag = None;
         editor.route = None;
+        editor.walk = None;
         editor.note = "Click a component, then the grid";
     }
 
@@ -798,6 +850,7 @@ fn interact(
             };
             editor.character = Some(character);
             editor.route = None;
+            editor.walk = None;
             focus(&mut orbit, Some(character));
             editor.note = "character placed — V for first person, click the floor for a path";
         }
@@ -897,16 +950,25 @@ fn route_to(editor: &mut Editor, target: Vec2) {
     match path::find_path(start, goal, &edges, &hexes) {
         Some(route) => {
             let points = path::waypoints(character.pos, target, &route);
-            let sampled = path::sample(&path::smooth(&points), 18);
+            let track = path::Track::new(path::sample(&path::smooth(&points), 18));
+            editor.walk = (track.total() > 0.1).then_some(Walk {
+                distance: 0.0,
+                speed: WALK_SPEED,
+            });
+            editor.note = if editor.walk.is_some() {
+                "walking"
+            } else {
+                "route drawn"
+            };
             editor.route = Some(Route {
-                points: sampled,
+                track,
                 target,
                 hexes: route.len(),
             });
-            editor.note = "route drawn";
         }
         None => {
             editor.route = None;
+            editor.walk = None;
             editor.note = "no route to that point";
         }
     }
@@ -1239,7 +1301,8 @@ fn draw(editor: Res<Editor>, cursor: Res<Cursor>, orbit: Res<Orbit>, mut gizmos:
 
     if let Some(route) = &editor.route {
         let points: Vec<Vec3> = route
-            .points
+            .track
+            .points()
             .iter()
             .map(|p| Vec3::new(p.x, 0.07, p.y))
             .collect();

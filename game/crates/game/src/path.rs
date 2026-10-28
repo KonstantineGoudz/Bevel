@@ -169,6 +169,74 @@ fn simplify(points: Vec<Vec2>) -> Vec<Vec2> {
     out
 }
 
+/// A flattened curve with cumulative arc length, so a walker can advance at a
+/// constant speed instead of at a constant Bezier parameter.
+#[derive(Clone, Debug)]
+pub struct Track {
+    points: Vec<Vec2>,
+    lengths: Vec<f32>,
+}
+
+impl Track {
+    pub fn new(points: Vec<Vec2>) -> Self {
+        let mut lengths = Vec::with_capacity(points.len());
+        let mut total = 0.0;
+        for (i, point) in points.iter().enumerate() {
+            if i > 0 {
+                total += point.distance(points[i - 1]);
+            }
+            lengths.push(total);
+        }
+        Self { points, lengths }
+    }
+
+    pub fn points(&self) -> &[Vec2] {
+        &self.points
+    }
+
+    pub fn total(&self) -> f32 {
+        self.lengths.last().copied().unwrap_or(0.0)
+    }
+
+    /// Position and unit forward vector at `distance` metres along the track.
+    pub fn at(&self, distance: f32) -> (Vec2, Vec2) {
+        if self.points.is_empty() {
+            return (Vec2::ZERO, Vec2::X);
+        }
+        if self.points.len() == 1 {
+            return (self.points[0], Vec2::X);
+        }
+
+        let d = distance.clamp(0.0, self.total());
+        let i = match self
+            .lengths
+            .binary_search_by(|length| length.partial_cmp(&d).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        }
+        .min(self.points.len() - 2);
+
+        let span = self.lengths[i + 1] - self.lengths[i];
+        let t = if span > 1e-6 {
+            (d - self.lengths[i]) / span
+        } else {
+            0.0
+        };
+        let a = self.points[i];
+        let b = self.points[i + 1];
+        let forward = (b - a).normalize_or_zero();
+        (
+            a.lerp(b, t.clamp(0.0, 1.0)),
+            if forward == Vec2::ZERO {
+                Vec2::X
+            } else {
+                forward
+            },
+        )
+    }
+}
+
 /// One cubic Bezier segment.
 #[derive(Clone, Copy, Debug)]
 pub struct Cubic {
@@ -322,6 +390,31 @@ mod tests {
                 .any(|p| p.distance(model::hex_center(1, 0)) < 1e-3),
             "the middle hex should be a waypoint: {points:?}"
         );
+    }
+
+    #[test]
+    fn a_track_walks_a_polyline_at_constant_speed() {
+        let track = Track::new(vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(2.0, 0.0),
+            Vec2::new(2.0, 2.0),
+        ]);
+        assert!((track.total() - 4.0).abs() < 1e-4);
+
+        let (start, forward) = track.at(0.0);
+        assert!(start.distance(Vec2::ZERO) < 1e-4);
+        assert!(forward.distance(Vec2::X) < 1e-4);
+
+        let (one, forward) = track.at(1.0);
+        assert!(one.distance(Vec2::new(1.0, 0.0)) < 1e-4);
+        assert!(forward.distance(Vec2::X) < 1e-4);
+
+        let (three, forward) = track.at(3.0);
+        assert!(three.distance(Vec2::new(2.0, 1.0)) < 1e-4);
+        assert!(forward.distance(Vec2::Y) < 1e-4);
+
+        let (end, _) = track.at(99.0);
+        assert!(end.distance(Vec2::new(2.0, 2.0)) < 1e-4);
     }
 
     #[test]
