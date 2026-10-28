@@ -189,11 +189,12 @@ free    set pieces              whatever the author insists on`;
           30&deg; and nothing has to be re-snapped to load a map.
         </p>
       </Card>
-      <Card status="guess" title="Multi-level falls out for free">
+      <Card status="guess" title="Multi-level is free in storage, not in pathing">
         <p>
-          Because <code>z</code> is just a coordinate, a bridge over a pit is two
-          surfaces in one column with no special case &mdash; which was the
-          thing the cell model could not express.
+          Because <code>z</code> is just a coordinate, a bridge over a pit needs
+          no special case in the save file. The navmesh is another matter: it is
+          a plane, so stacked floors are separate meshes joined by stairs. See
+          below.
         </p>
       </Card>
     </div>
@@ -234,12 +235,12 @@ free    set pieces              whatever the author insists on`;
           The projection is a question, never an identity.
         </p>
       </Card>
-      <Card status="guess" title="The connectivity graph is derived at publish">
+      <Card status="guess" title="The hex graph is for regions, not paths">
         <p>
-          Nothing is stored as edges any more, so pathfinding input is computed:
-          rasterise walls and doors onto hex boundaries, flood-fill the rest.
-          That is the same graph the previous model stored directly, rebuilt from
-          the scene.
+          Projecting placements onto hexes answers "which room is this chest
+          in", for loot budgets and lighting. Reachability and movement come
+          from the navmesh instead &mdash; two structures, two jobs, so neither
+          has to do the other's work badly.
         </p>
       </Card>
       <Card status="guess" title="Rotated things straddle hexes">
@@ -254,6 +255,119 @@ free    set pieces              whatever the author insists on`;
           It can be thrown away and rebuilt from placements plus block
           definitions. Store it only because rebuilding on every join would make
           load time a function of map size.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="Pathing is a navmesh, built on publish">
+    <p class="lede" style="font-size:16px; margin-bottom:18px">
+      <code>vleue_navigator</code> 0.17 is the Bevy 0.20 line, and it paths with
+      Polyanya over a generated navmesh. The mesh is built when the author is
+      done and rebuilt when they edit &mdash; never per frame.
+    </p>
+    <div class="grid">
+      <Card status="decided" title="One build, on demand" tag="Yours">
+        <p>
+          <code>NavMeshUpdateMode::OnDemand(true)</code> is exactly this: nothing
+          happens until the trigger flips, then the mesh is rebuilt. By default
+          it runs off the main thread, so a big map does not freeze the editor.
+        </p>
+      </Card>
+      <Card status="guess" title="The obstacles are the collision proxies">
+        <p>
+          Generation reads obstacle components, and ours are the same small
+          convex hulls already stored per prefab. No render mesh is needed to
+          build a navmesh, which is what keeps metadata-only storage honest.
+        </p>
+      </Card>
+      <Card status="guess" title="Derived, stored per version">
+        <p>
+          A mesh belongs to a <code>blueprint_version</code>, not a blueprint.
+          Clients load the built mesh (<code>NavMesh::from_bevy_mesh</code> or
+          the asset loader) instead of rebuilding it, and it can always be
+          thrown away and regenerated.
+        </p>
+      </Card>
+      <Card status="guess" title="Editor validation is a path query">
+        <p>
+          "Is the exit reachable?" is the same Polyanya call the game makes. If
+          entry to exit returns no path, the publish is refused &mdash; the
+          validator and the mobs agree because they run the same code.
+        </p>
+      </Card>
+      <Card status="guess" title="Any-angle, so paths never touch the hex grid">
+        <p>
+          Polyanya cuts corners across polygons rather than stepping cell to
+          cell. That settles the earlier question by construction: the hex grid
+          is for authors, and no path ever knows it exists.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="The mesh changes with the run">
+    <div class="grid">
+      <Card status="decided" title="A gate change rebuilds the mesh" tag="Yours">
+        <p>
+          A closed gate removes walkable surface, so the instance rebuilds when
+          the gate toggles. The publish-time mesh is the cache for the default
+          state; an instance whose gates differ gets its own.
+        </p>
+      </Card>
+      <Card status="guess" title="A mesh is a pure function of layout and gate states">
+        <p>
+          Same layout version plus same gate states gives the same mesh, with no
+          randomness. That is what lets the server build it authoritatively and
+          a client rebuild it after a replicated toggle without the two drifting.
+        </p>
+      </Card>
+      <Card status="guess" title="Coalesce the rebuilds">
+        <p>
+          A boss dying can open three gates at once. One rebuild per tick window,
+          not three. A lever with a cooldown does the rate limiting, so the mesh
+          builder never becomes a gameplay throttle.
+        </p>
+      </Card>
+      <Card status="guess" title="The old mesh serves until the new one lands">
+        <p>
+          Builds are asynchronous, so agents keep using the previous mesh. When
+          the new one arrives, anyone whose path crosses the changed gate
+          re-paths. Nobody stands still waiting on a rebuild mid-chase.
+        </p>
+      </Card>
+      <Card status="guess" title="Only the affected level rebuilds">
+        <p>
+          Per-level meshes make the cost proportional to the floor the gate is
+          on, not the whole dungeon &mdash; which is the argument for splitting
+          levels even where the geometry is continuous.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="Hard limits of the mesh">
+    <div class="grid">
+      <Card status="guess" title="Agent radius is baked in">
+        <p>
+          The generator offsets the walkable surface by the agent radius. A
+          doorway narrower than twice that radius closes up, so corridor width is
+          a pathing number now, not only a look. One mesh for the fattest mob, or
+          one per size class.
+        </p>
+      </Card>
+      <Card status="guess" title="Walls thinner than a cell leak">
+        <p>
+          Triangulation samples the outline; a wall thinner than the generation
+          cell size can vanish between samples and join two corridors into one.
+          This is the first hard lower bound on wall thickness.
+        </p>
+      </Card>
+      <Card status="guess" title="It is a plane, not a volume">
+        <p>
+          A navmesh is 2D. A bridge over a pit is two meshes in the same column,
+          joined at the stairs, and an agent has to be handed from one to the
+          other. Storage is free; pathing is per level.
         </p>
       </Card>
     </div>
@@ -341,6 +455,7 @@ free    set pieces              whatever the author insists on`;
         <li><b>placements</b> &mdash; version, block, position, rotation, parent, params.</li>
         <li><b>fragments</b> &mdash; a reusable group of placements, pasted with a transform.</li>
         <li><b>derived_regions</b> &mdash; version, hex, region id. Projection, rebuildable.</li>
+        <li><b>derived_navmesh</b> &mdash; version, level, gate-state fingerprint, serialised Polyanya mesh. Rebuilt on toggle.</li>
         <li><b>instance.state</b> &mdash; keyed by placement id: gate open, chest taken, spawn cleared.</li>
       </ul>
     </Card>
@@ -394,9 +509,20 @@ free    set pieces              whatever the author insists on`;
           lands anywhere, the seams are the author's problem.
         </li>
         <li>
-          <b>Does the editor need a rebuild-graph button?</b> Deriving at publish
-          is fine until someone edits a map they are standing in. Decide whether
-          that is blocked, warned, or hot-swapped on next entry.
+          <b>When is a rebuild too expensive?</b> The crate exposes
+          <code>NAVMESH_BUILD_DURATION</code> for exactly this. A level that
+          takes 300&nbsp;ms to retriangulate makes every gate toggle a visible
+          hitch, and splitting levels is the only lever.
+        </li>
+        <li>
+          <b>What is the narrowest doorway?</b> Twice the largest agent radius,
+          or the mesh closes there. Decides whether a big mob can exist at all
+          without a second navmesh.
+        </li>
+        <li>
+          <b>How do levels hand off?</b> Stairs are a link between two meshes; a
+          ladder is a climb. The navmesh cannot cross them, so the crossing has
+          to be authored and validated like a gate.
         </li>
       </ul>
     </Card>
