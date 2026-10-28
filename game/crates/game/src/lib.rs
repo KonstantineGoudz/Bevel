@@ -5,6 +5,7 @@ use bevy::prelude::*;
 mod editor;
 mod mesh;
 mod model;
+mod path;
 
 /// Entry point for every target. `bevy_main` generates the Android glue.
 #[bevy_main]

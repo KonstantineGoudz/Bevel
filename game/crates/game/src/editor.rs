@@ -17,6 +17,7 @@ use crate::model::{
     self, AnchorKind, CATEGORIES, HIT_PAD, PANEL_WIDTH, Piece, SNAP_THRESHOLD, SnapKind, Style,
     shapes,
 };
+use crate::path;
 
 const PANEL_BG: Color = Color::srgb_u8(0x10, 0x16, 0x1e);
 const BUTTON_BG: Color = Color::srgb_u8(0x14, 0x1c, 0x26);
@@ -28,6 +29,11 @@ const AMBER: Color = Color::srgb_u8(0xf0, 0xa6, 0x3c);
 const GRID: Color = Color::srgba(0.47, 0.59, 0.71, 0.10);
 const GRID_HOVER: Color = Color::srgba(0.47, 0.66, 0.86, 0.45);
 const GRID_Y: f32 = 0.004;
+const PATH: Color = Color::srgb_u8(0x5f, 0xe0, 0xc0);
+const PILL_COLOR: Color = Color::srgb_u8(0x3f, 0xd0, 0xb0);
+/// Eye height and capsule half-height, in metres.
+const EYE_HEIGHT: f32 = 1.55;
+const PILL_HALF: f32 = 0.87;
 
 pub struct EditorPlugin;
 
@@ -63,6 +69,9 @@ impl Plugin for EditorPlugin {
 struct Editor {
     pieces: Vec<Piece>,
     tool: Option<usize>,
+    actor_tool: Option<ActorTool>,
+    character: Option<Character>,
+    route: Option<Route>,
     selected: Option<u32>,
     next_id: u32,
     snap: bool,
@@ -78,6 +87,9 @@ impl Default for Editor {
         Self {
             pieces: Vec::new(),
             tool: None,
+            actor_tool: None,
+            character: None,
+            route: None,
             selected: None,
             next_id: 1,
             snap: true,
@@ -88,6 +100,26 @@ impl Default for Editor {
             note: "Click a component, then the grid",
         }
     }
+}
+
+/// The palette can arm a building block, the character, or the path tool.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ActorTool {
+    Place,
+    Path,
+}
+
+#[derive(Clone, Copy)]
+struct Character {
+    pos: Vec2,
+    yaw: f32,
+}
+
+/// A routed path, already flattened for drawing.
+struct Route {
+    points: Vec<Vec2>,
+    target: Vec2,
+    hexes: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -117,6 +149,7 @@ struct Orbit {
     yaw: f32,
     pitch: f32,
     distance: f32,
+    mode: ViewMode,
 }
 
 impl Default for Orbit {
@@ -126,6 +159,32 @@ impl Default for Orbit {
             yaw: 0.85,
             pitch: 0.9,
             distance: 7.5,
+            mode: ViewMode::Third,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ViewMode {
+    Third,
+    First,
+    Top,
+}
+
+impl ViewMode {
+    fn next(self) -> Self {
+        match self {
+            ViewMode::Third => ViewMode::First,
+            ViewMode::First => ViewMode::Top,
+            ViewMode::Top => ViewMode::Third,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            ViewMode::Third => "third",
+            ViewMode::First => "first",
+            ViewMode::Top => "top",
         }
     }
 }
@@ -147,7 +206,14 @@ impl Editor {
 }
 
 #[derive(Component)]
-struct PaletteButton(usize);
+struct PaletteButton(PaletteAction);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PaletteAction {
+    Shape(usize),
+    Character,
+    Path,
+}
 
 #[derive(Component)]
 struct StatusText;
@@ -155,10 +221,14 @@ struct StatusText;
 #[derive(Component)]
 struct PieceVisual;
 
+#[derive(Component)]
+struct CharacterVisual;
+
 /// One entity per piece (and one for the ghost, keyed 0).
 #[derive(Resource, Default)]
 struct Visuals {
     map: HashMap<u32, Entity>,
+    character: Option<Entity>,
 }
 
 /// Meshes and materials, built once at startup.
@@ -169,6 +239,8 @@ struct Kit {
     mats: Vec<Handle<StandardMaterial>>,
     glass: Handle<StandardMaterial>,
     ghost: Handle<StandardMaterial>,
+    pill: Handle<Mesh>,
+    pill_mat: Handle<StandardMaterial>,
 }
 
 // ---------------------------------------------------------------------------
@@ -242,11 +314,20 @@ fn setup(
         }
         parts.push(made);
     }
+    let pill = meshes.add(Capsule3d::new(0.32, 1.1));
+    let pill_mat = materials.add(StandardMaterial {
+        base_color: PILL_COLOR,
+        perceptual_roughness: 0.35,
+        metallic: 0.0,
+        ..default()
+    });
     commands.insert_resource(Kit {
         parts,
         mats,
         glass,
         ghost,
+        pill,
+        pill_mat,
     });
 
     let panel = commands
@@ -258,8 +339,8 @@ fn setup(
                 width: px(PANEL_WIDTH),
                 height: percent(100),
                 flex_direction: FlexDirection::Column,
-                padding: UiRect::all(px(12)),
-                row_gap: px(3),
+                padding: UiRect::all(px(10)),
+                row_gap: px(2),
                 border: UiRect::right(px(1)),
                 ..default()
             },
@@ -278,7 +359,7 @@ fn setup(
                 },
                 TextColor(MUTED),
                 Node {
-                    margin: UiRect::bottom(px(8)),
+                    margin: UiRect::bottom(px(6)),
                     ..default()
                 },
             ))
@@ -286,56 +367,31 @@ fn setup(
     ];
 
     for category in CATEGORIES {
-        children.push(
-            commands
-                .spawn((
-                    Text::new(category.to_uppercase()),
-                    TextFont {
-                        font_size: FontSize::Px(11.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb_u8(0x6c, 0x7f, 0x95)),
-                    Node {
-                        margin: UiRect::top(px(10)),
-                        ..default()
-                    },
-                ))
-                .id(),
-        );
+        children.push(palette_label(&mut commands, &category.to_uppercase()));
 
         for (index, shape) in shapes().iter().enumerate() {
             if shape.category != category {
                 continue;
             }
-            children.push(
-                commands
-                    .spawn((
-                        Button,
-                        PaletteButton(index),
-                        Node {
-                            width: percent(100),
-                            height: px(24),
-                            align_items: AlignItems::Center,
-                            padding: UiRect::horizontal(px(8)),
-                            border: UiRect::all(px(1)),
-                            border_radius: BorderRadius::all(px(6)),
-                            ..default()
-                        },
-                        BackgroundColor(BUTTON_BG),
-                        BorderColor::all(BORDER),
-                        children![(
-                            Text::new(shape.name),
-                            TextFont {
-                                font_size: FontSize::Px(13.0),
-                                ..default()
-                            },
-                            TextColor(Color::srgb_u8(0xc3, 0xd0, 0xdf)),
-                        )],
-                    ))
-                    .id(),
-            );
+            children.push(palette_button(
+                &mut commands,
+                PaletteAction::Shape(index),
+                shape.name,
+            ));
         }
     }
+
+    children.push(palette_label(&mut commands, "ACTOR"));
+    children.push(palette_button(
+        &mut commands,
+        PaletteAction::Character,
+        "Character",
+    ));
+    children.push(palette_button(
+        &mut commands,
+        PaletteAction::Path,
+        "Path preview",
+    ));
 
     commands.entity(panel).add_children(&children);
 
@@ -357,7 +413,7 @@ fn setup(
 
     commands.spawn((
         Text::new(
-            "LMB place / drag   |   RMB orbit   |   MMB / Shift+RMB pan   |   wheel zoom   |   R rotate   |   Del remove   |   Ctrl+Z undo   |   S save",
+            "LMB place / drag  |  RMB orbit / look  |  MMB pan  |  wheel zoom  |  V view  |  C character  |  R rotate  |  S save",
         ),
         TextFont { font_size: FontSize::Px(11.0), ..default() },
         TextColor(Color::srgb_u8(0x5f, 0x70, 0x85)),
@@ -368,6 +424,51 @@ fn setup(
             ..default()
         },
     ));
+}
+
+fn palette_label(commands: &mut Commands, text: &str) -> Entity {
+    commands
+        .spawn((
+            Text::new(text),
+            TextFont {
+                font_size: FontSize::Px(11.0),
+                ..default()
+            },
+            TextColor(Color::srgb_u8(0x6c, 0x7f, 0x95)),
+            Node {
+                margin: UiRect::top(px(8)),
+                ..default()
+            },
+        ))
+        .id()
+}
+
+fn palette_button(commands: &mut Commands, action: PaletteAction, text: &str) -> Entity {
+    commands
+        .spawn((
+            Button,
+            PaletteButton(action),
+            Node {
+                width: percent(100),
+                height: px(22),
+                align_items: AlignItems::Center,
+                padding: UiRect::horizontal(px(8)),
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(BUTTON_BG),
+            BorderColor::all(BORDER),
+            children![(
+                Text::new(text),
+                TextFont {
+                    font_size: FontSize::Px(12.0),
+                    ..default()
+                },
+                TextColor(Color::srgb_u8(0xc3, 0xd0, 0xdf)),
+            )],
+        ))
+        .id()
 }
 
 /// The meshes that make up one catalogue entry: outline, base, height, slot.
@@ -394,6 +495,7 @@ fn solid_parts(shape: &model::Shape) -> Vec<(Vec<Vec2>, f32, f32, u8)> {
 fn camera_control(
     mut orbit: ResMut<Orbit>,
     mut camera: Single<&mut Transform, With<Camera3d>>,
+    mut editor: ResMut<Editor>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     mut motion: MessageReader<MouseMotion>,
@@ -413,21 +515,86 @@ fn camera_control(
 
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
 
+    if keys.just_pressed(KeyCode::KeyV) {
+        orbit.mode = orbit.mode.next();
+        match orbit.mode {
+            ViewMode::Third => {
+                orbit.pitch = 0.9;
+                orbit.distance = 7.5;
+            }
+            ViewMode::Top => {
+                orbit.pitch = 1.4;
+                orbit.distance = 13.0;
+            }
+            ViewMode::First => {
+                orbit.pitch = 0.0;
+                // Face the end of the drawn route, if there is one.
+                if let (Some(character), Some(route)) = (editor.character, editor.route.as_ref()) {
+                    let towards = route.target - character.pos;
+                    if towards.length_squared() > 0.01 {
+                        orbit.yaw = (-towards.x).atan2(-towards.y);
+                    }
+                }
+            }
+        }
+        if orbit.mode != ViewMode::First {
+            focus(&mut orbit, editor.character);
+        }
+    }
+    if keys.just_pressed(KeyCode::KeyF) {
+        focus(&mut orbit, editor.character);
+    }
+
     if !over_panel {
-        if mouse.pressed(MouseButton::Right) && !shift {
-            orbit.yaw -= delta.x * 0.006;
-            orbit.pitch = (orbit.pitch + delta.y * 0.005).clamp(0.12, 1.5);
+        match orbit.mode {
+            ViewMode::First if editor.character.is_some() => {
+                if mouse.pressed(MouseButton::Right) {
+                    orbit.yaw -= delta.x * 0.005;
+                    orbit.pitch = (orbit.pitch - delta.y * 0.005).clamp(-1.35, 1.35);
+                }
+                // Looking around turns the pill with you.
+                if let Some(character) = editor.character.as_mut() {
+                    character.yaw = orbit.yaw;
+                }
+            }
+            _ => {
+                if mouse.pressed(MouseButton::Right) && !shift {
+                    orbit.yaw -= delta.x * 0.006;
+                    let (low, high) = if orbit.mode == ViewMode::Top {
+                        (0.7, 1.5)
+                    } else {
+                        (0.12, 1.5)
+                    };
+                    orbit.pitch = (orbit.pitch + delta.y * 0.005).clamp(low, high);
+                }
+                if mouse.pressed(MouseButton::Middle)
+                    || (mouse.pressed(MouseButton::Right) && shift)
+                {
+                    let right = Vec3::new(orbit.yaw.cos(), 0.0, -orbit.yaw.sin());
+                    let forward = Vec3::new(-orbit.yaw.sin(), 0.0, -orbit.yaw.cos());
+                    let k = orbit.distance * 0.0018;
+                    orbit.target -= right * delta.x * k;
+                    orbit.target += forward * delta.y * k;
+                    orbit.target.y = 0.0;
+                }
+                if scroll != 0.0 {
+                    orbit.distance = (orbit.distance * (1.0 - scroll * 0.12)).clamp(1.5, 60.0);
+                }
+            }
         }
-        if mouse.pressed(MouseButton::Middle) || (mouse.pressed(MouseButton::Right) && shift) {
-            let right = Vec3::new(orbit.yaw.cos(), 0.0, -orbit.yaw.sin());
-            let forward = Vec3::new(-orbit.yaw.sin(), 0.0, -orbit.yaw.cos());
-            let k = orbit.distance * 0.0018;
-            orbit.target -= right * delta.x * k;
-            orbit.target += forward * delta.y * k;
-            orbit.target.y = 0.0;
-        }
-        if scroll != 0.0 {
-            orbit.distance = (orbit.distance * (1.0 - scroll * 0.12)).clamp(1.5, 60.0);
+    }
+
+    if orbit.mode == ViewMode::First {
+        if let Some(character) = editor.character {
+            let eye = Vec3::new(character.pos.x, EYE_HEIGHT, character.pos.y);
+            let look = Vec3::new(
+                -orbit.yaw.sin() * orbit.pitch.cos(),
+                orbit.pitch.sin(),
+                -orbit.yaw.cos() * orbit.pitch.cos(),
+            );
+            camera.translation = eye;
+            camera.look_at(eye + look, Vec3::Y);
+            return;
         }
     }
 
@@ -438,6 +605,13 @@ fn camera_control(
     ) * orbit.distance;
     camera.translation = orbit.target + offset;
     camera.look_at(orbit.target, Vec3::Y);
+}
+
+/// Put the orbit centre back on the character's feet.
+fn focus(orbit: &mut Orbit, character: Option<Character>) {
+    if let Some(character) = character {
+        orbit.target = Vec3::new(character.pos.x, 0.0, character.pos.y);
+    }
 }
 
 fn update_cursor(
@@ -469,11 +643,32 @@ fn on_palette_activate(
     let Ok(button) = buttons.get(event.entity) else {
         return;
     };
-    editor.tool = if editor.tool == Some(button.0) {
-        None
-    } else {
-        Some(button.0)
-    };
+    match button.0 {
+        PaletteAction::Shape(index) => {
+            editor.tool = if editor.tool == Some(index) {
+                None
+            } else {
+                Some(index)
+            };
+            editor.actor_tool = None;
+        }
+        PaletteAction::Character => {
+            editor.actor_tool = if editor.actor_tool == Some(ActorTool::Place) {
+                None
+            } else {
+                Some(ActorTool::Place)
+            };
+            editor.tool = None;
+        }
+        PaletteAction::Path => {
+            editor.actor_tool = if editor.actor_tool == Some(ActorTool::Path) {
+                None
+            } else {
+                Some(ActorTool::Path)
+            };
+            editor.tool = None;
+        }
+    }
     editor.selected = None;
     editor.ghost = None;
     editor.ghost_rot = 0.0;
@@ -481,6 +676,7 @@ fn on_palette_activate(
 
 fn interact(
     mut editor: ResMut<Editor>,
+    mut orbit: ResMut<Orbit>,
     cursor: Res<Cursor>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -491,10 +687,19 @@ fn interact(
 
     if keys.just_pressed(KeyCode::Escape) {
         editor.tool = None;
+        editor.actor_tool = None;
         editor.selected = None;
         editor.ghost = None;
         editor.drag = None;
+        editor.route = None;
         editor.note = "Click a component, then the grid";
+    }
+
+    if keys.just_pressed(KeyCode::KeyC) {
+        editor.tool = None;
+        editor.actor_tool = Some(ActorTool::Place);
+        editor.ghost = None;
+        editor.note = "click the grid to place the character";
     }
 
     if keys.just_pressed(KeyCode::KeyR) {
@@ -584,8 +789,44 @@ fn interact(
 
     editor.ghost = None;
 
+    if editor.actor_tool == Some(ActorTool::Place) {
+        if mouse.just_pressed(MouseButton::Left) {
+            let pos = model::nearest_hex(world);
+            let character = Character {
+                pos,
+                yaw: orbit.yaw,
+            };
+            editor.character = Some(character);
+            editor.route = None;
+            focus(&mut orbit, Some(character));
+            editor.note = "character placed — V for first person, click the floor for a path";
+        }
+        return;
+    }
+
+    if editor.actor_tool == Some(ActorTool::Path) {
+        if mouse.just_pressed(MouseButton::Left) {
+            route_to(&mut editor, world);
+        }
+        return;
+    }
+
     if mouse.just_pressed(MouseButton::Left) {
-        if let Some(hit) = cursor.ray.and_then(|ray| pick(&editor.pieces, ray)) {
+        let hit = cursor.ray.and_then(|ray| pick(&editor.pieces, ray));
+        let on_surface = hit
+            .and_then(|id| editor.pieces.iter().find(|p| p.id == id))
+            .is_some_and(|p| shapes()[p.shape].category == "Surface");
+
+        // In third/top view, clicking bare ground (or a floor) asks for a route
+        // rather than selecting the tile; props still select and drag.
+        if orbit.mode != ViewMode::First
+            && editor.character.is_some()
+            && (hit.is_none() || on_surface)
+        {
+            route_to(&mut editor, world);
+            editor.selected = None;
+            editor.drag = None;
+        } else if let Some(hit) = hit {
             editor.selected = Some(hit);
             if let Some(piece) = editor.pieces.iter().find(|p| p.id == hit) {
                 editor.drag = Some(Drag {
@@ -639,6 +880,34 @@ fn interact(
                 editor.undo.pop();
             }
             editor.drag = None;
+        }
+    }
+}
+
+/// Ask for a route to `target` from the character, if both ends are reachable.
+fn route_to(editor: &mut Editor, target: Vec2) {
+    let Some(character) = editor.character else {
+        editor.note = "place a character first (C)";
+        return;
+    };
+    let (edges, hexes) = path::blocked(&editor.pieces);
+    let start = model::pixel_to_hex(character.pos);
+    let goal = model::pixel_to_hex(target);
+
+    match path::find_path(start, goal, &edges, &hexes) {
+        Some(route) => {
+            let points = path::waypoints(character.pos, target, &route);
+            let sampled = path::sample(&path::smooth(&points), 18);
+            editor.route = Some(Route {
+                points: sampled,
+                target,
+                hexes: route.len(),
+            });
+            editor.note = "route drawn";
+        }
+        None => {
+            editor.route = None;
+            editor.note = "no route to that point";
         }
     }
 }
@@ -759,9 +1028,11 @@ fn spawn_piece(commands: &mut Commands, kit: &Kit, piece: &Piece, ghost: bool) -
 fn sync_visuals(
     mut commands: Commands,
     editor: Res<Editor>,
+    orbit: Res<Orbit>,
     kit: Res<Kit>,
     mut visuals: ResMut<Visuals>,
-    mut transforms: Query<&mut Transform, With<PieceVisual>>,
+    mut transforms: Query<&mut Transform, Or<(With<PieceVisual>, With<CharacterVisual>)>>,
+    mut visibilities: Query<&mut Visibility, With<CharacterVisual>>,
 ) {
     let ghost_wanted = editor.tool.is_some() && editor.ghost.is_some();
 
@@ -812,6 +1083,38 @@ fn sync_visuals(
             }
         }
     }
+
+    // The character: one capsule, hidden while you are inside it.
+    if let Some(character) = editor.character {
+        let entity = match visuals.character {
+            Some(entity) => entity,
+            None => {
+                let entity = commands
+                    .spawn((
+                        CharacterVisual,
+                        Mesh3d(kit.pill.clone()),
+                        MeshMaterial3d(kit.pill_mat.clone()),
+                        Transform::from_xyz(character.pos.x, PILL_HALF, character.pos.y),
+                    ))
+                    .id();
+                visuals.character = Some(entity);
+                entity
+            }
+        };
+        if let Ok(mut transform) = transforms.get_mut(entity) {
+            transform.translation = Vec3::new(character.pos.x, PILL_HALF, character.pos.y);
+            transform.rotation = Quat::from_rotation_y(character.yaw);
+        }
+        if let Ok(mut visibility) = visibilities.get_mut(entity) {
+            *visibility = if orbit.mode == ViewMode::First {
+                Visibility::Hidden
+            } else {
+                Visibility::Visible
+            };
+        }
+    } else if let Some(entity) = visuals.character.take() {
+        commands.entity(entity).despawn();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -823,7 +1126,11 @@ fn update_palette(
     mut buttons: Query<(&PaletteButton, &mut BackgroundColor, &mut BorderColor)>,
 ) {
     for (button, mut bg, mut border) in &mut buttons {
-        let on = editor.tool == Some(button.0);
+        let on = match button.0 {
+            PaletteAction::Shape(index) => editor.tool == Some(index),
+            PaletteAction::Character => editor.actor_tool == Some(ActorTool::Place),
+            PaletteAction::Path => editor.actor_tool == Some(ActorTool::Path),
+        };
         bg.0 = if on { BUTTON_ON } else { BUTTON_BG };
         *border = BorderColor::all(if on { BORDER_ON } else { BORDER });
     }
@@ -845,6 +1152,12 @@ fn update_status(
 
     let tool = editor.tool.map(|t| shapes()[t].name).unwrap_or("select");
 
+    let tool = match editor.actor_tool {
+        Some(ActorTool::Place) => "character",
+        Some(ActorTool::Path) => "path",
+        None => tool,
+    };
+
     let selection = editor
         .selected
         .and_then(|id| editor.pieces.iter().find(|p| p.id == id))
@@ -861,10 +1174,15 @@ fn update_status(
         .unwrap_or("none");
 
     text.0 = format!(
-        "{}   |   {} placed   |   tool: {}   |   selected: {}   |   snap {}   |   zoom {:.1} m   |   {}",
+        "{}   |   {} placed   |   tool: {}   |   view: {}{}   |   selected: {}   |   snap {}   |   {:.0} m   |   {}",
         hex,
         editor.pieces.len(),
         tool,
+        orbit.mode.label(),
+        match editor.route.as_ref() {
+            Some(route) => format!(" (route {} hexes)", route.hexes),
+            None => String::new(),
+        },
         selection,
         snap,
         orbit.distance,
@@ -917,6 +1235,32 @@ fn draw(editor: Res<Editor>, cursor: Res<Cursor>, orbit: Res<Orbit>, mut gizmos:
             };
             anchors(&mut gizmos, &piece, shape);
         }
+    }
+
+    if let Some(route) = &editor.route {
+        let points: Vec<Vec3> = route
+            .points
+            .iter()
+            .map(|p| Vec3::new(p.x, 0.07, p.y))
+            .collect();
+        gizmos.linestrip(points.iter().copied(), PATH);
+
+        // A little target ring so the end of the curve is unambiguous.
+        let target = Vec3::new(route.target.x, 0.07, route.target.y);
+        gizmos.circle(
+            Isometry3d::new(target, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+            0.22,
+            PATH,
+        );
+    }
+
+    if let Some(character) = editor.character {
+        let feet = Vec3::new(character.pos.x, 0.05, character.pos.y);
+        gizmos.circle(
+            Isometry3d::new(feet, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+            0.44,
+            PILL_COLOR,
+        );
     }
 }
 
@@ -988,8 +1332,19 @@ fn level_json(editor: &Editor) -> String {
             )
         })
         .collect();
+    let character = editor
+        .character
+        .map(|c| {
+            format!(
+                ",\"character\":{{\"x\":{:.3},\"z\":{:.3},\"yawDeg\":{:.1}}}",
+                c.pos.x,
+                c.pos.y,
+                c.yaw.to_degrees()
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "{{\"format\":\"party-dungeon-level\",\"version\":1,\"units\":\"metres\",\"hexSize\":{},\"pieces\":[{}]}}",
+        "{{\"format\":\"party-dungeon-level\",\"version\":1,\"units\":\"metres\",\"hexSize\":{},\"pieces\":[{}]{character}}}",
         model::HEX_SIZE,
         pieces.join(",")
     )

@@ -649,12 +649,14 @@ pub fn world_anchors(piece: &Piece, shape: &Shape) -> Vec<WorldAnchor> {
         .collect()
 }
 
+#[allow(dead_code)] // kept for collision and click refinement
 pub fn to_local(piece: &Piece, p: Vec2) -> Vec2 {
     let d = p - piece.pos;
     let (sin, cos) = (-piece.rot).sin_cos();
     Vec2::new(d.x * cos - d.y * sin, d.x * sin + d.y * cos)
 }
 
+#[allow(dead_code)]
 fn point_in_polygon(points: &[Vec2], p: Vec2) -> bool {
     let mut inside = false;
     let mut j = points.len() - 1;
@@ -670,6 +672,7 @@ fn point_in_polygon(points: &[Vec2], p: Vec2) -> bool {
     inside
 }
 
+#[allow(dead_code)] // shape-accurate footprint test, used by tests and gameplay
 pub fn hit_test(shape: &Shape, piece: &Piece, p: Vec2, pad: f32) -> bool {
     let local = to_local(piece, p);
     if let Geometry::Circle { r } = shape.geom {
