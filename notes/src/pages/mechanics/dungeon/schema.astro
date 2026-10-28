@@ -1,0 +1,187 @@
+---
+import Base from "../../../layouts/Base.astro";
+import SubNav from "../../../components/SubNav.astro";
+import Section from "../../../components/Section.astro";
+import Card from "../../../components/Card.astro";
+import sql from "../../../../schema/0001_dungeon.sql?raw";
+---
+
+<Base title="Dungeon schema — Party Dungeon" current="/mechanics/dungeon/">
+  <SubNav current="/mechanics/dungeon/" />
+
+  <header>
+    <div class="kicker">
+      <a href="/mechanics/">Mechanics</a> /
+      <a href="/mechanics/dungeon/">Your dungeon</a> / Schema
+    </div>
+    <h1>Twenty-seven tables, and what each one refuses to do.</h1>
+    <p class="lede">
+      The whole thing, written as a migration rather than a diagram. It applies
+      clean on Postgres 16 and the constraints were each exercised with a failing
+      insert, because a schema you have not broken is a schema you do not know.
+    </p>
+  </header>
+
+  <Section title="House rules">
+    <div class="grid">
+      <Card status="decided" title="Nothing is deleted" tag="Yours">
+        <p>
+          Every table gets a <code>before delete</code> trigger that raises, and
+          the app role is not granted <code>DELETE</code> or
+          <code>TRUNCATE</code>. Retiring is a column, not a verb.
+        </p>
+      </Card>
+      <Card status="decided" title="Published versions are frozen" tag="Yours">
+        <p>
+          A blueprint is a moving document; a version is a photograph of it.
+          Instances, gate state and spent content all point at the version, so
+          editing the master can never move a wall mid-run.
+        </p>
+      </Card>
+      <Card status="guess" title="No cascades anywhere">
+        <p>
+          Every foreign key is <code>ON DELETE RESTRICT</code>. A cascade is a
+          delete wearing a disguise, and this database does not delete.
+        </p>
+      </Card>
+      <Card status="guess" title="jsonb only where the shape moves">
+        <p>
+          <code>placements.params</code>, <code>instances.state</code>,
+          <code>items.stats</code>. Anything joined, filtered or checked is a
+          column, because a jsonb field cannot be a foreign key.
+        </p>
+      </Card>
+      <Card status="guess" title="Metres and degrees">
+        <p>
+          Positions are metres, rotation is yaw in degrees. When something needs
+          pitch, that is a second column and a migration, not a reinterpretation
+          of <code>yaw</code>.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="The migration">
+    <p class="lede" style="font-size:16px; margin-bottom:16px">
+      <code>0001_dungeon.sql</code>, exactly as applied. Scrolls.
+    </p>
+    <pre style="max-height:72vh; overflow:auto"><code>{sql}</code></pre>
+  </Section>
+
+  <Section title="What the constraints actually enforce">
+    <div class="grid">
+      <Card status="guess" title="A gate cannot point outside its instance's version">
+        <p>
+          <code>instance_gates</code> carries the version id, and two composite
+          keys &mdash; <code>(instance_id, version_id)</code> and
+          <code>(placement_id, version_id)</code> &mdash; make a cross-version
+          gate state impossible to insert, not merely unlikely.
+        </p>
+      </Card>
+      <Card status="guess" title="A blueprint's current version must be its own">
+        <p>
+          The pointer is checked by a composite key too:
+          <code>(current_version_id, id)</code> references
+          <code>blueprint_versions (id, blueprint_id)</code>. Repointing one
+          blueprint at another's version is rejected by the database.
+        </p>
+      </Card>
+      <Card status="guess" title="A child placement can't cross versions">
+        <p>
+          A trigger resolves the parent's version on every insert and update.
+          Attaching a torch to a wall from a different version fails with a
+          message instead of producing a floating torch.
+        </p>
+      </Card>
+      <Card status="guess" title="Closed means closed_at, and open means neither">
+        <p>
+          <code>(status = 'closed') = (closed_at is not null)</code>, and the
+          same biconditional for a run's outcome and end time. The clock
+          cannot enter a half-state.
+        </p>
+      </Card>
+      <Card status="guess" title="An item can't be on an instance floor without one">
+        <p>
+          <code>(location = 'instance') = (instance_id is not null)</code>.
+          Loot that is on the ground knows which run it belongs to, which is what
+          makes a rollback answerable.
+        </p>
+      </Card>
+      <Card status="guess" title="One open listing per item">
+        <p>
+          A partial unique index where <code>state = 'open'</code>. The same
+          sword cannot be for sale twice, and cancelling one listing does not
+          block the next.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="Deliberately absent">
+    <div class="grid">
+      <Card status="guess" title="Generator parameters">
+        <p>
+          <code>kind</code> still allows procedural and hybrid, but nothing
+          reads them yet. Authored-first means the generator's inputs can wait
+          until there is a generator.
+        </p>
+      </Card>
+      <Card status="guess" title="A ledger">
+        <p>
+          Provenance exists &mdash; blueprints have owners, recipes have inputs
+          &mdash; but nothing pays anyone. That is a table for the day the
+          payout rule exists, and inventing it now would be guessing at the rule.
+        </p>
+      </Card>
+      <Card status="guess" title="A moderation queue">
+        <p>
+          <code>assets.moderation</code> is an enum, because nobody uploads
+          meshes. The value is there for us, not for a review workflow.
+        </p>
+      </Card>
+      <Card status="guess" title="Stat arithmetic">
+        <p>
+          <code>items.stats</code> and <code>runes.effect</code> are jsonb. The
+          roll tables and the level curve are game data whose shape will change
+          three times before it settles.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="Where this will hurt">
+    <div class="grid">
+      <Card status="guess" title="A version copies every placement">
+        <p>
+          Editing a five-thousand-object map writes five thousand rows. Cheap in
+          bytes, real in churn and in index size. The escape hatch is
+          delta-versions &mdash; and it is a migration, not a rewrite, because
+          placements already carry their version.
+        </p>
+      </Card>
+      <Card status="guess" title="params is a typed hole">
+        <p>
+          Nothing stops a boolean recipe with two inputs or a placement with a
+          negative scale except application code. The alternative is a table per
+          operation, which is a worse trade until the operations stop changing.
+        </p>
+      </Card>
+      <Card status="guess" title="Twenty-seven tables is not small">
+        <p>
+          Two of them, <code>derived_regions</code> and
+          <code>derived_navmeshes</code>, are disposable caches. Drop those and
+          the durable model is twenty-five, which is about right for a game with
+          an economy and a clock.
+        </p>
+      </Card>
+      <Card status="guess" title="Nothing deleted means indexes only grow">
+        <p>
+          Retired rows stay in every index unless the hot queries are served by
+          partial indexes. That is a discipline, not a feature: the live-instance
+          and open-listing indexes already do it, and every future hot query
+          should follow.
+        </p>
+      </Card>
+    </div>
+  </Section>
+</Base>
