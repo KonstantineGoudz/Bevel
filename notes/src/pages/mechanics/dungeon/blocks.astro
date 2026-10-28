@@ -1,0 +1,391 @@
+---
+import Base from "../../../layouts/Base.astro";
+import SubNav from "../../../components/SubNav.astro";
+import Section from "../../../components/Section.astro";
+import Card from "../../../components/Card.astro";
+
+const placement = `{
+  "block": "gate.portcullis",
+  "occupies": "edge",              // cell | edge | face | point
+  "between": [[4,7,0], [5,7,0]],   // the two cells it joins
+  "ports": [
+    { "side": "w", "kind": "through", "width": 1 },
+    { "side": "e", "kind": "through", "width": 1 }
+  ],
+  "traversal": "conditional",      // walk | climb | fall | swim | teleport | blocked
+  "blocks_sight": false,
+  "condition": { "kind": "lever", "id": "lever-3" },
+  "rotation": [0, 180],
+  "clearance": 2,                  // cells of headroom
+  "tags": ["metal", "noisy"]
+}`;
+
+const cellShape = `one cell (x, y, z)
+  surface    floor | ramp | stairs | water | pit | void
+  occupant   wall | chest | trap | vein | spawn      (at most one)
+  faces      torch | lever | banner | mural          (one per side)
+  points     marker | patrol node | trigger | light  (any number)`;
+---
+
+<Base title="Dungeon building blocks — Party Dungeon" current="/mechanics/dungeon/">
+  <SubNav current="/mechanics/dungeon/" />
+
+  <header>
+    <div class="kicker">
+      <a href="/mechanics/">Mechanics</a> /
+      <a href="/mechanics/dungeon/">Your dungeon</a> / Building blocks
+    </div>
+    <h1>A dungeon is cells, ports, and the things standing in them.</h1>
+    <p class="lede">
+      The kit is smaller than it looks. Nine behaviours cover everything you
+      place &mdash; and rooms, entrances and exits turn out to be roles rather
+      than types.
+    </p>
+  </header>
+
+  <Section title="There is no room type">
+    <div class="grid">
+      <Card status="decided" title="A room is not a building block" tag="Yours">
+        <p>
+          A room is made of floor, walls and a threshold. Making it a type means
+          a block that secretly contains other blocks &mdash; and then two ways to
+          say the same thing, which always drift apart.
+        </p>
+      </Card>
+      <Card status="guess" title="A room is a region the generator derives">
+        <p>
+          After placement, flood-fill the walkable cells bounded by walls and
+          closed thresholds. That region is what spawning, lighting, AI and loot
+          budgets refer to. It is computed, never stored as a thing you can place.
+        </p>
+      </Card>
+      <Card status="guess" title="A reusable room is a saved arrangement">
+        <p>
+          The authored <code>boss_room: "ossuary-b"</code> on the data page is a
+          fragment: placed blocks with coordinates, kept in the blueprint
+          document. It is a <em>layout</em>, not a type &mdash; reuse without
+          inventing a composite.
+        </p>
+      </Card>
+      <Card status="guess" title="Naming is not typing">
+        <p>
+          A generator can still require "one boss region, three treasure
+          regions". The name hangs on a region query, so it costs nothing and
+          cannot contradict the blocks on the grid.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="Nine behaviours">
+    <p class="lede" style="font-size:16px; margin-bottom:18px">
+      Everything you place is one of these. The type is a behaviour, not a
+      theme &mdash; which is why a wooden door and a stone door are the same
+      type with different prefabs.
+    </p>
+    <div class="grid">
+      <Card status="guess" title="Surface">
+        <p>
+          The cell's ground: floor, ramp, stairs, bridge, water, pit. Owns level
+          changes &mdash; a stair is a surface with a height delta, not a
+          separate kind of thing.
+        </p>
+      </Card>
+      <Card status="guess" title="Barrier">
+        <p>
+          Wall, pillar, fence, window. Occupies a cell and refuses passage. Two
+          independent flags: <code>blocks_movement</code> and
+          <code>blocks_sight</code>.
+        </p>
+      </Card>
+      <Card status="decided" title="Threshold" tag="Yours">
+        <p>
+          Door, gate, secret door, portcullis, rubble, curtain, ladder, shaft,
+          portal. Crosses an edge when a condition holds &mdash; the only type
+          whose runtime state has to persist.
+        </p>
+      </Card>
+      <Card status="guess" title="Fixture">
+        <p>
+          Chest, lever, pressure plate, altar, brazier, workbench, bed. Sits on
+          a cell or a wall face and can be operated. A chest is a fixture with
+          contents; a lever is a fixture that opens a threshold.
+        </p>
+      </Card>
+      <Card status="guess" title="Hazard">
+        <p>
+          Spikes, flame vent, acid pool, collapsing floor, dart wall. Passable
+          or not, but it costs something. Its trigger is data: proximity,
+          weight, timer, or a linked lever.
+        </p>
+      </Card>
+      <Card status="decided" title="Resource" tag="Yours">
+        <p>
+          Herb, ore vein, mushroom, fountain, tree. Harvestable. Respawn is
+          per-instance, so "already picked" is instance state, not layout.
+        </p>
+      </Card>
+      <Card status="decided" title="Spawn" tag="Yours">
+        <p>
+          A point that creates actors at runtime: mob, boss, NPC, captive,
+          patrol. The species is a definition reference. The mobs themselves are
+          never part of the layout.
+        </p>
+      </Card>
+      <Card status="decided" title="Item" tag="Yours">
+        <p>
+          Loose drop, key, quest object. A portable reference sitting on a cell
+          or inside a container. Keys are items that satisfy a threshold
+          condition.
+        </p>
+      </Card>
+      <Card status="guess" title="Marker">
+        <p>
+          Entry, exit, patrol node, trigger volume, arena bounds, light, sound.
+          Invisible authoring data. Occupies a point and can share a cell with
+          anything.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="A cell holds a surface, an occupant, and four faces">
+    <pre style="margin-bottom:16px"><code>{cellShape}</code></pre>
+    <div class="grid">
+      <Card status="guess" title="Four occupancy classes">
+        <ul class="plain">
+          <li><b>Cell</b> &mdash; one occupant, exclusive (wall, chest, trap, spawn).</li>
+          <li><b>Edge</b> &mdash; between two cells, coexists with both (door, gate, window).</li>
+          <li><b>Face</b> &mdash; one wall side (torch, lever, banner).</li>
+          <li><b>Point</b> &mdash; anywhere, any number (markers, patrol nodes).</li>
+        </ul>
+      </Card>
+      <Card status="guess" title="One occupant per cell">
+        <p>
+          "Is this cell free" becomes a single check, and chests can't stack into
+          a pile of loot nobody can see. Anything that needs company uses a face
+          or a point instead of arguing for an exception.
+        </p>
+      </Card>
+      <Card status="guess" title="Faces are per side">
+        <p>
+          A torch on the north face and a lever on the east face of the same wall
+          coexist, because they are not in the cell &mdash; they are on its skin.
+          This is what keeps decoration from fighting furniture.
+        </p>
+      </Card>
+      <Card status="guess" title="A surface cannot block">
+        <p>
+          Barriers are occupants, so "walkable" and "solid" never disagree. A
+          pit is a surface you can see into and not stand on, which is why it is
+          a surface and not a hole in the grid.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="Snapping is port agreement">
+    <pre style="margin-bottom:16px"><code>{placement}</code></pre>
+    <div class="grid">
+      <Card status="decided" title="Blocks declare how they join" tag="Yours">
+        <p>
+          Snapping is object metadata, not editor magic. A block publishes what
+          each side offers; two neighbours fit when the offers agree.
+        </p>
+      </Card>
+      <Card status="guess" title="Ports, not proximity">
+        <p>
+          Every side presents one of <code>through</code>, <code>blocked</code>,
+          <code>window</code> or <code>vertical</code>, with a width in cells.
+          Two neighbours connect when kind and width match &mdash; a 2-wide
+          corridor will not meet a 1-wide door by accident.
+        </p>
+      </Card>
+      <Card status="guess" title="Mismatch is capped, not rejected">
+        <p>
+          An opening that meets a wall gets capped by the wall. The generator must
+          never leave a hole in the world, so the default resolution is "close it",
+          and only a width mismatch between two openings is a hard error.
+        </p>
+      </Card>
+      <Card status="guess" title="Rotation is quarter turns on an integer grid">
+        <p>
+          Cells and 90&deg; steps. Stairs and ramps move you a level, which is why
+          <code>z</code> is part of the coordinate rather than an afterthought.
+        </p>
+      </Card>
+      <Card status="guess" title="Clearance is its own axis">
+        <p>
+          A door needs two cells of headroom; a banner needs a wall face; a
+          bookshelf needs one free cell in front. Footprint says where a thing
+          stands, clearance says what it refuses to stand next to.
+        </p>
+      </Card>
+      <Card status="guess" title="Entry is required, exit is optional">
+        <p>
+          A blueprint declares at least one <code>entry</code> port. With no
+          distinct exit, the entry doubles as one &mdash; and a portal threshold
+          is always a third way out. Entry and exit are port roles, not types.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="Gates are thresholds with a condition">
+    <div class="grid">
+      <Card status="decided" title="Gates are not special" tag="Yours">
+        <p>
+          A gate is a threshold whose condition is unsatisfied at spawn. Nothing
+          about the block changes &mdash; only whether the door opens, and what
+          has to happen first.
+        </p>
+      </Card>
+      <Card status="guess" title="Conditions are data; state is instance">
+        <p>
+          Lever, key, event (boss dead), timer, party size, puzzle. Which one is
+          a field on the block. Whether it is open is a row in the instance
+          delta, so it survives a restart and dies with the instance.
+        </p>
+      </Card>
+      <Card status="guess" title="Every gate must be solvable at generation">
+        <p>
+          Validate the entry-to-exit graph twice: once ignoring conditions (is
+          the shape connected?) and once with them (can they actually be
+          opened?). A gate whose key spawns behind it is a generation bug, not a
+          player problem.
+        </p>
+      </Card>
+      <Card status="guess" title="Sight and movement are different gates">
+        <p>
+          A portcullis stops your feet but not your eyes. A curtain does the
+          reverse. Two flags on every threshold, and they decide whether the mob
+          on the other side has noticed you.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="The map becomes a graph">
+    <div class="grid">
+      <Card status="guess" title="Blocks are the input; the graph is the product">
+        <p>
+          Nodes are walkable regions, edges are open thresholds. Generation,
+          validation, pathfinding and spawning all read the same graph, so an
+          authored map and a generated one are checked identically.
+        </p>
+      </Card>
+      <Card status="guess" title="Derived at publish, stored with the blueprint">
+        <p>
+          Generating the graph on every join would make load time a function of
+          map size. Compute once when the blueprint is saved, store the nodes and
+          edges, rebuild only on edit.
+        </p>
+      </Card>
+      <Card status="guess" title="A drafted map has to be playable">
+        <p>
+          Entry reachable, exit reachable, no orphan regions unless explicitly
+          marked optional or secret, every required resource reachable. The
+          editor can refuse to save a room that goes nowhere.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="Population is not layout">
+    <div class="grid">
+      <Card status="guess" title="Spawn points outlive the mobs">
+        <p>
+          The spawn is a block on the grid; the mob is a runtime actor. Instance
+          state records which spawns are cleared, so re-entering does not respawn
+          the boss and does not need the boss in the record.
+        </p>
+      </Card>
+      <Card status="guess" title="Items have two homes">
+        <p>
+          On the floor, as a cell placement. Or inside a container, where the
+          contents come from a loot table plus a seed &mdash; and the instance
+          only stores what was taken, not what could have been.
+        </p>
+      </Card>
+      <Card status="guess" title="Harvest flags are the same as loot flags">
+        <p>
+          A picked herb patch, an opened chest and a dead boss are all "this
+          thing is spent" in the instance delta. One mechanism, three names,
+          no separate persistence path.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="Database shape">
+    <Card>
+      <ul class="plain">
+        <li><b>block_definitions</b> &mdash; kind, footprint, ports, traversal, placement rules, prefab reference.</li>
+        <li><b>blueprints.layout</b> &mdash; placed blocks: cell, edge, face or point, rotation, parameters.</li>
+        <li><b>blueprints.graph</b> &mdash; nodes and edges, derived at publish, stored for validation and load.</li>
+        <li><b>instance.state.thresholds</b> &mdash; open, closed, locked, broken, per gate.</li>
+        <li><b>instance.state.spent</b> &mdash; chests opened, spawns cleared, nodes harvested.</li>
+      </ul>
+    </Card>
+    <div class="grid" style="margin-top:16px">
+      <Card status="guess" title="A block is a prefab plus behaviour">
+        <p>
+          The <code>prefabs</code> row still owns mesh, material and collision.
+          The block row adds ports, traversal and placement rules. One visual can
+          back several blocks &mdash; the same door, locked and unlocked.
+        </p>
+      </Card>
+      <Card status="guess" title="Layout is a list, not a grid blob">
+        <p>
+          Rows of placements are queryable ("every chest in this blueprint") and
+          diff cleanly. A serialised grid is smaller and useless for exactly the
+          questions the editor asks.
+        </p>
+      </Card>
+      <Card status="guess" title="Retired, not deleted, again">
+        <p>
+          A block definition that falls out of use gets <code>retired_at</code>.
+          Old blueprints still render, and old instances still validate, because
+          nothing they point at has vanished.
+        </p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section title="Open questions">
+    <Card>
+      <ul class="plain">
+        <li>
+          <b>How big is a cell?</b> Two metres makes tight corridors and honest
+          mobs; four metres makes rooms need fewer pieces and corridors feel like
+          halls. Every block is authored against this number.
+        </li>
+        <li>
+          <b>Orthogonal kit, or organic caves?</b> Ports assume walls on a grid.
+          A carved cave has no ports &mdash; it has a surface, and the snapping
+          model has to be replaced rather than extended.
+        </li>
+        <li>
+          <b>Can a block change size?</b> A wall of length 1&ndash;8 as one
+          parametric block saves authoring and breaks the "one cell" rule. Length
+          classes (1, 2, 4) are the usual compromise.
+        </li>
+        <li>
+          <b>How much verticality?</b> A level index handles stairs and ramps. A
+          bridge over a pit needs two surfaces in one column, which the current
+          cell shape does not allow.
+        </li>
+        <li>
+          <b>Do players build with the same kit as the generator?</b> If yes, the
+          editor needs the port rules and validation. If no, two kits drift and
+          the authored ones rot.
+        </li>
+        <li>
+          <b>What stops a player walling in the exit?</b> Validation catches it
+          at save, or the server catches it at entry. One of them has to, and it
+          is cheaper at save.
+        </li>
+      </ul>
+    </Card>
+  </Section>
+</Base>
