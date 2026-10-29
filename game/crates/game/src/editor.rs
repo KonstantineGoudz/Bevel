@@ -17,7 +17,7 @@ use bevy::shape::InfinitePlane3d;
 use bevy::ui_widgets::{Activate, Button};
 use bevy::window::PrimaryWindow;
 
-use crate::mesh::extrude;
+use crate::mesh::{extrude, wedge};
 use crate::model::{
     self, AnchorKind, CATEGORIES, HIT_PAD, PANEL_WIDTH, Piece, SNAP_THRESHOLD, SnapKind, Style,
     shapes,
@@ -344,8 +344,12 @@ fn setup(
             ..default()
         }));
         let mut made = Vec::new();
-        for (outline, base, height, slot) in solid_parts(shape) {
-            made.push((meshes.add(extrude(&outline, base, height)), slot));
+        if let model::Geometry::Wedge { w, d, h } = &shape.geom {
+            made.push((meshes.add(wedge(*w, *d, *h)), 0));
+        } else {
+            for (outline, base, height, slot) in solid_parts(shape) {
+                made.push((meshes.add(extrude(&outline, base, height)), slot));
+            }
         }
         parts.push(made);
     }
@@ -376,7 +380,7 @@ fn setup(
                 height: percent(100),
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::all(px(10)),
-                row_gap: px(2),
+                row_gap: px(1),
                 border: UiRect::right(px(1)),
                 ..default()
             },
@@ -506,7 +510,7 @@ fn palette_button(commands: &mut Commands, action: PaletteAction, text: &str) ->
             PaletteButton(action),
             Node {
                 width: percent(100),
-                height: px(22),
+                height: px(20),
                 align_items: AlignItems::Center,
                 padding: UiRect::horizontal(px(8)),
                 border: UiRect::all(px(1)),
@@ -533,6 +537,22 @@ fn palette_button(commands: &mut Commands, action: PaletteAction, text: &str) ->
 fn piece_collider(shape: &model::Shape) -> Option<Collider> {
     let height = shape.height.max(0.02);
     let mid = shape.base + height * 0.5;
+
+    // A wedge is convex already, so its six corners are the whole collider.
+    if let model::Geometry::Wedge { w, d, h } = &shape.geom {
+        let (hw, hd) = (w / 2.0, d / 2.0);
+        let base = shape.base;
+        let top = shape.base + *h;
+        let points = [
+            Vec3::new(-hw, base, -hd),
+            Vec3::new(hw, base, -hd),
+            Vec3::new(hw, base, hd),
+            Vec3::new(-hw, base, hd),
+            Vec3::new(hw, top, hd),
+            Vec3::new(-hw, top, hd),
+        ];
+        return Collider::convex_hull(&points);
+    }
 
     let body = match &shape.geom {
         model::Geometry::Bar { len, thick } => Collider::cuboid(*len, height, *thick),

@@ -58,6 +58,10 @@ pub fn blocked(pieces: &[Piece]) -> (HashSet<Edge>, HashSet<Hex>) {
                 // Pillars sit inside a cell, not on an edge.
                 hexes.insert(model::pixel_to_hex(piece.pos));
             }
+            model::Geometry::Rect { .. } if shape.id == "block" => {
+                // A full-height block fills the cell; a ramp does not.
+                hexes.insert(model::pixel_to_hex(piece.pos));
+            }
             _ => {}
         }
     }
@@ -407,6 +411,28 @@ mod tests {
         };
         let (edges, hexes) = blocked(&[pillar]);
         assert!(!can_step(here, model::hex_center(1, 0), &edges, &hexes));
+    }
+
+    #[test]
+    fn blocks_fill_cells_but_ramps_do_not() {
+        let block = Piece {
+            id: 1,
+            shape: shape_index("block").unwrap(),
+            pos: model::hex_center(1, 0),
+            rot: 0.0,
+        };
+        let (_, hexes) = blocked(&[block]);
+        assert!(hexes.contains(&(1, 0)));
+        assert_eq!(find_path((0, 0), (1, 0), &HashSet::new(), &hexes), None);
+
+        let ramp = Piece {
+            id: 2,
+            shape: shape_index("ramp").unwrap(),
+            pos: model::hex_center(1, 0),
+            rot: 0.0,
+        };
+        let (_, hexes) = blocked(&[ramp]);
+        assert!(hexes.is_empty());
     }
 
     #[test]

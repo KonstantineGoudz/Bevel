@@ -83,6 +83,109 @@ pub fn extrude(outline: &[Vec2], base: f32, height: f32) -> Mesh {
         );
     }
 
+    finish(positions, normals, uvs, indices)
+}
+
+/// A wedge: a rectangular base that rises to a full-height vertical face at
+/// the local +z end. Used for ramps.
+pub fn wedge(w: f32, d: f32, h: f32) -> Mesh {
+    let hw = w / 2.0;
+    let hd = d / 2.0;
+
+    let b0 = Vec3::new(-hw, 0.0, -hd);
+    let b1 = Vec3::new(hw, 0.0, -hd);
+    let b2 = Vec3::new(hw, 0.0, hd);
+    let b3 = Vec3::new(-hw, 0.0, hd);
+    let t2 = Vec3::new(hw, h, hd);
+    let t3 = Vec3::new(-hw, h, hd);
+
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    let mut indices = Vec::new();
+
+    // Base.
+    push_tri(
+        &mut positions,
+        &mut normals,
+        &mut uvs,
+        &mut indices,
+        [b0, b1, b2],
+        Vec3::NEG_Y,
+    );
+    push_tri(
+        &mut positions,
+        &mut normals,
+        &mut uvs,
+        &mut indices,
+        [b0, b2, b3],
+        Vec3::NEG_Y,
+    );
+
+    // The slope: rises from the -z edge to the ridge at +z.
+    let slope = Vec3::new(0.0, d, -h).normalize_or_zero();
+    push_tri(
+        &mut positions,
+        &mut normals,
+        &mut uvs,
+        &mut indices,
+        [b0, b1, t2],
+        slope,
+    );
+    push_tri(
+        &mut positions,
+        &mut normals,
+        &mut uvs,
+        &mut indices,
+        [b0, t2, t3],
+        slope,
+    );
+
+    // Vertical back face.
+    push_tri(
+        &mut positions,
+        &mut normals,
+        &mut uvs,
+        &mut indices,
+        [b3, b2, t2],
+        Vec3::Z,
+    );
+    push_tri(
+        &mut positions,
+        &mut normals,
+        &mut uvs,
+        &mut indices,
+        [b3, t2, t3],
+        Vec3::Z,
+    );
+
+    // Triangular sides.
+    push_tri(
+        &mut positions,
+        &mut normals,
+        &mut uvs,
+        &mut indices,
+        [b0, b3, t3],
+        Vec3::NEG_X,
+    );
+    push_tri(
+        &mut positions,
+        &mut normals,
+        &mut uvs,
+        &mut indices,
+        [b1, b2, t2],
+        Vec3::X,
+    );
+
+    finish(positions, normals, uvs, indices)
+}
+
+fn finish(
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+) -> Mesh {
     Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
@@ -255,6 +358,30 @@ mod tests {
                     shape.id
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_wedge_is_half_a_box_and_leans_up() {
+        let mesh = wedge(1.8, 2.0, 1.2);
+        let volume: f32 = tris(&mesh)
+            .iter()
+            .map(|[a, b, c]| a.dot(b.cross(*c)) / 6.0)
+            .sum();
+        assert!(
+            (volume - 1.8 * 2.0 * 1.2 * 0.5).abs() < 1e-3,
+            "volume {volume}"
+        );
+
+        let Some(VertexAttributeValues::Float32x3(normals)) =
+            mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
+        else {
+            panic!("no normals");
+        };
+        // The slope normal tilts up and back toward -z.
+        assert!(normals.iter().any(|n| n[1] > 0.8 && n[2] < -0.4));
+        for n in normals {
+            assert!((Vec3::from_array(*n).length() - 1.0).abs() < 1e-4);
         }
     }
 

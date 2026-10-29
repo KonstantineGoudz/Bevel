@@ -199,13 +199,35 @@ pub enum SnapMode {
 
 #[derive(Clone, Debug)]
 pub enum Geometry {
-    Hex { r: f32 },
-    Bar { len: f32, thick: f32 },
-    Rect { w: f32, h: f32 },
-    Circle { r: f32 },
-    Diamond { r: f32 },
-    Cross { r: f32 },
-    Flag { r: f32 },
+    Hex {
+        r: f32,
+    },
+    Bar {
+        len: f32,
+        thick: f32,
+    },
+    Rect {
+        w: f32,
+        h: f32,
+    },
+    Circle {
+        r: f32,
+    },
+    Diamond {
+        r: f32,
+    },
+    Cross {
+        r: f32,
+    },
+    Flag {
+        r: f32,
+    },
+    /// A wedge rising along local +y (the model's ground axis): width, run, rise.
+    Wedge {
+        w: f32,
+        d: f32,
+        h: f32,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -244,9 +266,10 @@ impl Shape {
     }
 }
 
-pub const CATEGORIES: [&str; 6] = [
+pub const CATEGORIES: [&str; 7] = [
     "Surface",
     "Barrier",
+    "Traversal",
     "Threshold",
     "Fixture",
     "Resource",
@@ -380,6 +403,35 @@ static SHAPES: LazyLock<Vec<Shape>> = LazyLock::new(|| {
             2.8,
             0.0,
             ring_anchors(4, 0.3, std::f32::consts::FRAC_PI_4),
+        ),
+        // Traversal: things you climb and jump on.
+        shape(
+            "block",
+            "Block",
+            "Traversal",
+            SnapMode::Center,
+            0x5c6878,
+            Geometry::Rect { w: 1.8, h: 1.8 },
+            Style::Plain,
+            1.2,
+            0.0,
+            ring_anchors(4, 1.0, 0.0),
+        ),
+        shape(
+            "ramp",
+            "Ramp",
+            "Traversal",
+            SnapMode::Center,
+            0x6f6252,
+            Geometry::Wedge {
+                w: 1.8,
+                d: 2.0,
+                h: 1.2,
+            },
+            Style::Plain,
+            1.2,
+            0.0,
+            ring_anchors(4, 1.0, 0.0),
         ),
         // Thresholds
         shape(
@@ -588,6 +640,12 @@ pub fn shape_points(shape: &Shape) -> Vec<Vec2> {
                 Vec2::new(-w, -w),
             ]
         }
+        Geometry::Wedge { w, d, .. } => vec![
+            Vec2::new(-w / 2.0, -d / 2.0),
+            Vec2::new(w / 2.0, -d / 2.0),
+            Vec2::new(w / 2.0, d / 2.0),
+            Vec2::new(-w / 2.0, d / 2.0),
+        ],
         // A chevron pointing along +x. Simple (no vertex lands on another
         // edge), which the ear clipper in `mesh.rs` needs.
         Geometry::Flag { r } => vec![
@@ -935,12 +993,12 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_is_twenty_pieces() {
-        assert_eq!(shapes().len(), 20);
+    fn catalogue_has_every_piece() {
+        assert_eq!(shapes().len(), 22);
         let mut ids: Vec<_> = shapes().iter().map(|s| s.id).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 20);
+        assert_eq!(ids.len(), 22);
         for cat in CATEGORIES {
             assert!(shapes().iter().any(|s| s.category == cat), "missing {cat}");
         }
