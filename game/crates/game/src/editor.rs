@@ -1062,12 +1062,27 @@ fn walk(
         .next()
         .map(|entity| SpatialQueryFilter::from_excluded_entities([entity]))
         .unwrap_or_default();
-    let above = Vec3::new(pos.x, 3.0, pos.y);
-    let feet = spatial_query
-        .cast_ray(above.real(), Dir3::NEG_Y, 6.0, true, &filter)
-        .filter(|hit| hit.normal.y > 0.3)
-        .map(|hit| above.y - hit.distance)
-        .unwrap_or(0.0);
+    // Sample across the capsule's footprint, not just its centre. A single
+    // ray drops into the few-centimetre crack between a ramp's top and a
+    // block; the capsule itself bridges it, so the height should too.
+    let previous = editor.character.map(|c| c.feet).unwrap_or(0.0);
+    let heights = [
+        Vec2::ZERO,
+        Vec2::new(0.28, 0.0),
+        Vec2::new(-0.28, 0.0),
+        Vec2::new(0.0, 0.28),
+        Vec2::new(0.0, -0.28),
+    ]
+    .into_iter()
+    .filter_map(|offset| {
+        let sample = pos + offset;
+        let above = Vec3::new(sample.x, 3.0, sample.y);
+        spatial_query
+            .cast_ray(above.real(), Dir3::NEG_Y, 6.0, true, &filter)
+            .filter(|hit| hit.normal.y > 0.3)
+            .map(|hit| above.y - hit.distance)
+    });
+    let feet = supported_height(heights, previous);
 
     if let Some(character) = editor.character.as_mut() {
         character.pos = pos;
@@ -1754,6 +1769,14 @@ fn interact(
             editor.drag = None;
         }
     }
+}
+
+/// The highest surface across the character's footprint, ignoring anything
+/// more than a step above its current height (wall tops, block sides).
+fn supported_height(samples: impl Iterator<Item = f32>, previous: f32) -> f32 {
+    samples
+        .filter(|height| *height <= previous + 0.45)
+        .fold(0.0, f32::max)
 }
 
 /// Where the click actually landed on the world, not just on the y = 0 plane.
@@ -2871,6 +2894,24 @@ mod tests {
         assert!(over_controls(Vec2::new(60.0, 800.0), size, 1.0), "stick");
         assert!(over_controls(Vec2::new(340.0, 800.0), size, 1.0), "jump");
         assert!(!over_controls(Vec2::new(195.0, 420.0), size, 1.0), "canvas");
+    }
+
+    #[test]
+    fn a_footprint_bridges_a_crack_but_still_drops_off_an_edge() {
+        // Ramp on one side, block on the other, crack under the centre.
+        let cracked = [0.9, 0.9, 0.0, 0.9, 0.0];
+        assert!((supported_height(cracked.into_iter(), 0.9) - 0.9).abs() < 1e-4);
+
+        // A real edge: nothing under the footprint, so drop to the ground.
+        let empty = [0.0; 5];
+        assert!(supported_height(empty.into_iter(), 0.9).abs() < 1e-4);
+
+        // A wall top beside the character must not be used as a step.
+        let wall = [2.8, 0.9];
+        assert!((supported_height(wall.into_iter(), 0.9) - 0.9).abs() < 1e-4);
+
+        // No hits at all falls back to the floor.
+        assert_eq!(supported_height(std::iter::empty(), 0.5), 0.0);
     }
 
     #[test]
