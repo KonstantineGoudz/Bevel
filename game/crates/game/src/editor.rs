@@ -1035,7 +1035,13 @@ fn solid_parts(shape: &model::Shape) -> Vec<(Vec<Vec2>, f32, f32, u8)> {
 /// Advance the character along the drawn route at a constant walking pace.
 /// The camera's orbit centre follows in third/top view; in first person the
 /// look direction follows the tangent.
-fn walk(time: Res<Time>, mut editor: ResMut<Editor>, mut orbit: ResMut<Orbit>) {
+fn walk(
+    time: Res<Time>,
+    mut editor: ResMut<Editor>,
+    mut orbit: ResMut<Orbit>,
+    spatial_query: SpatialQuery,
+    player: Query<Entity, With<CharacterVisual>>,
+) {
     let Some(mut current) = editor.walk else {
         return;
     };
@@ -1049,9 +1055,23 @@ fn walk(time: Res<Time>, mut editor: ResMut<Editor>, mut orbit: ResMut<Orbit>) {
     let (pos, forward) = route.track.at(current.distance);
     let yaw = (-forward.x).atan2(-forward.y);
 
+    // Follow the surface under the curve: the route is planned on the hex
+    // grid, but the pill still has to climb ramps and stand on blocks.
+    let filter = player
+        .iter()
+        .next()
+        .map(|entity| SpatialQueryFilter::from_excluded_entities([entity]))
+        .unwrap_or_default();
+    let above = Vec3::new(pos.x, 3.0, pos.y);
+    let feet = spatial_query
+        .cast_ray(above.real(), Dir3::NEG_Y, 6.0, true, &filter)
+        .filter(|hit| hit.normal.y > 0.3)
+        .map(|hit| above.y - hit.distance)
+        .unwrap_or(0.0);
+
     if let Some(character) = editor.character.as_mut() {
         character.pos = pos;
-        character.feet = 0.0;
+        character.feet = feet.clamp(0.0, 3.0);
         character.vy = 0.0;
         character.grounded = true;
         character.yaw = yaw;
@@ -1496,11 +1516,18 @@ fn interact(
     cursor: Res<Cursor>,
     touch: Res<TouchState>,
     camera: Single<(&Camera, &Transform)>,
+    spatial_query: SpatialQuery,
+    player: Query<Entity, With<CharacterVisual>>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
 ) {
     let (camera, camera_transform) = *camera;
     let camera_global = GlobalTransform::from(*camera_transform);
+    let surface_filter = player
+        .iter()
+        .next()
+        .map(|entity| SpatialQueryFilter::from_excluded_entities([entity]))
+        .unwrap_or_default();
     let (Some(screen), Some(world)) = (cursor.screen, cursor.world) else {
         return;
     };
@@ -1649,7 +1676,8 @@ fn interact(
 
     if editor.actor_tool == Some(ActorTool::Path) {
         if clicked {
-            route_to(&mut editor, world);
+            let target = surface_target(&cursor, &spatial_query, &surface_filter, world);
+            route_to(&mut editor, target);
         }
         return;
     }
@@ -1666,7 +1694,8 @@ fn interact(
             && editor.character.is_some()
             && (hit.is_none() || on_surface)
         {
-            route_to(&mut editor, world);
+            let target = surface_target(&cursor, &spatial_query, &surface_filter, world);
+            route_to(&mut editor, target);
             editor.selected = None;
             editor.drag = None;
         } else if let Some(hit) = hit {
@@ -1725,6 +1754,25 @@ fn interact(
             editor.drag = None;
         }
     }
+}
+
+/// Where the click actually landed on the world, not just on the y = 0 plane.
+/// Without this, clicking the top of a block maps to the ground behind it.
+fn surface_target(
+    cursor: &Cursor,
+    spatial_query: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+    fallback: Vec2,
+) -> Vec2 {
+    cursor
+        .ray
+        .and_then(|ray| {
+            spatial_query
+                .cast_ray(ray.origin.real(), ray.direction, 80.0, true, filter)
+                .map(|hit| ray.get_point(hit.distance))
+        })
+        .map(|point| Vec2::new(point.x, point.z))
+        .unwrap_or(fallback)
 }
 
 /// Ask for a route to `target` from the character, if both ends are reachable.

@@ -59,14 +59,35 @@ pub fn blocked(pieces: &[Piece]) -> (HashSet<Edge>, HashSet<Hex>) {
                 hexes.insert(model::pixel_to_hex(piece.pos));
             }
             model::Geometry::Rect { .. } if shape.id == "block" => {
-                // A full-height block fills the cell; a ramp does not.
-                hexes.insert(model::pixel_to_hex(piece.pos));
+                // A block fills its cell unless a ramp of the same height leads
+                // onto its top, in which case it is walkable from above.
+                if !ramp_leads_onto(piece, shape.top(), pieces) {
+                    hexes.insert(model::pixel_to_hex(piece.pos));
+                }
             }
             _ => {}
         }
     }
 
     (edges, hexes)
+}
+
+/// True when a wedge of about the same height rises toward this block, so the
+/// block's top is reachable by walking up the ramp.
+fn ramp_leads_onto(block: &Piece, block_top: f32, pieces: &[Piece]) -> bool {
+    for piece in pieces {
+        let Some(shape) = shapes().get(piece.shape) else { continue };
+        let model::Geometry::Wedge { d, h, .. } = shape.geom else { continue };
+        if (h - block_top).abs() > 0.15 {
+            continue;
+        }
+        let rise = Vec2::new(-piece.rot.sin(), piece.rot.cos());
+        let top_edge = piece.pos + rise * (d * 0.5 + 0.35);
+        if top_edge.distance(block.pos) < 1.2 {
+            return true;
+        }
+    }
+    false
 }
 
 fn heuristic(a: Hex, b: Hex) -> u32 {
@@ -433,6 +454,31 @@ mod tests {
         };
         let (_, hexes) = blocked(&[ramp]);
         assert!(hexes.is_empty());
+    }
+
+    #[test]
+    fn a_ramp_makes_the_block_beside_it_reachable() {
+        let block = Piece {
+            id: 1,
+            shape: shape_index("block").unwrap(),
+            pos: model::hex_center(2, 0),
+            rot: 0.0,
+        };
+        let ramp = Piece {
+            id: 2,
+            shape: shape_index("ramp").unwrap(),
+            pos: model::hex_center(1, 0),
+            rot: std::f32::consts::PI * 1.5,
+        };
+
+        // Alone, the block bars its cell.
+        let (_, hexes) = blocked(&[block]);
+        assert!(hexes.contains(&(2, 0)));
+
+        // With the ramp facing it at the same height, it does not.
+        let (_, hexes) = blocked(&[block, ramp]);
+        assert!(!hexes.contains(&(2, 0)));
+        assert!(find_path((0, 0), (2, 0), &HashSet::new(), &hexes).is_some());
     }
 
     #[test]
