@@ -36,6 +36,9 @@ const GRID: Color = Color::srgba(0.47, 0.59, 0.71, 0.10);
 const GRID_HOVER: Color = Color::srgba(0.47, 0.66, 0.86, 0.45);
 const GRID_Y: f32 = 0.004;
 const PATH: Color = Color::srgb_u8(0x5f, 0xe0, 0xc0);
+const GIZMO_X: Color = Color::srgb_u8(0xe0, 0x5a, 0x52);
+const GIZMO_Z: Color = Color::srgb_u8(0x5a, 0x8c, 0xe0);
+const GIZMO_RING: f32 = 0.8;
 const PILL_COLOR: Color = Color::srgb_u8(0x3f, 0xd0, 0xb0);
 const BAR_BG: Color = Color::srgba(0.04, 0.05, 0.07, 0.82);
 /// Eye height and capsule half-height, in metres.
@@ -69,7 +72,6 @@ impl Plugin for EditorPlugin {
                 (
                     setup_ui_scale,
                     touch_input,
-                    apply_touch_action,
                     sync_input_mode,
                     sync_knob,
                     sync_shape_label,
@@ -86,7 +88,8 @@ impl Plugin for EditorPlugin {
                 )
                     .chain(),
             )
-            .add_observer(on_palette_activate);
+            .add_observer(on_palette_activate)
+            .add_observer(on_touch_button);
     }
 }
 
@@ -108,6 +111,7 @@ struct Editor {
     ghost_rot: f32,
     ghost: Option<Ghost>,
     drag: Option<Drag>,
+    gizmo_drag: Option<GizmoDrag>,
     undo: Vec<Vec<Piece>>,
     note: &'static str,
     /// Shape picked by the mobile carousel.
@@ -129,6 +133,7 @@ impl Default for Editor {
             ghost_rot: 0.0,
             ghost: None,
             drag: None,
+            gizmo_drag: None,
             undo: Vec::new(),
             note: "Click a component, then the grid",
             mobile_shape: 0,
@@ -181,6 +186,19 @@ struct Drag {
     moved: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum GizmoAxis {
+    X,
+    Z,
+    Yaw,
+}
+
+#[derive(Clone, Copy)]
+struct GizmoDrag {
+    id: u32,
+    axis: GizmoAxis,
+}
+
 /// Everything the touch layer reads, rebuilt each frame from `Touches`.
 #[derive(Resource, Default)]
 struct UiScaleApplied(bool);
@@ -199,8 +217,6 @@ struct TouchState {
     zoom: f32,
     /// Screen position of a tap that finished this frame.
     tap: Option<Vec2>,
-    /// A touch button action requested this frame.
-    action: Option<TouchAction>,
     /// Set by the jump button, consumed by the movement system.
     jump: bool,
     tracks: HashMap<u64, TouchTrack>,
@@ -225,6 +241,9 @@ struct Cursor {
     ray: Option<Ray3d>,
     /// A tap completed this frame (touch builds/clicks).
     tap: bool,
+    /// Last ground point the pointer was over; stays put between taps so the
+    /// placement cursor is visible on touch.
+    last_world: Option<Vec2>,
 }
 
 #[derive(Resource)]
@@ -1402,6 +1421,9 @@ fn update_cursor(
         ray.plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))
             .map(|p| Vec2::new(p.x, p.z))
     });
+    if let Some(world) = cursor.world {
+        cursor.last_world = Some(world);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1457,9 +1479,12 @@ fn interact(
     mut orbit: ResMut<Orbit>,
     cursor: Res<Cursor>,
     touch: Res<TouchState>,
+    camera: Single<(&Camera, &Transform)>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
 ) {
+    let (camera, camera_transform) = *camera;
+    let camera_global = GlobalTransform::from(*camera_transform);
     let (Some(screen), Some(world)) = (cursor.screen, cursor.world) else {
         return;
     };
@@ -1562,6 +1587,30 @@ fn interact(
     }
 
     editor.ghost = None;
+
+    // Gizmo handles take priority over selecting whatever is under them.
+    if editor.tool.is_none() && editor.actor_tool.is_none() && touch.tap.is_none() {
+        if let (Some(screen), Some(ray)) = (cursor.screen, cursor.ray) {
+            if mouse.just_pressed(MouseButton::Left) {
+                if let Some(axis) = gizmo_hit(&editor, camera, &camera_global, screen, ray) {
+                    if let Some(id) = editor.selected {
+                        editor.commit();
+                        editor.gizmo_drag = Some(GizmoDrag { id, axis });
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(drag) = editor.gizmo_drag {
+        if mouse.pressed(MouseButton::Left) {
+            apply_gizmo_drag(&mut editor, drag, cursor.ray);
+        }
+        if mouse.just_released(MouseButton::Left) {
+            editor.gizmo_drag = None;
+        }
+        return;
+    }
 
     if editor.actor_tool == Some(ActorTool::Place) {
         if clicked {
@@ -1957,7 +2006,6 @@ fn touch_input(
     state.pan = Vec2::ZERO;
     state.zoom = 0.0;
     state.tap = None;
-    state.action = None;
 
     // Phones start in touch mode before the first tap; a narrow window on a
     // desktop gets the compact layout too, which is the right trade.
@@ -2039,9 +2087,7 @@ fn touch_input(
         }
         let control = track.map(|track| track.control).unwrap_or(false);
         let css = size * window.scale_factor();
-        if let Some(action) = touch_action_at(pos, css) {
-            state.action = Some(action);
-        } else if !control {
+        if !control {
             state.tap = Some(pos / window.scale_factor());
         }
     }
@@ -2056,14 +2102,9 @@ fn touch_input(
 
     // CDP touch emulation (and some browsers) deliver taps as mouse clicks.
     // Route those through the same hit-test so one path serves both.
-    if state.action.is_none() && state.tap.is_none() && mouse.just_pressed(MouseButton::Left) {
+    if state.tap.is_none() && mouse.just_pressed(MouseButton::Left) {
         if let Some(cursor) = window.cursor_position() {
-            // Cursor positions on web are CSS pixels, while the UI is laid out
-            // in logical pixels (CSS / DPR) with UiScale compensating.
-            let css = size * window.scale_factor();
-            if let Some(action) = touch_action_at(cursor, css) {
-                state.action = Some(action);
-            } else if !over_controls(cursor / window.scale_factor(), size, s) {
+            if !over_controls(cursor / window.scale_factor(), size, s) {
                 state.tap = Some(cursor / window.scale_factor());
             }
         }
@@ -2232,14 +2273,17 @@ fn run_touch_action(
     }
 }
 
-fn apply_touch_action(
+fn on_touch_button(
+    event: On<Activate>,
+    buttons: Query<&TouchButton>,
     mut editor: ResMut<Editor>,
     mut orbit: ResMut<Orbit>,
     mut touch: ResMut<TouchState>,
 ) {
-    if let Some(action) = touch.action {
-        run_touch_action(action, &mut editor, &mut orbit, &mut touch);
-    }
+    let Ok(button) = buttons.get(event.entity) else {
+        return;
+    };
+    run_touch_action(button.0, &mut editor, &mut orbit, &mut touch);
 }
 
 // ---------------------------------------------------------------------------
@@ -2343,13 +2387,27 @@ fn draw(editor: Res<Editor>, cursor: Res<Cursor>, orbit: Res<Orbit>, mut gizmos:
     }
 
     if orbit.mode != ViewMode::First {
-        if let Some(p) = cursor.world {
+        if let Some(p) = cursor.last_world {
             let center = model::nearest_hex(p);
             let points: Vec<Vec3> = model::hex_corners(center)
                 .iter()
                 .map(|q| Vec3::new(q.x, GRID_Y + 0.002, q.y))
                 .collect();
             closed(&mut gizmos, &points, GRID_HOVER);
+
+            // World cursor: a sphere on the snapped spot, a ring around it and
+            // a short vertical spike so it reads in both top and first person.
+            let spot = placement_spot(&editor, p);
+            let at = Vec3::new(spot.0.x, 0.04, spot.0.y);
+            let ring: Vec<Vec3> = (0..24)
+                .map(|i| {
+                    let a = std::f32::consts::TAU * i as f32 / 24.0;
+                    at + Vec3::new(a.cos() * 0.22, 0.0, a.sin() * 0.22)
+                })
+                .collect();
+            closed(&mut gizmos, &ring, PATH);
+            gizmos.line(at, at + Vec3::Y * 0.45, PATH);
+            gizmos.sphere(Isometry3d::new(at, Quat::IDENTITY), 0.05, PATH);
         }
     }
 
@@ -2358,6 +2416,9 @@ fn draw(editor: Res<Editor>, cursor: Res<Cursor>, orbit: Res<Orbit>, mut gizmos:
             if let Some(shape) = shapes().get(piece.shape) {
                 selection_box(&mut gizmos, piece, shape);
                 anchors(&mut gizmos, piece, shape);
+                if orbit.mode != ViewMode::First {
+                    transform_gizmo(&mut gizmos, piece, shape);
+                }
             }
         }
     }
@@ -2399,6 +2460,142 @@ fn draw(editor: Res<Editor>, cursor: Res<Cursor>, orbit: Res<Orbit>, mut gizmos:
             0.44,
             PILL_COLOR,
         );
+    }
+}
+
+/// Where a click would put the thing you are holding: the ghost's snapped
+/// point when a tool is armed, otherwise the nearest hex centre.
+fn placement_spot(editor: &Editor, world: Vec2) -> (Vec2, f32) {
+    if let Some(ghost) = editor.ghost {
+        (ghost.pos, ghost.rot)
+    } else {
+        (model::nearest_hex(world), 0.0)
+    }
+}
+
+/// Three handles on the selected piece: X and Z arrows plus a yaw ring.
+fn transform_gizmo(gizmos: &mut Gizmos, piece: &Piece, shape: &model::Shape) {
+    let base = shape.base.max(0.0) + 0.04;
+    let origin = Vec3::new(piece.pos.x, base, piece.pos.y);
+    let x_end = origin + Vec3::X * 1.1;
+    let z_end = origin + Vec3::Z * 1.1;
+
+    gizmos.line(origin, x_end, GIZMO_X);
+    gizmos.line(origin, z_end, GIZMO_Z);
+    // Arrow heads as diamonds so they still read edge-on.
+    for (end, dir) in [(x_end, Vec3::X), (z_end, Vec3::Z)] {
+        let side = Vec3::new(dir.z, 0.0, dir.x) * 0.07;
+        closed(
+            gizmos,
+            &[end - dir * 0.16 + side, end, end - dir * 0.16 - side],
+            if dir == Vec3::X { GIZMO_X } else { GIZMO_Z },
+        );
+    }
+
+    let ring: Vec<Vec3> = (0..32)
+        .map(|i| {
+            let a = std::f32::consts::TAU * i as f32 / 32.0;
+            origin + Vec3::new(a.cos() * GIZMO_RING, 0.0, a.sin() * GIZMO_RING)
+        })
+        .collect();
+    closed(gizmos, &ring, AMBER);
+}
+
+/// Closest point on the line `origin + s * axis` to the ray, as `s`.
+fn ray_axis_param(ray: Ray3d, origin: Vec3, axis: Vec3) -> Option<f32> {
+    let dir = *ray.direction;
+    let w0 = origin - ray.origin;
+    let b = axis.dot(dir);
+    let denom = 1.0 - b * b;
+    if denom.abs() < 1e-5 {
+        return None;
+    }
+    Some((b * dir.dot(w0) - axis.dot(w0)) / denom)
+}
+
+/// Distance from a point to a screen-space segment.
+fn point_segment_distance(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let ab = b - a;
+    let len = ab.length_squared();
+    if len < 1e-6 {
+        return p.distance(a);
+    }
+    let t = ((p - a).dot(ab) / len).clamp(0.0, 1.0);
+    p.distance(a + ab * t)
+}
+
+/// Which gizmo handle is under the pointer, if any.
+fn gizmo_hit(
+    editor: &Editor,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    screen: Vec2,
+    ray: Ray3d,
+) -> Option<GizmoAxis> {
+    let id = editor.selected?;
+    let piece = editor.pieces.iter().find(|p| p.id == id)?;
+    let shape = shapes().get(piece.shape)?;
+    let base = shape.base.max(0.0) + 0.04;
+    let origin = Vec3::new(piece.pos.x, base, piece.pos.y);
+
+    let project = |point: Vec3| camera.world_to_viewport(camera_transform, point).ok();
+    let mut best: Option<(f32, GizmoAxis)> = None;
+    if let Ok(origin_screen) = camera.world_to_viewport(camera_transform, origin) {
+        for (end, axis) in [(origin + Vec3::X * 1.1, GizmoAxis::X), (origin + Vec3::Z * 1.1, GizmoAxis::Z)] {
+            if let Some(end_screen) = project(end) {
+                let distance = point_segment_distance(screen, origin_screen, end_screen);
+                if distance < 10.0 && best.is_none_or(|(d, _)| distance < d) {
+                    best = Some((distance, axis));
+                }
+            }
+        }
+    }
+
+    if best.is_none() {
+        if let Some(hit) = ray.plane_intersection_point(origin, InfinitePlane3d::new(Vec3::Y)) {
+            let radius = Vec2::new(hit.x - origin.x, hit.z - origin.z).length();
+            if (radius - GIZMO_RING).abs() < 0.07 {
+                best = Some((0.0, GizmoAxis::Yaw));
+            }
+        }
+    }
+
+    best.map(|(_, axis)| axis)
+}
+
+fn apply_gizmo_drag(editor: &mut Editor, drag: GizmoDrag, ray: Option<Ray3d>) {
+    let Some(ray) = ray else {
+        return;
+    };
+    let Some(index) = editor.pieces.iter().position(|piece| piece.id == drag.id) else {
+        return;
+    };
+    let piece = editor.pieces[index];
+    let shape = &shapes()[piece.shape];
+    let base = shape.base.max(0.0) + 0.04;
+    let origin = Vec3::new(piece.pos.x, base, piece.pos.y);
+
+    match drag.axis {
+        GizmoAxis::X => {
+            if let Some(s) = ray_axis_param(ray, origin, Vec3::X) {
+                editor.pieces[index].pos = Vec2::new(piece.pos.x + s, piece.pos.y);
+            }
+        }
+        GizmoAxis::Z => {
+            if let Some(s) = ray_axis_param(ray, origin, Vec3::Z) {
+                editor.pieces[index].pos = Vec2::new(piece.pos.x, piece.pos.y + s);
+            }
+        }
+        GizmoAxis::Yaw => {
+            if let Some(hit) = ray.plane_intersection_point(origin, InfinitePlane3d::new(Vec3::Y)) {
+                let direction = Vec2::new(hit.x - piece.pos.x, hit.z - piece.pos.y);
+                if direction.length() > 0.1 {
+                    // Local +x points along `rot` in the ground plane.
+                    editor.pieces[index].rot =
+                        model::normalize_angle(direction.y.atan2(direction.x));
+                }
+            }
+        }
     }
 }
 
@@ -2613,6 +2810,24 @@ mod tests {
         assert!(over_controls(Vec2::new(60.0, 800.0), size, 1.0), "stick");
         assert!(over_controls(Vec2::new(340.0, 800.0), size, 1.0), "jump");
         assert!(!over_controls(Vec2::new(195.0, 420.0), size, 1.0), "canvas");
+    }
+
+    #[test]
+    fn gizmo_axis_projection_and_screen_distance() {
+        // A ray straight down at x = 2 hits the X axis at s = 2.
+        let ray = Ray3d::new(Vec3::new(2.0, 5.0, 0.0), Dir3::NEG_Y);
+        let s = ray_axis_param(ray, Vec3::ZERO, Vec3::X).unwrap();
+        assert!((s - 2.0).abs() < 1e-4, "s = {s}");
+
+        // And at z = -1.5 for the Z axis.
+        let ray = Ray3d::new(Vec3::new(0.0, 5.0, -1.5), Dir3::NEG_Y);
+        let s = ray_axis_param(ray, Vec3::ZERO, Vec3::Z).unwrap();
+        assert!((s + 1.5).abs() < 1e-4, "s = {s}");
+
+        let d = point_segment_distance(Vec2::new(5.0, 5.0), Vec2::ZERO, Vec2::new(10.0, 0.0));
+        assert!((d - 5.0).abs() < 1e-4);
+        let d = point_segment_distance(Vec2::new(-3.0, 0.0), Vec2::ZERO, Vec2::new(10.0, 0.0));
+        assert!((d - 3.0).abs() < 1e-4);
     }
 
     #[test]
