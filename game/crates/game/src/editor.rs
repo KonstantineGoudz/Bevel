@@ -6,6 +6,11 @@
 
 use std::collections::HashMap;
 
+use avian3d::character_controller::prelude::{
+    MoveAndSlide, MoveAndSlideConfig, MoveAndSlideHitResponse,
+};
+use avian3d::math::{ToF32Precision, ToRealPrecision};
+use avian3d::prelude::*;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use bevy::shape::InfinitePlane3d;
@@ -37,6 +42,9 @@ const EYE_HEIGHT: f32 = 1.55;
 const PILL_HALF: f32 = 0.87;
 /// Walking pace, in metres per second.
 const WALK_SPEED: f32 = 2.2;
+/// Gravity, in m/s^2. A little above earth so the character does not float.
+const GRAVITY: f32 = 18.0;
+const JUMP_SPEED: f32 = 6.0;
 
 pub struct EditorPlugin;
 
@@ -119,7 +127,12 @@ enum ActorTool {
 #[derive(Clone, Copy)]
 struct Character {
     pos: Vec2,
+    /// Height of the capsule's feet above the world floor.
+    feet: f32,
     yaw: f32,
+    /// Vertical velocity from the physics step.
+    vy: f32,
+    grounded: bool,
 }
 
 /// A routed path with arc length, so the walker moves at a constant speed.
@@ -254,6 +267,7 @@ struct Kit {
     ghost: Handle<StandardMaterial>,
     pill: Handle<Mesh>,
     pill_mat: Handle<StandardMaterial>,
+    character_collider: Collider,
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +312,14 @@ fn setup(
         },
         Transform::from_xyz(7.0, 12.0, 6.0).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
     ));
+
+    // Invisible floor under the whole grid: the character always has something
+    // to stand on, so walking off a tile does not drop it into the void.
+    commands.spawn((
+        RigidBody::Static,
+        Collider::cuboid(160.0, 0.2, 160.0),
+        Transform::from_xyz(0.0, -0.1, 0.0),
+    ));
     // Solid geometry: one mesh set per catalogue entry.
     let glass = materials.add(StandardMaterial {
         base_color: Color::srgba(0.60, 0.80, 0.90, 0.26),
@@ -341,6 +363,7 @@ fn setup(
         ghost,
         pill,
         pill_mat,
+        character_collider: Collider::capsule(0.32, 1.1),
     });
 
     let panel = commands
@@ -504,6 +527,56 @@ fn palette_button(commands: &mut Commands, action: PaletteAction, text: &str) ->
         .id()
 }
 
+/// A solid collider matching the piece's footprint and vertical extent.
+/// The body sits at the piece's ground point, so the collider is offset up by
+/// half its height inside a compound.
+fn piece_collider(shape: &model::Shape) -> Option<Collider> {
+    let height = shape.height.max(0.02);
+    let mid = shape.base + height * 0.5;
+
+    let body = match &shape.geom {
+        model::Geometry::Bar { len, thick } => Collider::cuboid(*len, height, *thick),
+        model::Geometry::Rect { w, h } => Collider::cuboid(*w, height, *h),
+        model::Geometry::Circle { r } => Collider::cylinder(*r, height),
+        model::Geometry::Hex { .. } | model::Geometry::Diamond { .. } => {
+            let outline = model::shape_points(shape);
+            let mut hull = Vec::with_capacity(outline.len() * 2);
+            for point in &outline {
+                hull.push(Vec3::new(point.x, shape.base, point.y));
+                hull.push(Vec3::new(point.x, shape.top(), point.y));
+            }
+            Collider::convex_hull(&hull)?
+        }
+        _ => {
+            // Cross and flag outlines are concave; their footprint box is a
+            // fair collider and much cheaper.
+            let outline = model::shape_points(shape);
+            let (low, high) = outline_bounds(&outline);
+            Collider::cuboid(
+                (high.x - low.x).max(0.05),
+                height,
+                (high.y - low.y).max(0.05),
+            )
+        }
+    };
+
+    Some(Collider::compound(vec![(
+        Position(Vec3::new(0.0, mid, 0.0).real()),
+        Rotation::default(),
+        body,
+    )]))
+}
+
+fn outline_bounds(points: &[Vec2]) -> (Vec2, Vec2) {
+    let mut low = Vec2::splat(f32::MAX);
+    let mut high = Vec2::splat(f32::MIN);
+    for point in points {
+        low = low.min(*point);
+        high = high.max(*point);
+    }
+    (low, high)
+}
+
 /// The meshes that make up one catalogue entry: outline, base, height, slot.
 /// Slot 0 is the shape's own colour, slot 1 is glass.
 fn solid_parts(shape: &model::Shape) -> Vec<(Vec<Vec2>, f32, f32, u8)> {
@@ -544,6 +617,9 @@ fn walk(time: Res<Time>, mut editor: ResMut<Editor>, mut orbit: ResMut<Orbit>) {
 
     if let Some(character) = editor.character.as_mut() {
         character.pos = pos;
+        character.feet = 0.0;
+        character.vy = 0.0;
+        character.grounded = true;
         character.yaw = yaw;
     }
 
@@ -561,17 +637,27 @@ fn walk(time: Res<Time>, mut editor: ResMut<Editor>, mut orbit: ResMut<Orbit>) {
     }
 }
 
-/// WASD movement in first person, sliding along barred hex edges instead of
-/// walking through them. Shift runs; any manual input takes over from the walk.
+/// WASD movement in first person, resolved by Avian's move-and-slide against
+/// the real colliders: gravity, wall sliding, step-up and jumping. Shift runs;
+/// any manual input takes over from the walk.
 fn first_person_move(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     mut editor: ResMut<Editor>,
     orbit: Res<Orbit>,
+    kit: Res<Kit>,
+    player: Query<Entity, With<CharacterVisual>>,
+    move_and_slide: MoveAndSlide,
 ) {
-    if orbit.mode != ViewMode::First || editor.character.is_none() {
+    if orbit.mode != ViewMode::First {
         return;
     }
+    let Some(character) = editor.character.as_mut() else {
+        return;
+    };
+    let Some(entity) = player.iter().next() else {
+        return;
+    };
 
     let mut wish = Vec2::ZERO;
     if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
@@ -586,10 +672,7 @@ fn first_person_move(
     if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
         wish.x -= 1.0;
     }
-    if wish == Vec2::ZERO {
-        return;
-    }
-    wish = wish.normalize_or_zero();
+    let wish = wish.normalize_or_zero();
 
     let forward = Vec2::new(-orbit.yaw.sin(), -orbit.yaw.cos());
     let right = Vec2::new(orbit.yaw.cos(), -orbit.yaw.sin());
@@ -597,25 +680,64 @@ fn first_person_move(
 
     let sprint = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let speed = if sprint { 5.5 } else { 2.8 };
-    let step = direction * speed * time.delta_secs();
 
-    let (edges, hexes) = path::blocked(&editor.pieces);
-    let Some(character) = editor.character.as_mut() else {
-        return;
-    };
+    // Split a long frame into short substeps. Under software rendering a frame
+    // can be 0.3 s; a single step that long lets gravity cancel a jump and
+    // tunnels through colliders.
+    let frame = time.delta_secs().clamp(0.0, 0.25);
+    let steps = ((frame / (1.0 / 60.0)).ceil() as usize).clamp(1, 10);
+    let step_dt = frame / steps as f32;
 
-    // Resolve each axis separately so a glancing hit slides along the wall.
-    let mut pos = character.pos;
-    let across = Vec2::new(pos.x + step.x, pos.y);
-    if path::can_step(pos, across, &edges, &hexes) {
-        pos.x = across.x;
+    let mut vy = character.vy;
+    // `pressed`, not `just_pressed`: a frame can span the whole key tap on a
+    // slow frame, and a held space should still jump on landing.
+    if keys.pressed(KeyCode::Space) && character.grounded {
+        vy = JUMP_SPEED;
     }
-    let along = Vec2::new(pos.x, pos.y + step.y);
-    if path::can_step(pos, along, &edges, &hexes) {
-        pos.y = along.y;
+
+    let filter = SpatialQueryFilter::from_excluded_entities([entity]);
+    let rotation = Quat::from_rotation_y(character.yaw);
+    let mut center = Vec3::new(character.pos.x, character.feet + PILL_HALF, character.pos.y);
+
+    for _ in 0..steps {
+        vy -= GRAVITY * step_dt;
+        let velocity = Vec3::new(direction.x * speed, vy, direction.y * speed);
+        let output = move_and_slide.move_and_slide(
+            &kit.character_collider,
+            center.real(),
+            rotation,
+            velocity,
+            std::time::Duration::from_secs_f32(step_dt),
+            &MoveAndSlideConfig::default(),
+            &filter,
+            |_| MoveAndSlideHitResponse::Accept,
+        );
+        center = output.position.f32();
+        vy = output.projected_velocity.y;
     }
-    character.pos = pos;
+
+    character.pos = Vec2::new(center.x, center.z);
+    character.feet = center.y - PILL_HALF;
     character.yaw = orbit.yaw;
+
+    // Probe just under the feet: a resting capsule keeps a small downward
+    // velocity, so the projected velocity is not a reliable grounded test.
+    let probe = Vec3::new(center.x, character.feet + 0.04, center.z);
+    let grounded = move_and_slide
+        .cast_move(
+            &kit.character_collider,
+            probe.real(),
+            rotation,
+            Vec3::NEG_Y * 0.14,
+            0.01,
+            &filter,
+        )
+        .is_some_and(|hit| hit.normal1.y > 0.4);
+
+    // The editor's floor and every walkable tile top out at y = 0; the probe
+    // additionally covers standing on props.
+    character.grounded = vy <= 0.01 && (grounded || character.feet < 0.08);
+    character.vy = if character.grounded { 0.0 } else { vy };
 
     if editor.walk.is_some() {
         editor.walk = None;
@@ -719,7 +841,11 @@ fn camera_control(
 
     if orbit.mode == ViewMode::First {
         if let Some(character) = editor.character {
-            let eye = Vec3::new(character.pos.x, EYE_HEIGHT, character.pos.y);
+            let eye = Vec3::new(
+                character.pos.x,
+                character.feet + EYE_HEIGHT,
+                character.pos.y,
+            );
             let look = Vec3::new(
                 -orbit.yaw.sin() * orbit.pitch.cos(),
                 orbit.pitch.sin(),
@@ -928,7 +1054,10 @@ fn interact(
             let pos = model::nearest_hex(world);
             let character = Character {
                 pos,
+                feet: 0.0,
                 yaw: orbit.yaw,
+                vy: 0.0,
+                grounded: true,
             };
             editor.character = Some(character);
             editor.route = None;
@@ -1142,16 +1271,25 @@ fn slab(origin: f32, dir: f32, low: f32, high: f32, near: &mut f32, far: &mut f3
 // ---------------------------------------------------------------------------
 
 fn spawn_piece(commands: &mut Commands, kit: &Kit, piece: &Piece, ghost: bool) -> Entity {
-    let root = commands
-        .spawn((
-            PieceVisual,
-            Transform {
-                translation: Vec3::new(piece.pos.x, 0.0, piece.pos.y),
-                rotation: model::yaw_quat(piece.rot),
-                ..default()
-            },
-        ))
-        .id();
+    let transform = Transform {
+        translation: Vec3::new(piece.pos.x, 0.0, piece.pos.y),
+        rotation: model::yaw_quat(piece.rot),
+        ..default()
+    };
+    let mut root = commands.spawn((PieceVisual, transform));
+
+    if !ghost {
+        let shape = &shapes()[piece.shape];
+        if let Some(collider) = piece_collider(shape) {
+            root.insert((
+                RigidBody::Static,
+                collider,
+                Position(transform.translation.real()),
+                Rotation(transform.rotation),
+            ));
+        }
+    }
+    let root = root.id();
 
     for (mesh, slot) in &kit.parts[piece.shape] {
         let material = if ghost {
@@ -1175,7 +1313,10 @@ fn sync_visuals(
     orbit: Res<Orbit>,
     kit: Res<Kit>,
     mut visuals: ResMut<Visuals>,
-    mut transforms: Query<&mut Transform, Or<(With<PieceVisual>, With<CharacterVisual>)>>,
+    mut transforms: Query<
+        (&mut Transform, Option<&mut Position>, Option<&mut Rotation>),
+        Or<(With<PieceVisual>, With<CharacterVisual>)>,
+    >,
     mut visibilities: Query<&mut Visibility, With<CharacterVisual>>,
 ) {
     let ghost_wanted = editor.tool.is_some() && editor.ghost.is_some();
@@ -1195,9 +1336,17 @@ fn sync_visuals(
     for piece in &editor.pieces {
         match visuals.map.get(&piece.id) {
             Some(&entity) => {
-                if let Ok(mut transform) = transforms.get_mut(entity) {
-                    transform.translation = Vec3::new(piece.pos.x, 0.0, piece.pos.y);
-                    transform.rotation = model::yaw_quat(piece.rot);
+                let pos = Vec3::new(piece.pos.x, 0.0, piece.pos.y);
+                let rot = model::yaw_quat(piece.rot);
+                if let Ok((mut transform, position, rotation)) = transforms.get_mut(entity) {
+                    transform.translation = pos;
+                    transform.rotation = rot;
+                    if let Some(mut position) = position {
+                        position.0 = pos.real();
+                    }
+                    if let Some(mut rotation) = rotation {
+                        rotation.0 = rot;
+                    }
                 }
             }
             None => {
@@ -1216,7 +1365,7 @@ fn sync_visuals(
         };
         match visuals.map.get(&0) {
             Some(&entity) => {
-                if let Ok(mut transform) = transforms.get_mut(entity) {
+                if let Ok((mut transform, _, _)) = transforms.get_mut(entity) {
                     transform.translation = Vec3::new(piece.pos.x, 0.0, piece.pos.y);
                     transform.rotation = model::yaw_quat(piece.rot);
                 }
@@ -1233,21 +1382,38 @@ fn sync_visuals(
         let entity = match visuals.character {
             Some(entity) => entity,
             None => {
+                let transform = Transform::from_xyz(
+                    character.pos.x,
+                    character.feet + PILL_HALF,
+                    character.pos.y,
+                );
                 let entity = commands
                     .spawn((
                         CharacterVisual,
+                        RigidBody::Kinematic,
+                        kit.character_collider.clone(),
                         Mesh3d(kit.pill.clone()),
                         MeshMaterial3d(kit.pill_mat.clone()),
-                        Transform::from_xyz(character.pos.x, PILL_HALF, character.pos.y),
+                        transform,
+                        Position(transform.translation.real()),
+                        Rotation(transform.rotation),
                     ))
                     .id();
                 visuals.character = Some(entity);
                 entity
             }
         };
-        if let Ok(mut transform) = transforms.get_mut(entity) {
-            transform.translation = Vec3::new(character.pos.x, PILL_HALF, character.pos.y);
-            transform.rotation = Quat::from_rotation_y(character.yaw);
+        let pos = Vec3::new(character.pos.x, character.feet + PILL_HALF, character.pos.y);
+        let rot = Quat::from_rotation_y(character.yaw);
+        if let Ok((mut transform, position, rotation)) = transforms.get_mut(entity) {
+            transform.translation = pos;
+            transform.rotation = rot;
+            if let Some(mut position) = position {
+                position.0 = pos.real();
+            }
+            if let Some(mut rotation) = rotation {
+                rotation.0 = rot;
+            }
         }
         if let Ok(mut visibility) = visibilities.get_mut(entity) {
             *visibility = if orbit.mode == ViewMode::First {
@@ -1289,7 +1455,11 @@ fn update_status(
     let hex = if orbit.mode == ViewMode::First {
         editor.character.map(|c| {
             let (q, r) = model::pixel_to_hex(c.pos);
-            format!("hex {q},{r}")
+            format!(
+                "hex {q},{r}  y {:.2} {}",
+                c.feet,
+                if c.grounded { "grounded" } else { "air" }
+            )
         })
     } else {
         cursor.world.map(|p| {
@@ -1407,7 +1577,7 @@ fn draw(editor: Res<Editor>, cursor: Res<Cursor>, orbit: Res<Orbit>, mut gizmos:
     }
 
     if let Some(character) = editor.character {
-        let feet = Vec3::new(character.pos.x, 0.05, character.pos.y);
+        let feet = Vec3::new(character.pos.x, character.feet + 0.05, character.pos.y);
         gizmos.circle(
             Isometry3d::new(feet, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
             0.44,
@@ -1585,6 +1755,17 @@ mod tests {
             pick(&pieces, ray_towards(Vec3::new(0.2, 0.0, 0.2))),
             Some(1)
         );
+    }
+
+    #[test]
+    fn every_catalogue_shape_gets_a_collider() {
+        for shape in shapes() {
+            assert!(
+                piece_collider(shape).is_some(),
+                "{} has no collider",
+                shape.id
+            );
+        }
     }
 
     #[test]

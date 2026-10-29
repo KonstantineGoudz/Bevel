@@ -135,8 +135,9 @@ pub fn find_path(
 }
 
 /// Whether a walker may move from `from` to `to` without crossing a barred
-/// edge or stepping into a blocked cell. Used for manual first-person
-/// movement; paths use the same rules through A*.
+/// edge or stepping into a blocked cell. First-person movement now goes through
+/// Avian's move-and-slide, but this stays as the cheap hex rule (and its tests).
+#[allow(dead_code)]
 pub fn can_step(from: Vec2, to: Vec2, edges: &HashSet<Edge>, hexes: &HashSet<Hex>) -> bool {
     let a = model::pixel_to_hex(from);
     let b = model::pixel_to_hex(to);

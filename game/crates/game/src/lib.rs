@@ -1,5 +1,6 @@
 //! Party Dungeon — top-down 3D multiplayer party crawler.
 
+use avian3d::prelude::PhysicsPlugins;
 use bevy::prelude::*;
 
 mod editor;
@@ -20,7 +21,7 @@ pub fn main() {
             }),
             ..default()
         }))
-        .add_plugins(GamePlugin)
+        .add_plugins((PhysicsPlugins::default(), GamePlugin))
         .run();
 }
 

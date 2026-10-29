@@ -10,6 +10,7 @@ crate-type = ["lib", "cdylib"]
 
 [dependencies]
 bevy = { version = "=0.20.0", features = ["android-game-activity"] }
+avian3d = "0.8"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
