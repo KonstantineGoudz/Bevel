@@ -164,6 +164,8 @@ struct Character {
 /// A routed path with arc length, so the walker moves at a constant speed.
 struct Route {
     track: path::Track,
+    /// Track samples lifted onto the surface, ready to draw.
+    line: Vec<Vec3>,
     target: Vec2,
     hexes: usize,
 }
@@ -1748,7 +1750,7 @@ fn interact(
     if editor.actor_tool == Some(ActorTool::Path) {
         if clicked {
             let target = surface_target(&cursor, &spatial_query, &surface_filter, world);
-            route_to(&mut editor, target);
+            route_to(&mut editor, target, &spatial_query, &surface_filter);
         }
         return;
     }
@@ -1766,7 +1768,7 @@ fn interact(
             && (hit.is_none() || on_surface)
         {
             let target = surface_target(&cursor, &spatial_query, &surface_filter, world);
-            route_to(&mut editor, target);
+            route_to(&mut editor, target, &spatial_query, &surface_filter);
             editor.selected = None;
             editor.drag = None;
         } else if let Some(hit) = hit {
@@ -1846,8 +1848,110 @@ fn surface_target(
         .unwrap_or(fallback)
 }
 
+/// Height of the walkable surface under `at`, ignoring walls' vertical faces.
+fn surface_height(
+    spatial_query: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+    at: Vec2,
+) -> Option<f32> {
+    let origin = Vec3::new(at.x, 8.0, at.y);
+    spatial_query
+        .cast_ray(origin.real(), Dir3::NEG_Y, 16.0, true, filter)
+        .filter(|hit| hit.normal.y > 0.3)
+        .map(|hit| origin.y - hit.distance)
+}
+
+/// Lift the flat track onto the geometry it crosses, so the drawn curve climbs
+/// a ramp and sits on a block top instead of running along the floor below.
+fn route_line(
+    track: &path::Track,
+    spatial_query: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+    start_height: f32,
+) -> Vec<Vec3> {
+    let points = track.points();
+    if points.is_empty() {
+        return Vec::new();
+    }
+
+    let heights = lift_heights(
+        points.iter().copied(),
+        |point| surface_height(spatial_query, filter, point),
+        start_height,
+    );
+    let smoothed = smooth_heights(&heights);
+
+    points
+        .iter()
+        .zip(smoothed)
+        .map(|(point, height)| Vec3::new(point.x, height + 0.07, point.y))
+        .collect()
+}
+
+/// Turn surface samples along the curve into a height profile.
+///
+/// * A sample far above the previous one is ignored (a wall top beside the
+///   curve, not a step the walker could climb).
+/// * A missing sample keeps the previous height.
+/// * A large drop is only accepted if the footprint around the point has no
+///   support; otherwise it is the seam between a ramp and a block, which the
+///   capsule bridges, so the drawn curve should too.
+fn lift_heights(
+    points: impl Iterator<Item = Vec2>,
+    sample: impl Fn(Vec2) -> Option<f32>,
+    start: f32,
+) -> Vec<f32> {
+    /// Half the capsule's width: any support this close counts as a seam.
+    const FOOTPRINT: f32 = 0.25;
+    const STEP_UP: f32 = 0.5;
+    const DROP: f32 = 0.45;
+
+    let mut heights = Vec::new();
+    let mut previous = start;
+    for point in points {
+        let mut height = sample(point).unwrap_or(previous);
+        if height > previous + STEP_UP {
+            height = previous;
+        } else if height < previous - DROP {
+            let supported = [
+                Vec2::new(FOOTPRINT, 0.0),
+                Vec2::new(-FOOTPRINT, 0.0),
+                Vec2::new(0.0, FOOTPRINT),
+                Vec2::new(0.0, -FOOTPRINT),
+            ]
+            .into_iter()
+            .any(|offset| {
+                sample(point + offset).is_some_and(|near| (near - previous).abs() < 0.15)
+            });
+            if supported {
+                height = previous;
+            }
+        }
+        heights.push(height);
+        previous = height;
+    }
+    heights
+}
+
+/// Three-tap smoothing so the curve ramps up instead of kinking at seams.
+fn smooth_heights(heights: &[f32]) -> Vec<f32> {
+    (0..heights.len())
+        .map(|i| {
+            let before = heights[i.saturating_sub(1)];
+            let here = heights[i];
+            let after = heights[(i + 1).min(heights.len().saturating_sub(1))];
+            (before + here * 2.0 + after) * 0.25
+        })
+        .collect()
+}
+
 /// Ask for a route to `target` from the character, if both ends are reachable.
-fn route_to(editor: &mut Editor, target: Vec2) {
+fn route_to(
+    editor: &mut Editor,
+    target: Vec2,
+    spatial_query: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+) {
     let Some(character) = editor.character else {
         editor.note = "place a character first (C)";
         return;
@@ -1860,6 +1964,7 @@ fn route_to(editor: &mut Editor, target: Vec2) {
         Some(route) => {
             let points = path::waypoints(character.pos, target, &route);
             let track = path::Track::new(path::sample(&path::smooth(&points), 18));
+            let line = route_line(&track, spatial_query, filter, character.feet);
             editor.walk = (track.total() > 0.1).then_some(Walk {
                 distance: 0.0,
                 stuck: 0.0,
@@ -1871,6 +1976,7 @@ fn route_to(editor: &mut Editor, target: Vec2) {
             };
             editor.route = Some(Route {
                 track,
+                line,
                 target,
                 hexes: route.len(),
             });
@@ -2567,16 +2673,15 @@ fn draw(editor: Res<Editor>, cursor: Res<Cursor>, orbit: Res<Orbit>, mut gizmos:
     }
 
     if let Some(route) = &editor.route {
-        let points: Vec<Vec3> = route
-            .track
-            .points()
-            .iter()
-            .map(|p| Vec3::new(p.x, 0.07, p.y))
-            .collect();
-        gizmos.linestrip(points.iter().copied(), PATH);
+        gizmos.linestrip(route.line.iter().copied(), PATH);
 
-        // A little target ring so the end of the curve is unambiguous.
-        let target = Vec3::new(route.target.x, 0.07, route.target.y);
+        // A little target ring so the end of the curve is unambiguous, laid on
+        // whatever surface the curve ends on.
+        let target = route
+            .line
+            .last()
+            .copied()
+            .unwrap_or(Vec3::new(route.target.x, 0.07, route.target.y));
         gizmos.circle(
             Isometry3d::new(target, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
             0.22,
@@ -2941,6 +3046,83 @@ mod tests {
         assert!(over_controls(Vec2::new(60.0, 800.0), size, 1.0), "stick");
         assert!(over_controls(Vec2::new(340.0, 800.0), size, 1.0), "jump");
         assert!(!over_controls(Vec2::new(195.0, 420.0), size, 1.0), "canvas");
+    }
+
+    #[test]
+    fn the_route_line_climbs_a_ramp_and_ignores_wall_tops() {
+        // A ramp rising from 0 to 0.9 between x = 1 and x = 3, then a block.
+        let ramp = |p: Vec2| -> Option<f32> {
+            Some(if p.x < 1.0 {
+                0.0
+            } else if p.x < 3.0 {
+                (p.x - 1.0) * 0.45
+            } else {
+                0.9
+            })
+        };
+        let points: Vec<Vec2> = (0..11).map(|i| Vec2::new(i as f32 * 0.3, 0.0)).collect();
+        let heights = lift_heights(points.iter().copied(), ramp, 0.0);
+        assert_eq!(heights.len(), 11);
+        assert!((heights[0] - 0.0).abs() < 1e-4);
+        assert!((heights[5] - 0.225).abs() < 1e-4, "mid-ramp {heights:?}");
+        assert!((heights[10] - 0.9).abs() < 1e-4, "block top {heights:?}");
+        assert!(
+            heights.windows(2).all(|pair| pair[0] <= pair[1] + 1e-4),
+            "the line should only climb: {heights:?}"
+        );
+
+        // A wall top (2.8) beside the curve is not treated as a step.
+        let wall = |p: Vec2| Some(if (p.x - 1.0).abs() < 0.05 { 2.8 } else { 0.0 });
+        let heights = lift_heights(
+            [Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0), Vec2::new(2.0, 0.0)].into_iter(),
+            wall,
+            0.0,
+        );
+        assert_eq!(heights, vec![0.0, 0.0, 0.0]);
+
+        // A missed ray between two surfaces keeps the last height (no crack).
+        let missing = lift_heights(
+            [Vec2::ZERO, Vec2::new(0.5, 0.0), Vec2::new(1.0, 0.0)].into_iter(),
+            |_| None,
+            0.9,
+        );
+        assert_eq!(missing, vec![0.9, 0.9, 0.9]);
+    }
+
+    #[test]
+    fn the_route_line_bridges_a_seam_but_falls_off_a_real_edge() {
+        // Ramp/block tops at 0.9 with a narrow crack at x = 2.0.
+        let cracked = |p: Vec2| {
+            Some(if (1.9..=2.1).contains(&p.x) {
+                0.0
+            } else {
+                0.9
+            })
+        };
+        let seam = lift_heights(
+            [Vec2::new(1.7, 0.0), Vec2::new(2.0, 0.0), Vec2::new(2.3, 0.0)].into_iter(),
+            cracked,
+            0.9,
+        );
+        assert_eq!(seam, vec![0.9, 0.9, 0.9], "the seam is bridged");
+
+        // Past the end of the block there is no support within the footprint.
+        let edge = |p: Vec2| Some(if p.x < 2.0 { 0.9 } else { 0.0 });
+        let dropped = lift_heights(
+            [Vec2::new(2.3, 0.0), Vec2::new(2.5, 0.0), Vec2::new(2.7, 0.0)].into_iter(),
+            edge,
+            0.9,
+        );
+        assert_eq!(dropped, vec![0.0, 0.0, 0.0], "a real edge still drops");
+    }
+
+    #[test]
+    fn the_route_line_smooths_the_step_onto_a_block() {
+        let smoothed = smooth_heights(&[0.0, 0.0, 0.9, 0.9]);
+        assert!((smoothed[0] - 0.0).abs() < 1e-4);
+        assert!((smoothed[1] - 0.225).abs() < 1e-4);
+        assert!((smoothed[2] - 0.675).abs() < 1e-4);
+        assert!((smoothed[3] - 0.9).abs() < 1e-4);
     }
 
     #[test]
