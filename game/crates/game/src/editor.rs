@@ -31,6 +31,7 @@ const GRID_HOVER: Color = Color::srgba(0.47, 0.66, 0.86, 0.45);
 const GRID_Y: f32 = 0.004;
 const PATH: Color = Color::srgb_u8(0x5f, 0xe0, 0xc0);
 const PILL_COLOR: Color = Color::srgb_u8(0x3f, 0xd0, 0xb0);
+const BAR_BG: Color = Color::srgba(0.04, 0.05, 0.07, 0.82);
 /// Eye height and capsule half-height, in metres.
 const EYE_HEIGHT: f32 = 1.55;
 const PILL_HALF: f32 = 0.87;
@@ -50,6 +51,7 @@ impl Plugin for EditorPlugin {
                 Update,
                 (
                     walk,
+                    first_person_move,
                     camera_control,
                     update_cursor,
                     interact,
@@ -406,35 +408,55 @@ fn setup(
 
     commands.entity(panel).add_children(&children);
 
-    commands.spawn((
-        StatusText,
-        Text::new(""),
-        TextFont {
-            font_size: FontSize::Px(12.0),
-            ..default()
-        },
-        TextColor(MUTED),
-        Node {
-            position_type: PositionType::Absolute,
-            left: px(PANEL_WIDTH + 14.0),
-            bottom: px(10.0),
-            ..default()
-        },
-    ));
+    let status_bar = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(PANEL_WIDTH + 4.0),
+                bottom: px(4.0),
+                padding: UiRect::axes(px(10), px(5)),
+                border_radius: BorderRadius::all(px(5)),
+                ..default()
+            },
+            BackgroundColor(BAR_BG),
+        ))
+        .id();
+    let status_text = commands
+        .spawn((
+            StatusText,
+            Text::new(""),
+            TextFont {
+                font_size: FontSize::Px(12.0),
+                ..default()
+            },
+            TextColor(MUTED),
+        ))
+        .id();
+    commands.entity(status_bar).add_child(status_text);
 
-    commands.spawn((
-        Text::new(
-            "LMB place / drag  |  RMB orbit / look  |  MMB pan  |  wheel zoom  |  V view  |  C character  |  R rotate  |  S save",
-        ),
-        TextFont { font_size: FontSize::Px(11.0), ..default() },
-        TextColor(Color::srgb_u8(0x5f, 0x70, 0x85)),
-        Node {
-            position_type: PositionType::Absolute,
-            left: px(PANEL_WIDTH + 14.0),
-            top: px(10.0),
-            ..default()
-        },
-    ));
+    let hint_bar = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(PANEL_WIDTH + 4.0),
+                top: px(4.0),
+                padding: UiRect::axes(px(10), px(4)),
+                border_radius: BorderRadius::all(px(5)),
+                ..default()
+            },
+            BackgroundColor(BAR_BG),
+        ))
+        .id();
+    let hint_text = commands
+        .spawn((
+            Text::new(
+                "LMB place / drag  |  RMB orbit / look  |  MMB pan  |  wheel zoom  |  V view  |  WASD move  |  C character  |  R rotate  |  S save",
+            ),
+            TextFont { font_size: FontSize::Px(11.0), ..default() },
+            TextColor(Color::srgb_u8(0x6b, 0x7d, 0x93)),
+        ))
+        .id();
+    commands.entity(hint_bar).add_child(hint_text);
 }
 
 fn palette_label(commands: &mut Commands, text: &str) -> Entity {
@@ -539,6 +561,68 @@ fn walk(time: Res<Time>, mut editor: ResMut<Editor>, mut orbit: ResMut<Orbit>) {
     }
 }
 
+/// WASD movement in first person, sliding along barred hex edges instead of
+/// walking through them. Shift runs; any manual input takes over from the walk.
+fn first_person_move(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut editor: ResMut<Editor>,
+    orbit: Res<Orbit>,
+) {
+    if orbit.mode != ViewMode::First || editor.character.is_none() {
+        return;
+    }
+
+    let mut wish = Vec2::ZERO;
+    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
+        wish.y += 1.0;
+    }
+    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
+        wish.y -= 1.0;
+    }
+    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
+        wish.x += 1.0;
+    }
+    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
+        wish.x -= 1.0;
+    }
+    if wish == Vec2::ZERO {
+        return;
+    }
+    wish = wish.normalize_or_zero();
+
+    let forward = Vec2::new(-orbit.yaw.sin(), -orbit.yaw.cos());
+    let right = Vec2::new(orbit.yaw.cos(), -orbit.yaw.sin());
+    let direction = (forward * wish.y + right * wish.x).normalize_or_zero();
+
+    let sprint = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let speed = if sprint { 5.5 } else { 2.8 };
+    let step = direction * speed * time.delta_secs();
+
+    let (edges, hexes) = path::blocked(&editor.pieces);
+    let Some(character) = editor.character.as_mut() else {
+        return;
+    };
+
+    // Resolve each axis separately so a glancing hit slides along the wall.
+    let mut pos = character.pos;
+    let across = Vec2::new(pos.x + step.x, pos.y);
+    if path::can_step(pos, across, &edges, &hexes) {
+        pos.x = across.x;
+    }
+    let along = Vec2::new(pos.x, pos.y + step.y);
+    if path::can_step(pos, along, &edges, &hexes) {
+        pos.y = along.y;
+    }
+    character.pos = pos;
+    character.yaw = orbit.yaw;
+
+    if editor.walk.is_some() {
+        editor.walk = None;
+        editor.note = "manual control";
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Camera
 // ---------------------------------------------------------------------------
@@ -599,11 +683,9 @@ fn camera_control(
     if !over_panel {
         match orbit.mode {
             ViewMode::First if editor.character.is_some() => {
-                if mouse.pressed(MouseButton::Right) {
-                    orbit.yaw -= delta.x * 0.005;
-                    orbit.pitch = (orbit.pitch - delta.y * 0.005).clamp(-1.35, 1.35);
-                }
-                // Looking around turns the pill with you.
+                // Standard first person: look follows the mouse, no button.
+                orbit.yaw -= delta.x * 0.005;
+                orbit.pitch = (orbit.pitch - delta.y * 0.005).clamp(-1.35, 1.35);
                 if let Some(character) = editor.character.as_mut() {
                     character.yaw = orbit.yaw;
                 }
@@ -852,7 +934,7 @@ fn interact(
             editor.route = None;
             editor.walk = None;
             focus(&mut orbit, Some(character));
-            editor.note = "character placed — V for first person, click the floor for a path";
+            editor.note = "character placed";
         }
         return;
     }
@@ -1204,13 +1286,18 @@ fn update_status(
     orbit: Res<Orbit>,
     mut text: Single<&mut Text, With<StatusText>>,
 ) {
-    let hex = cursor
-        .world
-        .map(|p| {
+    let hex = if orbit.mode == ViewMode::First {
+        editor.character.map(|c| {
+            let (q, r) = model::pixel_to_hex(c.pos);
+            format!("hex {q},{r}")
+        })
+    } else {
+        cursor.world.map(|p| {
             let (q, r) = model::pixel_to_hex(p);
             format!("hex {q},{r}")
         })
-        .unwrap_or_else(|| "-".to_string());
+    }
+    .unwrap_or_else(|| "-".to_string());
 
     let tool = editor.tool.map(|t| shapes()[t].name).unwrap_or("select");
 
@@ -1269,13 +1356,15 @@ fn draw(editor: Res<Editor>, cursor: Res<Cursor>, orbit: Res<Orbit>, mut gizmos:
         }
     }
 
-    if let Some(p) = cursor.world {
-        let center = model::nearest_hex(p);
-        let points: Vec<Vec3> = model::hex_corners(center)
-            .iter()
-            .map(|q| Vec3::new(q.x, GRID_Y + 0.002, q.y))
-            .collect();
-        closed(&mut gizmos, &points, GRID_HOVER);
+    if orbit.mode != ViewMode::First {
+        if let Some(p) = cursor.world {
+            let center = model::nearest_hex(p);
+            let points: Vec<Vec3> = model::hex_corners(center)
+                .iter()
+                .map(|q| Vec3::new(q.x, GRID_Y + 0.002, q.y))
+                .collect();
+            closed(&mut gizmos, &points, GRID_HOVER);
+        }
     }
 
     if let Some(id) = editor.selected {

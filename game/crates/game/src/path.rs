@@ -134,6 +134,18 @@ pub fn find_path(
     None
 }
 
+/// Whether a walker may move from `from` to `to` without crossing a barred
+/// edge or stepping into a blocked cell. Used for manual first-person
+/// movement; paths use the same rules through A*.
+pub fn can_step(from: Vec2, to: Vec2, edges: &HashSet<Edge>, hexes: &HashSet<Hex>) -> bool {
+    let a = model::pixel_to_hex(from);
+    let b = model::pixel_to_hex(to);
+    if hexes.contains(&b) {
+        return false;
+    }
+    a == b || !edges.contains(&edge_key(a, b))
+}
+
 /// Polyline from the character to the click: exact start, the interior hex
 /// centres, exact goal. Nearly collinear waypoints are dropped so the curve
 /// does not wobble down a straight corridor.
@@ -374,6 +386,26 @@ mod tests {
         let (_, hexes) = blocked(&[piece]);
         assert!(hexes.contains(&(1, 0)));
         assert_eq!(find_path((0, 0), (1, 0), &HashSet::new(), &hexes), None);
+    }
+
+    #[test]
+    fn stepping_into_a_wall_is_refused_but_free_edges_are_not() {
+        let wall = wall_between((0, 0), (1, 0));
+        let (edges, hexes) = blocked(&[wall]);
+        let here = model::hex_center(0, 0);
+
+        assert!(!can_step(here, model::hex_center(1, 0), &edges, &hexes));
+        assert!(can_step(here, here + Vec2::new(0.2, 0.0), &edges, &hexes));
+        assert!(can_step(here, model::hex_center(0, 1), &edges, &hexes));
+
+        let pillar = Piece {
+            id: 1,
+            shape: shape_index("pillar").unwrap(),
+            pos: model::hex_center(1, 0),
+            rot: 0.0,
+        };
+        let (edges, hexes) = blocked(&[pillar]);
+        assert!(!can_step(here, model::hex_center(1, 0), &edges, &hexes));
     }
 
     #[test]
