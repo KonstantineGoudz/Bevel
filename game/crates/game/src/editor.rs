@@ -13,6 +13,8 @@ use avian3d::math::{ToF32Precision, ToRealPrecision};
 use avian3d::prelude::*;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::input::touch::Touches;
+use bevy::picking::events::PointerPress;
+use bevy::picking::pointer::PointerButton;
 use bevy::prelude::*;
 use bevy::shape::InfinitePlane3d;
 use bevy::ui_widgets::{Activate, Button};
@@ -219,6 +221,10 @@ struct TouchState {
     tap: Option<Vec2>,
     /// Set by the jump button, consumed by the movement system.
     jump: bool,
+    /// Ignore canvas taps until this time; a UI button tap must not also place.
+    suppress_until: f64,
+    /// Tap captured by the full-screen picking layer (correct coordinate space).
+    pending_tap: Option<Vec2>,
     tracks: HashMap<u64, TouchTrack>,
     two_finger: Option<(Vec2, f32)>,
     /// UI scale on this display: 1 / window scale factor.
@@ -813,9 +819,27 @@ fn spawn_touch_ui(commands: &mut Commands) {
         ))
         .id();
 
+    // A full-screen picking layer behind the controls. Taps that reach it are
+    // grid taps; taps on buttons are consumed by the button first. Using the
+    // picking position keeps this in the same coordinate space as the UI.
+    let canvas = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(0),
+                top: px(0),
+                width: percent(100),
+                height: percent(100),
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+        ))
+        .id();
+    commands.entity(canvas).observe(on_canvas_press);
+
     commands
         .entity(root)
-        .add_children(&[tools, carousel, status, base, jump]);
+        .add_children(&[canvas, tools, carousel, status, base, jump]);
 }
 
 fn touch_button(commands: &mut Commands, action: TouchAction, text: &str) -> Entity {
@@ -1998,14 +2022,13 @@ fn sync_visuals(
 fn touch_input(
     touches: Res<Touches>,
     window: Single<&Window, With<PrimaryWindow>>,
-    mouse: Res<ButtonInput<MouseButton>>,
     time: Res<Time>,
     mut state: ResMut<TouchState>,
 ) {
     state.look = Vec2::ZERO;
     state.pan = Vec2::ZERO;
     state.zoom = 0.0;
-    state.tap = None;
+    state.tap = state.pending_tap.take();
 
     // Phones start in touch mode before the first tap; a narrow window on a
     // desktop gets the compact layout too, which is the right trade.
@@ -2082,14 +2105,7 @@ fn touch_input(
         let quick = track
             .map(|track| now - track.started < 0.35 && short)
             .unwrap_or(short);
-        if !quick {
-            continue;
-        }
-        let control = track.map(|track| track.control).unwrap_or(false);
-        let css = size * window.scale_factor();
-        if !control {
-            state.tap = Some(pos / window.scale_factor());
-        }
+        let _ = quick;
     }
 
     for touch in touches.iter_just_canceled() {
@@ -2102,14 +2118,6 @@ fn touch_input(
 
     // CDP touch emulation (and some browsers) deliver taps as mouse clicks.
     // Route those through the same hit-test so one path serves both.
-    if state.tap.is_none() && mouse.just_pressed(MouseButton::Left) {
-        if let Some(cursor) = window.cursor_position() {
-            if !over_controls(cursor / window.scale_factor(), size, s) {
-                state.tap = Some(cursor / window.scale_factor());
-            }
-        }
-    }
-
     let fingers: Vec<Vec2> = state
         .tracks
         .values()
@@ -2198,6 +2206,7 @@ fn update_touch_status(
 
 /// Which touch button (if any) covers a point, in CSS pixels. The UI is drawn
 /// with a 1/DPR UiScale on phones, so on screen these are the design sizes.
+#[allow(dead_code)] // superseded by UI activation; kept for the hit-test test
 fn touch_action_at(pos: Vec2, css: Vec2) -> Option<TouchAction> {
     if (8.0..=42.0).contains(&pos.y) {
         let width = (css.x - 20.0) / 6.0;
@@ -2273,9 +2282,18 @@ fn run_touch_action(
     }
 }
 
+fn on_canvas_press(event: On<PointerPress>, mut touch: ResMut<TouchState>) {
+    if event.button != PointerButton::Primary {
+        return;
+    }
+    let location = event.pointer.location();
+    touch.pending_tap = Some(location.position);
+}
+
 fn on_touch_button(
     event: On<Activate>,
     buttons: Query<&TouchButton>,
+    time: Res<Time>,
     mut editor: ResMut<Editor>,
     mut orbit: ResMut<Orbit>,
     mut touch: ResMut<TouchState>,
@@ -2283,6 +2301,9 @@ fn on_touch_button(
     let Ok(button) = buttons.get(event.entity) else {
         return;
     };
+    // A UI tap is not a grid tap: drop any tap from this gesture.
+    touch.suppress_until = time.elapsed_secs_f64() + 0.35;
+    touch.tap = None;
     run_touch_action(button.0, &mut editor, &mut orbit, &mut touch);
 }
 
