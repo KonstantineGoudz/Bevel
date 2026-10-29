@@ -588,7 +588,6 @@ pub fn shapes() -> &'static [Shape] {
     &SHAPES
 }
 
-#[cfg(test)]
 pub fn shape_index(id: &str) -> Option<usize> {
     shapes().iter().position(|s| s.id == id)
 }

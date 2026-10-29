@@ -216,6 +216,30 @@ impl ViewMode {
 }
 
 impl Editor {
+    /// Replace the level with the little traversal course.
+    fn load_course(&mut self) {
+        let (mut pieces, character) = course();
+
+        // Fresh ids so visuals and undo keys never collide with what was here.
+        let base = self.next_id.max(1);
+        for (i, piece) in pieces.iter_mut().enumerate() {
+            piece.id = base + i as u32;
+        }
+        self.next_id = base + pieces.len() as u32;
+
+        self.pieces = pieces;
+        self.character = Some(character);
+        self.selected = None;
+        self.ghost = None;
+        self.drag = None;
+        self.route = None;
+        self.walk = None;
+        self.tool = None;
+        self.actor_tool = None;
+        self.undo.clear();
+        self.note = "course: walk straight, up the ramp, over the block, drop";
+    }
+
     fn commit(&mut self) {
         self.undo.push(self.pieces.clone());
         if self.undo.len() > 60 {
@@ -239,6 +263,7 @@ enum PaletteAction {
     Shape(usize),
     Character,
     Path,
+    Course,
 }
 
 #[derive(Component)]
@@ -422,16 +447,21 @@ fn setup(
     }
 
     children.push(palette_label(&mut commands, "ACTOR"));
-    children.push(palette_button(
-        &mut commands,
-        PaletteAction::Character,
-        "Character",
-    ));
-    children.push(palette_button(
-        &mut commands,
-        PaletteAction::Path,
-        "Path preview",
-    ));
+    let actor_row = commands
+        .spawn(Node {
+            width: percent(100),
+            flex_direction: FlexDirection::Row,
+            column_gap: px(4),
+            ..default()
+        })
+        .id();
+    let actor_buttons = [
+        palette_compact_button(&mut commands, PaletteAction::Character, "Char"),
+        palette_compact_button(&mut commands, PaletteAction::Path, "Path"),
+        palette_compact_button(&mut commands, PaletteAction::Course, "Course"),
+    ];
+    commands.entity(actor_row).add_children(&actor_buttons);
+    children.push(actor_row);
 
     commands.entity(panel).add_children(&children);
 
@@ -499,6 +529,35 @@ fn palette_label(commands: &mut Commands, text: &str) -> Entity {
                 margin: UiRect::top(px(8)),
                 ..default()
             },
+        ))
+        .id()
+}
+
+fn palette_compact_button(commands: &mut Commands, action: PaletteAction, text: &str) -> Entity {
+    commands
+        .spawn((
+            Button,
+            PaletteButton(action),
+            Node {
+                flex_grow: 1.0,
+                flex_basis: px(0),
+                height: px(20),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(BUTTON_BG),
+            BorderColor::all(BORDER),
+            children![(
+                Text::new(text),
+                TextFont {
+                    font_size: FontSize::Px(11.0),
+                    ..default()
+                },
+                TextColor(Color::srgb_u8(0xc3, 0xd0, 0xdf)),
+            )],
         ))
         .id()
 }
@@ -719,8 +778,16 @@ fn first_person_move(
     let rotation = Quat::from_rotation_y(character.yaw);
     let mut center = Vec3::new(character.pos.x, character.feet + PILL_HALF, character.pos.y);
 
+    // Standing still on a slope should not slide: without friction the
+    // projected gravity would walk the character back down the ramp.
+    let idle = wish == Vec2::ZERO && character.grounded && vy <= 0.01;
+
     for _ in 0..steps {
-        vy -= GRAVITY * step_dt;
+        if idle {
+            vy = 0.0;
+        } else {
+            vy -= GRAVITY * step_dt;
+        }
         let velocity = Vec3::new(direction.x * speed, vy, direction.y * speed);
         let output = move_and_slide.move_and_slide(
             &kit.character_collider,
@@ -765,6 +832,54 @@ fn first_person_move(
     }
 }
 
+/// The test course: a starting pad, a ramp rising along +x, a 1.2 m block at
+/// the same height, and a landing pad after the drop. The character starts on
+/// the pad facing the ramp, so pressing V then W runs it end to end.
+fn course() -> (Vec<Piece>, Character) {
+    let floor = model::shape_index("floor").unwrap();
+    let ramp = model::shape_index("ramp").unwrap();
+    let block = model::shape_index("block").unwrap();
+
+    let pieces = vec![
+        Piece {
+            id: 1,
+            shape: floor,
+            pos: model::hex_center(0, 0),
+            rot: 0.0,
+        },
+        // 270 deg makes the ramp rise along +x.
+        Piece {
+            id: 2,
+            shape: ramp,
+            pos: model::hex_center(1, 0),
+            rot: std::f32::consts::PI * 1.5,
+        },
+        Piece {
+            id: 3,
+            shape: block,
+            pos: model::hex_center(2, 0),
+            rot: 0.0,
+        },
+        Piece {
+            id: 4,
+            shape: floor,
+            pos: model::hex_center(3, 0),
+            rot: 0.0,
+        },
+    ];
+
+    let character = Character {
+        pos: model::hex_center(0, 0),
+        feet: 0.0,
+        // Forward along +x with this yaw convention.
+        yaw: -std::f32::consts::FRAC_PI_2,
+        vy: 0.0,
+        grounded: true,
+    };
+
+    (pieces, character)
+}
+
 // ---------------------------------------------------------------------------
 // Camera
 // ---------------------------------------------------------------------------
@@ -805,12 +920,15 @@ fn camera_control(
             }
             ViewMode::First => {
                 orbit.pitch = 0.0;
-                // Face the end of the drawn route, if there is one.
                 if let (Some(character), Some(route)) = (editor.character, editor.route.as_ref()) {
+                    // Face the end of the drawn route, if there is one.
                     let towards = route.target - character.pos;
                     if towards.length_squared() > 0.01 {
                         orbit.yaw = (-towards.x).atan2(-towards.y);
                     }
+                } else if let Some(character) = editor.character {
+                    // Otherwise enter looking the way the character faces.
+                    orbit.yaw = character.yaw;
                 }
             }
         }
@@ -918,6 +1036,7 @@ fn on_palette_activate(
     event: On<Activate>,
     buttons: Query<&PaletteButton>,
     mut editor: ResMut<Editor>,
+    mut orbit: ResMut<Orbit>,
 ) {
     let Ok(button) = buttons.get(event.entity) else {
         return;
@@ -946,6 +1065,10 @@ fn on_palette_activate(
                 Some(ActorTool::Path)
             };
             editor.tool = None;
+        }
+        PaletteAction::Course => {
+            editor.load_course();
+            focus(&mut orbit, editor.character);
         }
     }
     editor.selected = None;
@@ -1460,6 +1583,7 @@ fn update_palette(
             PaletteAction::Shape(index) => editor.tool == Some(index),
             PaletteAction::Character => editor.actor_tool == Some(ActorTool::Place),
             PaletteAction::Path => editor.actor_tool == Some(ActorTool::Path),
+            PaletteAction::Course => false,
         };
         bg.0 = if on { BUTTON_ON } else { BUTTON_BG };
         *border = BorderColor::all(if on { BORDER_ON } else { BORDER });
@@ -1774,6 +1898,39 @@ mod tests {
         assert_eq!(
             pick(&pieces, ray_towards(Vec3::new(0.2, 0.0, 0.2))),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn the_course_lines_up_for_a_walk() {
+        let (pieces, character) = course();
+        assert_eq!(pieces.len(), 4);
+
+        let ramp = pieces
+            .iter()
+            .find(|p| shapes()[p.shape].id == "ramp")
+            .unwrap();
+        let block = pieces
+            .iter()
+            .find(|p| shapes()[p.shape].id == "block")
+            .unwrap();
+
+        // Ramp rotated 270 degrees rises along +x; its top edge and the block's
+        // near face should meet at the same height with a small gap.
+        let ramp_top_x = ramp.pos.x + 1.0;
+        let block_near_x = block.pos.x - 0.9;
+        assert!(
+            (block_near_x - ramp_top_x).abs() < 0.25,
+            "ramp top {ramp_top_x} vs block face {block_near_x}"
+        );
+        assert!((shapes()[ramp.shape].top() - shapes()[block.shape].top()).abs() < 1e-4);
+
+        // Start before the ramp, facing +x.
+        assert!(character.pos.x < ramp.pos.x);
+        let forward = Vec2::new(-character.yaw.sin(), -character.yaw.cos());
+        assert!(
+            forward.x > 0.99,
+            "course should start facing +x, got {forward}"
         );
     }
 
