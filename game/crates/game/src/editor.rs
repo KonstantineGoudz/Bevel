@@ -171,7 +171,7 @@ struct Route {
 #[derive(Clone, Copy)]
 struct Walk {
     distance: f32,
-    speed: f32,
+    stuck: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -233,7 +233,6 @@ struct TouchState {
 
 #[derive(Clone, Copy)]
 struct TouchTrack {
-    start: Vec2,
     last: Vec2,
     started: f64,
     stick: bool,
@@ -1037,72 +1036,129 @@ fn solid_parts(shape: &model::Shape) -> Vec<(Vec<Vec2>, f32, f32, u8)> {
 /// look direction follows the tangent.
 fn walk(
     time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    touch: Res<TouchState>,
     mut editor: ResMut<Editor>,
     mut orbit: ResMut<Orbit>,
-    spatial_query: SpatialQuery,
+    kit: Res<Kit>,
     player: Query<Entity, With<CharacterVisual>>,
+    move_and_slide: MoveAndSlide,
 ) {
     let Some(mut current) = editor.walk else {
         return;
     };
-    let Some(route) = editor.route.as_ref() else {
+    let Some(character) = editor.character else {
+        editor.walk = None;
+        return;
+    };
+    let Some(entity) = player.iter().next() else {
+        return;
+    };
+    let Some((total, look)) = editor.route.as_ref().map(|route| {
+        let total = route.track.total();
+        (total, route.track.at((current.distance + 0.7).min(total)).0)
+    }) else {
         editor.walk = None;
         return;
     };
 
-    let total = route.track.total();
-    current.distance = (current.distance + current.speed * time.delta_secs()).min(total);
-    let (pos, forward) = route.track.at(current.distance);
-    let yaw = (-forward.x).atan2(-forward.y);
+    let to_target = look - character.pos;
+    if current.distance >= total - 0.12 && to_target.length() < 0.2 {
+        editor.walk = None;
+        editor.note = "arrived";
+        return;
+    }
 
-    // Follow the surface under the curve: the route is planned on the hex
-    // grid, but the pill still has to climb ramps and stand on blocks.
-    let filter = player
-        .iter()
-        .next()
-        .map(|entity| SpatialQueryFilter::from_excluded_entities([entity]))
-        .unwrap_or_default();
-    // Sample across the capsule's footprint, not just its centre. A single
-    // ray drops into the few-centimetre crack between a ramp's top and a
-    // block; the capsule itself bridges it, so the height should too.
-    let previous = editor.character.map(|c| c.feet).unwrap_or(0.0);
-    let heights = [
-        Vec2::ZERO,
-        Vec2::new(0.28, 0.0),
-        Vec2::new(-0.28, 0.0),
-        Vec2::new(0.0, 0.28),
-        Vec2::new(0.0, -0.28),
-    ]
-    .into_iter()
-    .filter_map(|offset| {
-        let sample = pos + offset;
-        let above = Vec3::new(sample.x, 3.0, sample.y);
-        spatial_query
-            .cast_ray(above.real(), Dir3::NEG_Y, 6.0, true, &filter)
-            .filter(|hit| hit.normal.y > 0.3)
-            .map(|hit| above.y - hit.distance)
-    });
-    let feet = supported_height(heights, previous);
+    // Steering, not teleporting: the same capsule and move-and-slide as
+    // first-person control, so ramps, gaps and gravity are resolved by physics.
+    let direction = to_target.normalize_or_zero();
+    let frame = time.delta_secs().clamp(0.0, 0.25);
+    let steps = ((frame / (1.0 / 60.0)).ceil() as usize).clamp(1, 10);
+    let step_dt = frame / steps as f32;
+    let filter = SpatialQueryFilter::from_excluded_entities([entity]);
+    let rotation = Quat::from_rotation_y(character.yaw);
+    let mut center = Vec3::new(character.pos.x, character.feet + PILL_HALF, character.pos.y);
+    let mut vy = character.vy;
+    let mut travelled = 0.0;
 
-    if let Some(character) = editor.character.as_mut() {
-        character.pos = pos;
-        character.feet = feet.clamp(0.0, 3.0);
-        character.vy = 0.0;
-        character.grounded = true;
-        character.yaw = yaw;
+    for _ in 0..steps {
+        vy -= GRAVITY * step_dt;
+        let velocity = Vec3::new(direction.x * WALK_SPEED, vy, direction.y * WALK_SPEED);
+        let output = move_and_slide.move_and_slide(
+            &kit.character_collider,
+            center.real(),
+            rotation,
+            velocity,
+            std::time::Duration::from_secs_f32(step_dt),
+            &MoveAndSlideConfig::default(),
+            &filter,
+            |_| MoveAndSlideHitResponse::Accept,
+        );
+        let next = output.position.f32();
+        travelled += Vec2::new(next.x - center.x, next.z - center.z).length();
+        center = next;
+        vy = output.projected_velocity.y;
+    }
+
+    let moved = Vec2::new(center.x, center.z);
+    let yaw = if direction.length_squared() > 0.01 {
+        (-direction.x).atan2(-direction.y)
+    } else {
+        character.yaw
+    };
+
+    let nearest = editor
+        .route
+        .as_ref()
+        .map(|route| route.track.nearest_distance(moved))
+        .unwrap_or(current.distance);
+
+    if let Some(target) = editor.character.as_mut() {
+        target.pos = moved;
+        target.feet = center.y - PILL_HALF;
+        target.vy = vy;
+        target.grounded = vy > -0.05;
+        target.yaw = yaw;
     }
 
     if orbit.mode == ViewMode::First {
         orbit.yaw = yaw;
     } else {
-        orbit.target = Vec3::new(pos.x, 0.0, pos.y);
+        orbit.target = Vec3::new(moved.x, 0.0, moved.y);
     }
 
-    if current.distance >= total - 1e-4 {
+    current.distance = nearest.clamp(current.distance - 0.2, total);
+    if travelled < 0.005 {
+        current.stuck += frame;
+    } else {
+        current.stuck = 0.0;
+    }
+
+    if current.stuck > 0.8 {
+        editor.walk = None;
+        editor.note = "blocked";
+    } else if current.distance >= total - 0.12 {
         editor.walk = None;
         editor.note = "arrived";
     } else {
         editor.walk = Some(current);
+    }
+
+    // Any manual steering hands control back to the player.
+    if touch.stick.length_squared() > 0.02
+        || keys.any_pressed([
+        KeyCode::KeyW,
+        KeyCode::KeyA,
+        KeyCode::KeyS,
+        KeyCode::KeyD,
+        KeyCode::ArrowUp,
+        KeyCode::ArrowDown,
+        KeyCode::ArrowLeft,
+            KeyCode::ArrowRight,
+        ])
+    {
+        editor.walk = None;
+        editor.note = "manual control";
     }
 }
 
@@ -1140,7 +1196,7 @@ fn first_person_move(
     player: Query<Entity, With<CharacterVisual>>,
     move_and_slide: MoveAndSlide,
 ) {
-    if orbit.mode != ViewMode::First {
+    if orbit.mode != ViewMode::First || editor.walk.is_some() {
         return;
     }
     let Some(character) = editor.character.as_mut() else {
@@ -1771,14 +1827,6 @@ fn interact(
     }
 }
 
-/// The highest surface across the character's footprint, ignoring anything
-/// more than a step above its current height (wall tops, block sides).
-fn supported_height(samples: impl Iterator<Item = f32>, previous: f32) -> f32 {
-    samples
-        .filter(|height| *height <= previous + 0.45)
-        .fold(0.0, f32::max)
-}
-
 /// Where the click actually landed on the world, not just on the y = 0 plane.
 /// Without this, clicking the top of a block maps to the ground behind it.
 fn surface_target(
@@ -1814,7 +1862,7 @@ fn route_to(editor: &mut Editor, target: Vec2) {
             let track = path::Track::new(path::sample(&path::smooth(&points), 18));
             editor.walk = (track.total() > 0.1).then_some(Walk {
                 distance: 0.0,
-                speed: WALK_SPEED,
+                stuck: 0.0,
             });
             editor.note = if editor.walk.is_some() {
                 "walking"
@@ -2124,7 +2172,6 @@ fn touch_input(
         state.tracks.insert(
             id,
             TouchTrack {
-                start: pos,
                 last: pos,
                 started: now,
                 stick,
@@ -2894,24 +2941,6 @@ mod tests {
         assert!(over_controls(Vec2::new(60.0, 800.0), size, 1.0), "stick");
         assert!(over_controls(Vec2::new(340.0, 800.0), size, 1.0), "jump");
         assert!(!over_controls(Vec2::new(195.0, 420.0), size, 1.0), "canvas");
-    }
-
-    #[test]
-    fn a_footprint_bridges_a_crack_but_still_drops_off_an_edge() {
-        // Ramp on one side, block on the other, crack under the centre.
-        let cracked = [0.9, 0.9, 0.0, 0.9, 0.0];
-        assert!((supported_height(cracked.into_iter(), 0.9) - 0.9).abs() < 1e-4);
-
-        // A real edge: nothing under the footprint, so drop to the ground.
-        let empty = [0.0; 5];
-        assert!(supported_height(empty.into_iter(), 0.9).abs() < 1e-4);
-
-        // A wall top beside the character must not be used as a step.
-        let wall = [2.8, 0.9];
-        assert!((supported_height(wall.into_iter(), 0.9) - 0.9).abs() < 1e-4);
-
-        // No hits at all falls back to the floor.
-        assert_eq!(supported_height(std::iter::empty(), 0.5), 0.0);
     }
 
     #[test]

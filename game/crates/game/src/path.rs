@@ -236,6 +236,28 @@ impl Track {
         self.lengths.last().copied().unwrap_or(0.0)
     }
 
+    /// Arc length of the point on the track closest to `point`.
+    pub fn nearest_distance(&self, point: Vec2) -> f32 {
+        let mut best = (f32::MAX, 0.0);
+        for i in 0..self.points.len().saturating_sub(1) {
+            let a = self.points[i];
+            let b = self.points[i + 1];
+            let ab = b - a;
+            let len2 = ab.length_squared();
+            let t = if len2 > 1e-6 {
+                ((point - a).dot(ab) / len2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let closest = a + ab * t;
+            let distance = closest.distance_squared(point);
+            if distance < best.0 {
+                best = (distance, self.lengths[i] + ab.length() * t);
+            }
+        }
+        best.1
+    }
+
     /// Position and unit forward vector at `distance` metres along the track.
     pub fn at(&self, distance: f32) -> (Vec2, Vec2) {
         if self.points.is_empty() {
@@ -520,6 +542,19 @@ mod tests {
 
         let (end, _) = track.at(99.0);
         assert!(end.distance(Vec2::new(2.0, 2.0)) < 1e-4);
+    }
+
+    #[test]
+    fn a_track_finds_the_closest_arc_length() {
+        let track = Track::new(vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(2.0, 0.0),
+            Vec2::new(2.0, 2.0),
+        ]);
+        assert!((track.nearest_distance(Vec2::new(1.5, 0.3)) - 1.5).abs() < 1e-3);
+        assert!((track.nearest_distance(Vec2::new(2.2, 1.0)) - 3.0).abs() < 1e-3);
+        assert!((track.nearest_distance(Vec2::new(-5.0, 0.0)) - 0.0).abs() < 1e-3);
+        assert!((track.nearest_distance(Vec2::new(9.0, 9.0)) - 4.0).abs() < 1e-3);
     }
 
     #[test]
