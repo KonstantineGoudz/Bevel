@@ -12,6 +12,7 @@ use avian3d::character_controller::prelude::{
 use avian3d::math::{ToF32Precision, ToRealPrecision};
 use avian3d::prelude::*;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
+use bevy::input::touch::Touches;
 use bevy::prelude::*;
 use bevy::shape::InfinitePlane3d;
 use bevy::ui_widgets::{Activate, Button};
@@ -45,6 +46,12 @@ const WALK_SPEED: f32 = 2.2;
 /// Gravity, in m/s^2. A little above earth so the character does not float.
 const GRAVITY: f32 = 18.0;
 const JUMP_SPEED: f32 = 6.0;
+/// Touch stick geometry, in logical pixels.
+const STICK_BASE: f32 = 132.0;
+const STICK_MARGIN: f32 = 20.0;
+const STICK_KNOB: f32 = 52.0;
+const STICK_REACH: f32 = 110.0;
+const STICK_TRAVEL: f32 = 44.0;
 
 pub struct EditorPlugin;
 
@@ -54,10 +61,18 @@ impl Plugin for EditorPlugin {
             .init_resource::<Cursor>()
             .init_resource::<Orbit>()
             .init_resource::<Visuals>()
+            .init_resource::<TouchState>()
+            .init_resource::<UiScaleApplied>()
             .add_systems(Startup, setup)
             .add_systems(
                 Update,
                 (
+                    setup_ui_scale,
+                    touch_input,
+                    apply_touch_action,
+                    sync_input_mode,
+                    sync_knob,
+                    sync_shape_label,
                     walk,
                     first_person_move,
                     camera_control,
@@ -66,6 +81,7 @@ impl Plugin for EditorPlugin {
                     sync_visuals,
                     update_palette,
                     update_status,
+                    update_touch_status,
                     draw,
                 )
                     .chain(),
@@ -94,6 +110,8 @@ struct Editor {
     drag: Option<Drag>,
     undo: Vec<Vec<Piece>>,
     note: &'static str,
+    /// Shape picked by the mobile carousel.
+    mobile_shape: usize,
 }
 
 impl Default for Editor {
@@ -113,6 +131,7 @@ impl Default for Editor {
             drag: None,
             undo: Vec::new(),
             note: "Click a component, then the grid",
+            mobile_shape: 0,
         }
     }
 }
@@ -162,11 +181,50 @@ struct Drag {
     moved: bool,
 }
 
+/// Everything the touch layer reads, rebuilt each frame from `Touches`.
+#[derive(Resource, Default)]
+struct UiScaleApplied(bool);
+
+#[derive(Resource, Default)]
+struct TouchState {
+    /// Set the first time any touch arrives; switches the whole UI over.
+    enabled: bool,
+    /// Stick direction: x right, y forward, length <= 1.
+    stick: Vec2,
+    /// One-finger drag in logical pixels, for looking and orbiting.
+    look: Vec2,
+    /// Two-finger centroid drag.
+    pan: Vec2,
+    /// Fractional pinch change; positive means fingers moved apart.
+    zoom: f32,
+    /// Screen position of a tap that finished this frame.
+    tap: Option<Vec2>,
+    /// A touch button action requested this frame.
+    action: Option<TouchAction>,
+    /// Set by the jump button, consumed by the movement system.
+    jump: bool,
+    tracks: HashMap<u64, TouchTrack>,
+    two_finger: Option<(Vec2, f32)>,
+    /// UI scale on this display: 1 / window scale factor.
+    ui_scale: f32,
+}
+
+#[derive(Clone, Copy)]
+struct TouchTrack {
+    start: Vec2,
+    last: Vec2,
+    started: f64,
+    stick: bool,
+    control: bool,
+}
+
 #[derive(Resource, Default)]
 struct Cursor {
     screen: Option<Vec2>,
     world: Option<Vec2>,
     ray: Option<Ray3d>,
+    /// A tap completed this frame (touch builds/clicks).
+    tap: bool,
 }
 
 #[derive(Resource)]
@@ -275,6 +333,39 @@ struct PieceVisual;
 #[derive(Component)]
 struct CharacterVisual;
 
+/// Marks a UI root as belonging to the desktop or the touch layer.
+#[derive(Component)]
+struct InputLayer {
+    desktop: bool,
+}
+
+#[derive(Component)]
+#[allow(dead_code)] // visual grouping; actions are dispatched by hit-testing
+struct TouchButton(TouchAction);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TouchAction {
+    View,
+    Rotate,
+    Delete,
+    Undo,
+    Path,
+    Place,
+    PrevShape,
+    NextShape,
+    Jump,
+    Course,
+}
+
+#[derive(Component)]
+struct TouchKnob;
+
+#[derive(Component)]
+struct ShapeLabel;
+
+#[derive(Component)]
+struct TouchStatus;
+
 /// One entity per piece (and one for the ghost, keyed 0).
 #[derive(Resource, Default)]
 struct Visuals {
@@ -298,6 +389,27 @@ struct Kit {
 // ---------------------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------------------
+
+/// On a DPR-2 phone the logical viewport is half the CSS size; shrink the UI
+/// by the same factor so it keeps its CSS proportions, and remember it so
+/// touch coordinates can be mapped into logical space.
+fn setup_ui_scale(
+    window: Single<&Window, With<PrimaryWindow>>,
+    mut ui_scale: ResMut<UiScale>,
+    mut touch: ResMut<TouchState>,
+    mut applied: ResMut<UiScaleApplied>,
+) {
+    if applied.0 {
+        return;
+    }
+    let scale = window.scale_factor();
+    let css_width = window.width() * scale;
+    if scale > 1.0 && css_width < 700.0 {
+        applied.0 = true;
+        ui_scale.0 = 1.0 / scale;
+        touch.ui_scale = 1.0 / scale;
+    }
+}
 
 fn setup(
     mut commands: Commands,
@@ -397,6 +509,7 @@ fn setup(
 
     let panel = commands
         .spawn((
+            InputLayer { desktop: true },
             Node {
                 position_type: PositionType::Absolute,
                 left: px(0),
@@ -467,6 +580,7 @@ fn setup(
 
     let status_bar = commands
         .spawn((
+            InputLayer { desktop: true },
             Node {
                 position_type: PositionType::Absolute,
                 left: px(PANEL_WIDTH + 4.0),
@@ -493,6 +607,7 @@ fn setup(
 
     let hint_bar = commands
         .spawn((
+            InputLayer { desktop: true },
             Node {
                 position_type: PositionType::Absolute,
                 left: px(PANEL_WIDTH + 4.0),
@@ -514,6 +629,203 @@ fn setup(
         ))
         .id();
     commands.entity(hint_bar).add_child(hint_text);
+
+    spawn_touch_ui(&mut commands);
+}
+
+/// The phone layout: a toolbar, a shape carousel, a thumbstick and a jump
+/// button. Hidden until the first touch arrives.
+fn spawn_touch_ui(commands: &mut Commands) {
+    let root = commands
+        .spawn((
+            InputLayer { desktop: false },
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(0),
+                top: px(0),
+                width: percent(100),
+                height: percent(100),
+                display: Display::None,
+                ..default()
+            },
+        ))
+        .id();
+
+    // Top toolbar.
+    let tools = commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            left: px(8),
+            right: px(8),
+            top: px(8),
+            height: px(34),
+            flex_direction: FlexDirection::Row,
+            column_gap: px(4),
+            ..default()
+        })
+        .id();
+    let tool_buttons = [
+        touch_button(commands, TouchAction::View, "View"),
+        touch_button(commands, TouchAction::Rotate, "Rot"),
+        touch_button(commands, TouchAction::Delete, "Del"),
+        touch_button(commands, TouchAction::Undo, "Undo"),
+        touch_button(commands, TouchAction::Path, "Path"),
+        touch_button(commands, TouchAction::Course, "Course"),
+    ];
+    commands.entity(tools).add_children(&tool_buttons);
+
+    // Shape carousel + place toggle.
+    let carousel = commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            left: px(8),
+            right: px(8),
+            top: px(46),
+            height: px(34),
+            flex_direction: FlexDirection::Row,
+            column_gap: px(4),
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .id();
+    let prev = touch_button(commands, TouchAction::PrevShape, "<");
+    let label = commands
+        .spawn((
+            ShapeLabel,
+            Text::new(""),
+            TextFont {
+                font_size: FontSize::Px(13.0),
+                ..default()
+            },
+            TextColor(Color::srgb_u8(0xc3, 0xd0, 0xdf)),
+            Node {
+                flex_grow: 1.0,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+        ))
+        .id();
+    let next = touch_button(commands, TouchAction::NextShape, ">");
+    let place = touch_button(commands, TouchAction::Place, "Place");
+    commands
+        .entity(carousel)
+        .add_children(&[prev, label, next, place]);
+
+    // Compact status under the toolbar.
+    let status = commands
+        .spawn((
+            TouchStatus,
+            Text::new(""),
+            TextFont {
+                font_size: FontSize::Px(12.0),
+                ..default()
+            },
+            TextColor(MUTED),
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(10),
+                top: px(88),
+                ..default()
+            },
+        ))
+        .id();
+
+    // Thumbstick.
+    let base = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(STICK_MARGIN),
+                bottom: px(STICK_MARGIN),
+                width: px(STICK_BASE),
+                height: px(STICK_BASE),
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(percent(50)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.06, 0.08, 0.11, 0.55)),
+            BorderColor::all(Color::srgba(0.5, 0.7, 0.85, 0.25)),
+        ))
+        .id();
+    let knob = commands
+        .spawn((
+            TouchKnob,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px((STICK_BASE - STICK_KNOB) * 0.5),
+                bottom: px((STICK_BASE - STICK_KNOB) * 0.5),
+                width: px(STICK_KNOB),
+                height: px(STICK_KNOB),
+                border_radius: BorderRadius::all(percent(50)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.25, 0.82, 0.70, 0.55)),
+        ))
+        .id();
+    commands.entity(base).add_child(knob);
+
+    // Jump.
+    let jump = commands
+        .spawn((
+            Button,
+            TouchButton(TouchAction::Jump),
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(20),
+                bottom: px(24),
+                width: px(84),
+                height: px(84),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(percent(50)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.06, 0.08, 0.11, 0.62)),
+            BorderColor::all(Color::srgba(0.5, 0.7, 0.85, 0.25)),
+            children![(
+                Text::new("Jump"),
+                TextFont {
+                    font_size: FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(Color::srgb_u8(0xc3, 0xd0, 0xdf)),
+            )],
+        ))
+        .id();
+
+    commands
+        .entity(root)
+        .add_children(&[tools, carousel, status, base, jump]);
+}
+
+fn touch_button(commands: &mut Commands, action: TouchAction, text: &str) -> Entity {
+    commands
+        .spawn((
+            Button,
+            TouchButton(action),
+            Node {
+                flex_grow: 1.0,
+                flex_basis: px(0),
+                height: px(34),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.06, 0.08, 0.11, 0.62)),
+            BorderColor::all(Color::srgba(0.5, 0.7, 0.85, 0.25)),
+            children![(
+                Text::new(text),
+                TextFont {
+                    font_size: FontSize::Px(12.0),
+                    ..default()
+                },
+                TextColor(Color::srgb_u8(0xc3, 0xd0, 0xdf)),
+            )],
+        ))
+        .id()
 }
 
 fn palette_label(commands: &mut Commands, text: &str) -> Entity {
@@ -716,6 +1028,27 @@ fn walk(time: Res<Time>, mut editor: ResMut<Editor>, mut orbit: ResMut<Orbit>) {
     }
 }
 
+fn rotate_piece(editor: &mut Editor, step: f32) {
+    if let Some(id) = editor.selected {
+        if editor.pieces.iter().any(|p| p.id == id) {
+            editor.commit();
+            if let Some(piece) = editor.pieces.iter_mut().find(|p| p.id == id) {
+                piece.rot = model::normalize_angle(piece.rot + step);
+            }
+        }
+    } else if editor.tool.is_some() {
+        editor.ghost_rot = model::normalize_angle(editor.ghost_rot + step);
+    }
+}
+
+fn delete_piece(editor: &mut Editor) {
+    if let Some(id) = editor.selected {
+        editor.commit();
+        editor.pieces.retain(|p| p.id != id);
+        editor.selected = None;
+    }
+}
+
 /// WASD movement in first person, resolved by Avian's move-and-slide against
 /// the real colliders: gravity, wall sliding, step-up and jumping. Shift runs;
 /// any manual input takes over from the walk.
@@ -724,6 +1057,7 @@ fn first_person_move(
     keys: Res<ButtonInput<KeyCode>>,
     mut editor: ResMut<Editor>,
     orbit: Res<Orbit>,
+    mut touch: ResMut<TouchState>,
     kit: Res<Kit>,
     player: Query<Entity, With<CharacterVisual>>,
     move_and_slide: MoveAndSlide,
@@ -739,17 +1073,21 @@ fn first_person_move(
     };
 
     let mut wish = Vec2::ZERO;
-    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
-        wish.y += 1.0;
-    }
-    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
-        wish.y -= 1.0;
-    }
-    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
-        wish.x += 1.0;
-    }
-    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
-        wish.x -= 1.0;
+    if touch.enabled && touch.stick.length_squared() > 0.002 {
+        wish = touch.stick;
+    } else {
+        if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
+            wish.y += 1.0;
+        }
+        if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
+            wish.y -= 1.0;
+        }
+        if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
+            wish.x += 1.0;
+        }
+        if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
+            wish.x -= 1.0;
+        }
     }
     let wish = wish.normalize_or_zero();
 
@@ -770,7 +1108,9 @@ fn first_person_move(
     let mut vy = character.vy;
     // `pressed`, not `just_pressed`: a frame can span the whole key tap on a
     // slow frame, and a held space should still jump on landing.
-    if keys.pressed(KeyCode::Space) && character.grounded {
+    let jump = keys.pressed(KeyCode::Space) || touch.jump;
+    touch.jump = false;
+    if jump && character.grounded {
         vy = JUMP_SPEED;
     }
 
@@ -888,6 +1228,7 @@ fn camera_control(
     mut orbit: ResMut<Orbit>,
     mut camera: Single<&mut Transform, With<Camera3d>>,
     mut editor: ResMut<Editor>,
+    touch: Res<TouchState>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     mut motion: MessageReader<MouseMotion>,
@@ -908,33 +1249,7 @@ fn camera_control(
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
 
     if keys.just_pressed(KeyCode::KeyV) {
-        orbit.mode = orbit.mode.next();
-        match orbit.mode {
-            ViewMode::Third => {
-                orbit.pitch = 0.9;
-                orbit.distance = 7.5;
-            }
-            ViewMode::Top => {
-                orbit.pitch = 1.4;
-                orbit.distance = 13.0;
-            }
-            ViewMode::First => {
-                orbit.pitch = 0.0;
-                if let (Some(character), Some(route)) = (editor.character, editor.route.as_ref()) {
-                    // Face the end of the drawn route, if there is one.
-                    let towards = route.target - character.pos;
-                    if towards.length_squared() > 0.01 {
-                        orbit.yaw = (-towards.x).atan2(-towards.y);
-                    }
-                } else if let Some(character) = editor.character {
-                    // Otherwise enter looking the way the character faces.
-                    orbit.yaw = character.yaw;
-                }
-            }
-        }
-        if orbit.mode != ViewMode::First {
-            focus(&mut orbit, editor.character);
-        }
+        cycle_view(&mut orbit, &editor);
     }
     if keys.just_pressed(KeyCode::KeyF) {
         focus(&mut orbit, editor.character);
@@ -977,6 +1292,36 @@ fn camera_control(
         }
     }
 
+    // Touch: one finger looks/orbits, two fingers pan and pinch.
+    if touch.enabled {
+        match orbit.mode {
+            ViewMode::First if editor.character.is_some() => {
+                orbit.yaw -= touch.look.x * 0.005;
+                orbit.pitch = (orbit.pitch - touch.look.y * 0.005).clamp(-1.35, 1.35);
+            }
+            _ => {
+                orbit.yaw -= touch.look.x * 0.006;
+                let (low, high) = if orbit.mode == ViewMode::Top {
+                    (0.7, 1.5)
+                } else {
+                    (0.12, 1.5)
+                };
+                orbit.pitch = (orbit.pitch + touch.look.y * 0.005).clamp(low, high);
+                if touch.pan != Vec2::ZERO {
+                    let right = Vec3::new(orbit.yaw.cos(), 0.0, -orbit.yaw.sin());
+                    let forward = Vec3::new(-orbit.yaw.sin(), 0.0, -orbit.yaw.cos());
+                    let k = orbit.distance * 0.0018;
+                    orbit.target -= right * touch.pan.x * k;
+                    orbit.target += forward * touch.pan.y * k;
+                    orbit.target.y = 0.0;
+                }
+                if touch.zoom != 0.0 {
+                    orbit.distance = (orbit.distance * (1.0 - touch.zoom * 0.8)).clamp(1.5, 60.0);
+                }
+            }
+        }
+    }
+
     if orbit.mode == ViewMode::First {
         if let Some(character) = editor.character {
             let eye = Vec3::new(
@@ -1011,14 +1356,45 @@ fn focus(orbit: &mut Orbit, character: Option<Character>) {
     }
 }
 
+/// Third -> First -> Top. Shared by the V key and the touch View button.
+fn cycle_view(orbit: &mut Orbit, editor: &Editor) {
+    orbit.mode = orbit.mode.next();
+    match orbit.mode {
+        ViewMode::Third => {
+            orbit.pitch = 0.9;
+            orbit.distance = 7.5;
+        }
+        ViewMode::Top => {
+            orbit.pitch = 1.4;
+            orbit.distance = 13.0;
+        }
+        ViewMode::First => {
+            orbit.pitch = 0.0;
+            if let (Some(character), Some(route)) = (editor.character, editor.route.as_ref()) {
+                let towards = route.target - character.pos;
+                if towards.length_squared() > 0.01 {
+                    orbit.yaw = (-towards.x).atan2(-towards.y);
+                }
+            } else if let Some(character) = editor.character {
+                orbit.yaw = character.yaw;
+            }
+        }
+    }
+    if orbit.mode != ViewMode::First {
+        focus(orbit, editor.character);
+    }
+}
+
 fn update_cursor(
     mut cursor: ResMut<Cursor>,
+    touch: Res<TouchState>,
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<(&Camera, &Transform)>,
 ) {
     let (camera, transform) = *camera;
     let global = GlobalTransform::from(*transform);
-    cursor.screen = window.cursor_position();
+    cursor.screen = touch.tap.or_else(|| window.cursor_position());
+    cursor.tap = touch.tap.is_some();
     cursor.ray = cursor
         .screen
         .and_then(|p| camera.viewport_to_world(&global, p).ok());
@@ -1080,6 +1456,7 @@ fn interact(
     mut editor: ResMut<Editor>,
     mut orbit: ResMut<Orbit>,
     cursor: Res<Cursor>,
+    touch: Res<TouchState>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
 ) {
@@ -1111,24 +1488,11 @@ fn interact(
         } else {
             model::ANCHOR_STEP
         };
-        if let Some(id) = editor.selected {
-            if editor.pieces.iter().any(|p| p.id == id) {
-                editor.commit();
-                if let Some(piece) = editor.pieces.iter_mut().find(|p| p.id == id) {
-                    piece.rot = model::normalize_angle(piece.rot + step);
-                }
-            }
-        } else if editor.tool.is_some() {
-            editor.ghost_rot = model::normalize_angle(editor.ghost_rot + step);
-        }
+        rotate_piece(&mut editor, step);
     }
 
     if keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::Backspace) {
-        if let Some(id) = editor.selected {
-            editor.commit();
-            editor.pieces.retain(|p| p.id != id);
-            editor.selected = None;
-        }
+        delete_piece(&mut editor);
     }
 
     if keys.just_pressed(KeyCode::KeyZ)
@@ -1143,10 +1507,17 @@ fn interact(
         save(&editor);
     }
 
-    // Clicks on the palette are handled by the widget observers; ignore them here.
-    if screen.x <= PANEL_WIDTH {
+    // Clicks on the palette are handled by the widget observers; ignore them
+    // here. The palette is hidden in touch mode, so the whole screen is canvas.
+    if !touch.enabled && screen.x <= PANEL_WIDTH {
         return;
     }
+
+    let clicked = if touch.enabled {
+        cursor.tap
+    } else {
+        cursor.tap || mouse.just_pressed(MouseButton::Left)
+    };
 
     if let Some(tool) = editor.tool {
         let shape = &shapes()[tool];
@@ -1170,7 +1541,7 @@ fn interact(
             kind: snap.kind,
         });
 
-        if mouse.just_pressed(MouseButton::Left) {
+        if clicked {
             editor.commit();
             let id = editor.next_id;
             editor.next_id += 1;
@@ -1193,7 +1564,7 @@ fn interact(
     editor.ghost = None;
 
     if editor.actor_tool == Some(ActorTool::Place) {
-        if mouse.just_pressed(MouseButton::Left) {
+        if clicked {
             let pos = model::nearest_hex(world);
             let character = Character {
                 pos,
@@ -1212,13 +1583,13 @@ fn interact(
     }
 
     if editor.actor_tool == Some(ActorTool::Path) {
-        if mouse.just_pressed(MouseButton::Left) {
+        if clicked {
             route_to(&mut editor, world);
         }
         return;
     }
 
-    if mouse.just_pressed(MouseButton::Left) {
+    if clicked {
         let hit = cursor.ray.and_then(|ray| pick(&editor.pieces, ray));
         let on_surface = hit
             .and_then(|id| editor.pieces.iter().find(|p| p.id == id))
@@ -1567,6 +1938,307 @@ fn sync_visuals(
         }
     } else if let Some(entity) = visuals.character.take() {
         commands.entity(entity).despawn();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Touch
+// ---------------------------------------------------------------------------
+
+/// Turn raw touches into a stick vector, look/pan/zoom deltas, and taps.
+fn touch_input(
+    touches: Res<Touches>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    time: Res<Time>,
+    mut state: ResMut<TouchState>,
+) {
+    state.look = Vec2::ZERO;
+    state.pan = Vec2::ZERO;
+    state.zoom = 0.0;
+    state.tap = None;
+    state.action = None;
+
+    // Phones start in touch mode before the first tap; a narrow window on a
+    // desktop gets the compact layout too, which is the right trade.
+    if !state.enabled
+        && (touches.any_just_pressed()
+            || touches.iter().next().is_some()
+            || window.width() * window.scale_factor() < 700.0)
+    {
+        state.enabled = true;
+    }
+    if !state.enabled {
+        return;
+    }
+
+    let size = window.size();
+    let s = state.ui_scale;
+    let centre = Vec2::new(
+        (STICK_MARGIN + STICK_BASE * 0.5) * s,
+        size.y - (STICK_MARGIN + STICK_BASE * 0.5) * s,
+    );
+    let now = time.elapsed_secs_f64();
+
+    // Presses are handled separately: on a slow frame the press and release can
+    // arrive together and never appear in `iter()`.
+    for touch in touches.iter_just_pressed() {
+        let id = touch.id();
+        let pos = touch.position() / window.scale_factor();
+        let control = over_controls(pos, size, s);
+        let stick = !control && pos.distance(centre) <= STICK_REACH * s;
+        state.tracks.insert(
+            id,
+            TouchTrack {
+                start: pos,
+                last: pos,
+                started: now,
+                stick,
+                control,
+            },
+        );
+    }
+
+    for touch in touches.iter() {
+        if touches.just_pressed(touch.id()) {
+            continue;
+        }
+        let id = touch.id();
+        let pos = touch.position() / window.scale_factor();
+        if let Some(track) = state.tracks.get_mut(&id) {
+            let delta = pos - track.last;
+            track.last = pos;
+            if track.stick {
+                state.stick = stick_offset(pos, centre, s);
+            } else if !track.control {
+                state.look += delta;
+            }
+        }
+    }
+
+    for touch in touches.iter_just_released() {
+        let id = touch.id();
+        let pos = touch.position();
+        let short = pos.distance(touch.start_position()) < 14.0;
+        let track = state.tracks.remove(&id);
+
+        if let Some(track) = track {
+            if track.stick {
+                state.stick = Vec2::ZERO;
+                continue;
+            }
+        }
+
+        // A slow frame can swallow the press, so a release with no track is
+        // still a tap if the finger barely moved.
+        let quick = track
+            .map(|track| now - track.started < 0.35 && short)
+            .unwrap_or(short);
+        if !quick {
+            continue;
+        }
+        let control = track.map(|track| track.control).unwrap_or(false);
+        let css = size * window.scale_factor();
+        if let Some(action) = touch_action_at(pos, css) {
+            state.action = Some(action);
+        } else if !control {
+            state.tap = Some(pos / window.scale_factor());
+        }
+    }
+
+    for touch in touches.iter_just_canceled() {
+        if let Some(track) = state.tracks.remove(&touch.id()) {
+            if track.stick {
+                state.stick = Vec2::ZERO;
+            }
+        }
+    }
+
+    // CDP touch emulation (and some browsers) deliver taps as mouse clicks.
+    // Route those through the same hit-test so one path serves both.
+    if state.action.is_none() && state.tap.is_none() && mouse.just_pressed(MouseButton::Left) {
+        if let Some(cursor) = window.cursor_position() {
+            // Cursor positions on web are CSS pixels, while the UI is laid out
+            // in logical pixels (CSS / DPR) with UiScale compensating.
+            let css = size * window.scale_factor();
+            if let Some(action) = touch_action_at(cursor, css) {
+                state.action = Some(action);
+            } else if !over_controls(cursor / window.scale_factor(), size, s) {
+                state.tap = Some(cursor / window.scale_factor());
+            }
+        }
+    }
+
+    let fingers: Vec<Vec2> = state
+        .tracks
+        .values()
+        .filter(|track| !track.stick && !track.control)
+        .map(|track| track.last)
+        .collect();
+
+    if fingers.len() >= 2 {
+        let centroid = (fingers[0] + fingers[1]) * 0.5;
+        let span = fingers[0].distance(fingers[1]);
+        if let Some((last_centroid, last_span)) = state.two_finger {
+            state.pan += centroid - last_centroid;
+            if last_span > 1.0 {
+                state.zoom += (span - last_span) / last_span;
+            }
+            // While pinching, do not also rotate the view.
+            state.look = Vec2::ZERO;
+        }
+        state.two_finger = Some((centroid, span));
+    } else {
+        state.two_finger = None;
+    }
+}
+
+/// Stick deflection: screen right is x, screen up is +y, clamped to 1.
+#[allow(dead_code)] // exercised by tests; the hot path inlines it
+fn stick_offset(pos: Vec2, centre: Vec2, scale: f32) -> Vec2 {
+    let offset = (pos - centre) / (STICK_TRAVEL * scale);
+    Vec2::new(offset.x, -offset.y).clamp_length_max(1.0)
+}
+
+/// Screen areas owned by touch controls (toolbar + carousel, stick, jump).
+fn over_controls(pos: Vec2, size: Vec2, scale: f32) -> bool {
+    pos.y <= 128.0 * scale
+        || (pos.y >= size.y - 170.0 * scale && pos.x <= 190.0 * scale)
+        || (pos.y >= size.y - 170.0 * scale && pos.x >= size.x - 120.0 * scale)
+}
+
+fn sync_input_mode(touch: Res<TouchState>, mut layers: Query<(&InputLayer, &mut Node)>) {
+    if !touch.is_changed() {
+        return;
+    }
+    for (layer, mut node) in &mut layers {
+        let visible = layer.desktop != touch.enabled;
+        node.display = if visible {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+}
+
+fn sync_knob(touch: Res<TouchState>, mut knob: Single<&mut Node, With<TouchKnob>>) {
+    if !touch.is_changed() {
+        return;
+    }
+    let centre = (STICK_BASE - STICK_KNOB) * 0.5;
+    knob.left = px(centre + touch.stick.x * STICK_TRAVEL);
+    knob.bottom = px(centre + touch.stick.y * STICK_TRAVEL);
+}
+
+fn sync_shape_label(editor: Res<Editor>, mut label: Single<&mut Text, With<ShapeLabel>>) {
+    if !editor.is_changed() {
+        return;
+    }
+    label.0 = shapes()[editor.mobile_shape].name.to_string();
+}
+
+fn update_touch_status(
+    editor: Res<Editor>,
+    orbit: Res<Orbit>,
+    touch: Res<TouchState>,
+    mut text: Single<&mut Text, With<TouchStatus>>,
+) {
+    if !touch.enabled {
+        return;
+    }
+    let height = editor.character.map(|c| c.feet).unwrap_or(0.0);
+    text.0 = format!(
+        "{}  y{:.2}  {}p",
+        orbit.mode.label(),
+        height,
+        editor.pieces.len()
+    );
+}
+
+/// Which touch button (if any) covers a point, in CSS pixels. The UI is drawn
+/// with a 1/DPR UiScale on phones, so on screen these are the design sizes.
+fn touch_action_at(pos: Vec2, css: Vec2) -> Option<TouchAction> {
+    if (8.0..=42.0).contains(&pos.y) {
+        let width = (css.x - 20.0) / 6.0;
+        let index = ((pos.x - 8.0) / (width + 4.0)).floor().max(0.0) as usize;
+        return [
+            TouchAction::View,
+            TouchAction::Rotate,
+            TouchAction::Delete,
+            TouchAction::Undo,
+            TouchAction::Path,
+            TouchAction::Course,
+        ]
+        .get(index.min(5))
+        .copied();
+    }
+    if (46.0..=84.0).contains(&pos.y) {
+        let quarter = (css.x - 20.0) / 4.0;
+        let index = ((pos.x - 8.0) / (quarter + 4.0)).floor().max(0.0) as usize;
+        return match index.min(3) {
+            0 => Some(TouchAction::PrevShape),
+            1 => None,
+            2 => Some(TouchAction::NextShape),
+            _ => Some(TouchAction::Place),
+        };
+    }
+    let jump = Vec2::new(css.x - 62.0, css.y - 66.0);
+    if pos.distance(jump) < 52.0 {
+        return Some(TouchAction::Jump);
+    }
+    None
+}
+
+fn run_touch_action(
+    action: TouchAction,
+    editor: &mut Editor,
+    orbit: &mut Orbit,
+    touch: &mut TouchState,
+) {
+    match action {
+        TouchAction::View => cycle_view(orbit, editor),
+        TouchAction::Rotate => rotate_piece(editor, model::ANCHOR_STEP),
+        TouchAction::Delete => delete_piece(editor),
+        TouchAction::Undo => editor.undo(),
+        TouchAction::Path => {
+            editor.tool = None;
+            editor.actor_tool = Some(ActorTool::Path);
+        }
+        TouchAction::Place => {
+            editor.tool = if editor.tool == Some(editor.mobile_shape) {
+                None
+            } else {
+                Some(editor.mobile_shape)
+            };
+            editor.actor_tool = None;
+        }
+        TouchAction::PrevShape | TouchAction::NextShape => {
+            let count = shapes().len();
+            let delta = if action == TouchAction::NextShape {
+                1
+            } else {
+                count - 1
+            };
+            editor.mobile_shape = (editor.mobile_shape + delta) % count;
+            if editor.tool.is_some() {
+                editor.tool = Some(editor.mobile_shape);
+            }
+        }
+        TouchAction::Jump => touch.jump = true,
+        TouchAction::Course => {
+            editor.load_course();
+            focus(orbit, editor.character);
+        }
+    }
+}
+
+fn apply_touch_action(
+    mut editor: ResMut<Editor>,
+    mut orbit: ResMut<Orbit>,
+    mut touch: ResMut<TouchState>,
+) {
+    if let Some(action) = touch.action {
+        run_touch_action(action, &mut editor, &mut orbit, &mut touch);
     }
 }
 
@@ -1932,6 +2604,42 @@ mod tests {
             forward.x > 0.99,
             "course should start facing +x, got {forward}"
         );
+    }
+
+    #[test]
+    fn the_touch_layout_owns_its_control_zones() {
+        let size = Vec2::new(390.0, 844.0);
+        assert!(over_controls(Vec2::new(100.0, 20.0), size, 1.0), "toolbar");
+        assert!(over_controls(Vec2::new(60.0, 800.0), size, 1.0), "stick");
+        assert!(over_controls(Vec2::new(340.0, 800.0), size, 1.0), "jump");
+        assert!(!over_controls(Vec2::new(195.0, 420.0), size, 1.0), "canvas");
+    }
+
+    #[test]
+    fn touch_buttons_are_hit_by_css_position() {
+        let css = Vec2::new(390.0, 844.0);
+        assert_eq!(touch_action_at(Vec2::new(37.0, 25.0), css), Some(TouchAction::View));
+        assert_eq!(touch_action_at(Vec2::new(352.0, 25.0), css), Some(TouchAction::Course));
+        assert_eq!(touch_action_at(Vec2::new(336.0, 63.0), css), Some(TouchAction::Place));
+        assert_eq!(touch_action_at(Vec2::new(53.0, 63.0), css), Some(TouchAction::PrevShape));
+        assert_eq!(touch_action_at(Vec2::new(328.0, 778.0), css), Some(TouchAction::Jump));
+        assert_eq!(touch_action_at(Vec2::new(200.0, 400.0), css), None);
+    }
+
+    #[test]
+    fn the_stick_maps_screen_to_walk_direction() {
+        let centre = Vec2::new(86.0, 758.0);
+        assert_eq!(stick_offset(centre, centre, 1.0), Vec2::ZERO);
+
+        let right = stick_offset(centre + Vec2::new(44.0, 0.0), centre, 1.0);
+        assert!((right - Vec2::X).length() < 1e-4, "{right}");
+
+        // Screen up is +y in walk space.
+        let up = stick_offset(centre - Vec2::new(0.0, 44.0), centre, 1.0);
+        assert!((up - Vec2::Y).length() < 1e-4, "{up}");
+
+        let far = stick_offset(centre + Vec2::new(300.0, 0.0), centre, 1.0);
+        assert!((far.length() - 1.0).abs() < 1e-4);
     }
 
     #[test]
