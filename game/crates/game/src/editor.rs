@@ -50,7 +50,7 @@ const PILL_HALF: f32 = 0.87;
 const WALK_SPEED: f32 = 2.2;
 /// Gravity, in m/s^2. A little above earth so the character does not float.
 const GRAVITY: f32 = 18.0;
-const JUMP_SPEED: f32 = 6.0;
+const JUMP_SPEED: f32 = 7.0;
 /// Touch stick geometry, in logical pixels.
 const STICK_BASE: f32 = 132.0;
 const STICK_MARGIN: f32 = 20.0;
@@ -1190,23 +1190,15 @@ fn first_person_move(
     character.feet = center.y - PILL_HALF;
     character.yaw = orbit.yaw;
 
-    // Probe just under the feet: a resting capsule keeps a small downward
-    // velocity, so the projected velocity is not a reliable grounded test.
-    let probe = Vec3::new(center.x, character.feet + 0.04, center.z);
+    // A short ray straight down is a much steadier support test than a capsule
+    // shape cast, which starts off intersecting the surface it rests on.
+    let probe = Vec3::new(center.x, character.feet + 0.12, center.z);
     let grounded = move_and_slide
-        .cast_move(
-            &kit.character_collider,
-            probe.real(),
-            rotation,
-            Vec3::NEG_Y * 0.14,
-            0.01,
-            &filter,
-        )
-        .is_some_and(|hit| hit.normal1.y > 0.4);
+        .spatial_query
+        .cast_ray(probe.real(), Dir3::NEG_Y, 0.25, true, &filter)
+        .is_some_and(|hit| hit.normal.y > 0.4);
 
-    // The editor's floor and every walkable tile top out at y = 0; the probe
-    // additionally covers standing on props.
-    character.grounded = vy <= 0.01 && (grounded || character.feet < 0.08);
+    character.grounded = vy <= 0.01 && grounded;
     character.vy = if character.grounded { 0.0 } else { vy };
 
     if editor.walk.is_some() {
@@ -1215,7 +1207,7 @@ fn first_person_move(
     }
 }
 
-/// The test course: a starting pad, a ramp rising along +x, a 1.2 m block at
+/// The test course: a starting pad, a ramp rising along +x, a 0.9 m block at
 /// the same height, and a landing pad after the drop. The character starts on
 /// the pad facing the ramp, so pressing V then W runs it end to end.
 fn course() -> (Vec<Piece>, Character) {
