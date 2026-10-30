@@ -4,7 +4,7 @@
 //! Left-drag places and moves, right-drag orbits, middle-drag pans, the wheel
 //! zooms. Everything is in metres.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use avian3d::character_controller::prelude::{
     MoveAndSlide, MoveAndSlideConfig, MoveAndSlideHitResponse,
@@ -68,6 +68,7 @@ impl Plugin for EditorPlugin {
             .init_resource::<Visuals>()
             .init_resource::<TouchState>()
             .init_resource::<UiScaleApplied>()
+            .init_resource::<Nav>()
             .add_systems(Startup, setup)
             .add_systems(
                 Update,
@@ -80,6 +81,8 @@ impl Plugin for EditorPlugin {
                     walk,
                     first_person_move,
                     camera_control,
+                    rebuild_nav,
+                    refresh_route,
                     update_cursor,
                     interact,
                     sync_visuals,
@@ -122,6 +125,11 @@ struct Editor {
     /// Last palette action and when it fired, so a touch plus its synthesized
     /// mouse click cannot toggle a tool twice.
     last_palette: Option<(PaletteAction, f64)>,
+    /// Navigation revision the current route was planned against.
+    seen_nav: u64,
+    /// Last requested destination, kept so a nav rebuild can retry a route
+    /// that was previously unreachable (e.g. before its ramp was placed).
+    path_target: Option<Vec2>,
 }
 
 impl Default for Editor {
@@ -144,6 +152,8 @@ impl Default for Editor {
             note: "Click a component, then the grid",
             mobile_shape: 0,
             last_palette: None,
+            seen_nav: 0,
+            path_target: None,
         }
     }
 }
@@ -327,6 +337,7 @@ impl Editor {
         self.walk = None;
         self.tool = None;
         self.actor_tool = None;
+        self.path_target = None;
         self.undo.clear();
         self.note = "course: walk straight, up the ramp, over the block, drop";
     }
@@ -344,6 +355,17 @@ impl Editor {
             self.selected = None;
         }
     }
+}
+
+/// The walkable hex graph. Rebuilt from the pieces whenever they change, so a
+/// block or ramp is in the graph for the very next route query.
+#[derive(Resource, Default)]
+struct Nav {
+    edges: HashSet<path::Edge>,
+    hexes: HashSet<path::Hex>,
+    /// Snapshot of the pieces the graph was built from.
+    pieces: Vec<Piece>,
+    revision: u64,
 }
 
 #[derive(Component)]
@@ -1601,11 +1623,58 @@ fn on_palette_activate(
     editor.ghost_rot = 0.0;
 }
 
+/// Keep the walkable hex graph in step with the placed pieces. Blocks and ramps
+/// therefore take effect as soon as they land, not on the next reload.
+fn rebuild_nav(editor: Res<Editor>, mut nav: ResMut<Nav>) {
+    if nav.pieces == editor.pieces {
+        return;
+    }
+    let (edges, hexes) = path::blocked(&editor.pieces);
+    nav.edges = edges;
+    nav.hexes = hexes;
+    nav.pieces = editor.pieces.clone();
+    nav.revision += 1;
+}
+
+/// If a route is up and the navmesh changed, plan it again against the new
+/// graph. Placing a block bends an existing path around it; placing a ramp can
+/// open the route up onto a block.
+fn refresh_route(
+    mut editor: ResMut<Editor>,
+    nav: Res<Nav>,
+    spatial_query: SpatialQuery,
+    player: Query<Entity, With<CharacterVisual>>,
+) {
+    // Mid-drag the pieces have not settled yet; wait for the release.
+    if editor.drag.is_some() || editor.gizmo_drag.is_some() {
+        return;
+    }
+    if editor.seen_nav == nav.revision {
+        return;
+    }
+    editor.seen_nav = nav.revision;
+    let Some(target) = editor
+        .route
+        .as_ref()
+        .map(|route| route.target)
+        .or(editor.path_target)
+    else {
+        return;
+    };
+    let filter = player
+        .iter()
+        .next()
+        .map(|entity| SpatialQueryFilter::from_excluded_entities([entity]))
+        .unwrap_or_default();
+    route_to(&mut editor, target, &nav, &spatial_query, &filter);
+}
+
 fn interact(
     mut editor: ResMut<Editor>,
     mut orbit: ResMut<Orbit>,
     cursor: Res<Cursor>,
     touch: Res<TouchState>,
+    nav: Res<Nav>,
     camera: Single<(&Camera, &Transform)>,
     spatial_query: SpatialQuery,
     player: Query<Entity, With<CharacterVisual>>,
@@ -1632,6 +1701,7 @@ fn interact(
         editor.drag = None;
         editor.route = None;
         editor.walk = None;
+        editor.path_target = None;
         editor.note = "Click a component, then the grid";
     }
 
@@ -1763,6 +1833,7 @@ fn interact(
             editor.character = Some(character);
             editor.route = None;
             editor.walk = None;
+            editor.path_target = None;
             focus(&mut orbit, Some(character));
             editor.note = "character placed";
         }
@@ -1772,7 +1843,7 @@ fn interact(
     if editor.actor_tool == Some(ActorTool::Path) {
         if clicked {
             let target = surface_target(&cursor, &spatial_query, &surface_filter, world);
-            route_to(&mut editor, target, &spatial_query, &surface_filter);
+            route_to(&mut editor, target, &nav, &spatial_query, &surface_filter);
             // A tap here is a waypoint, never a selection: drop any stale
             // highlight left over from placing the block.
             editor.selected = None;
@@ -1794,7 +1865,7 @@ fn interact(
             && (hit.is_none() || on_surface)
         {
             let target = surface_target(&cursor, &spatial_query, &surface_filter, world);
-            route_to(&mut editor, target, &spatial_query, &surface_filter);
+            route_to(&mut editor, target, &nav, &spatial_query, &surface_filter);
             editor.selected = None;
             editor.drag = None;
         } else if let Some(hit) = hit {
@@ -1975,18 +2046,20 @@ fn smooth_heights(heights: &[f32]) -> Vec<f32> {
 fn route_to(
     editor: &mut Editor,
     target: Vec2,
+    nav: &Nav,
     spatial_query: &SpatialQuery,
     filter: &SpatialQueryFilter,
 ) {
+    editor.seen_nav = nav.revision;
+    editor.path_target = Some(target);
     let Some(character) = editor.character else {
         editor.note = "place a character first (C)";
         return;
     };
-    let (edges, hexes) = path::blocked(&editor.pieces);
     let start = model::pixel_to_hex(character.pos);
     let goal = model::pixel_to_hex(target);
 
-    match path::find_path(start, goal, &edges, &hexes) {
+    match path::find_path(start, goal, &nav.edges, &nav.hexes) {
         Some(route) => {
             let points = path::waypoints(character.pos, target, &route);
             let track = path::Track::new(path::sample(&path::smooth(&points), 18));
