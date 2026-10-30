@@ -16,13 +16,60 @@ use bevy::math::Vec2;
 use crate::model::{self, Piece, shapes};
 
 pub type Hex = (i32, i32);
-/// An undirected edge between two neighbouring hexes, in a canonical order.
+/// A directed step between two neighbouring hexes. Most barriers bar both
+/// directions, but a ramp can only be entered or left along its rise: its
+/// sloped sides are walls, and its high end needs a block at the top.
 pub type Edge = (Hex, Hex);
 
 const NEIGHBOURS: [Hex; 6] = [(1, 0), (1, -1), (0, -1), (-1, 0), (-1, 1), (0, 1)];
 
-pub fn edge_key(a: Hex, b: Hex) -> Edge {
-    if a <= b { (a, b) } else { (b, a) }
+/// A hex's neighbours and the world direction towards each.
+fn around(hex: Hex) -> impl Iterator<Item = (Hex, Vec2)> {
+    let centre = model::hex_center(hex.0, hex.1);
+    NEIGHBOURS.into_iter().map(move |delta| {
+        let to = (hex.0 + delta.0, hex.1 + delta.1);
+        let direction = (model::hex_center(to.0, to.1) - centre).normalize_or_zero();
+        (to, direction)
+    })
+}
+
+/// World direction the ramp rises towards (its local depth axis).
+fn rise(piece: &Piece) -> Vec2 {
+    Vec2::new(-piece.rot.sin(), piece.rot.cos())
+}
+
+/// True for the two ends of a ramp; false for its four sloped sides.
+fn is_end(dot: f32) -> bool {
+    dot.abs() > 0.75
+}
+
+/// Ramps whose high end faces `block_hex` at about `block_top`.
+fn ramps_onto(block_hex: Hex, block_top: f32, pieces: &[Piece]) -> Vec<Hex> {
+    let mut onto = Vec::new();
+    for piece in pieces {
+        let Some(shape) = shapes().get(piece.shape) else { continue };
+        let model::Geometry::Wedge { h, .. } = shape.geom else { continue };
+        if (h - block_top).abs() > 0.15 {
+            continue;
+        }
+        let here = model::pixel_to_hex(piece.pos);
+        let axis = rise(piece);
+        if around(here).any(|(to, direction)| to == block_hex && direction.dot(axis) > 0.75) {
+            onto.push(here);
+        }
+    }
+    onto
+}
+
+/// True when a block of about `top` height fills `hex`.
+fn block_at(hex: Hex, top: f32, pieces: &[Piece]) -> bool {
+    pieces.iter().any(|piece| {
+        shapes().get(piece.shape).is_some_and(|shape| {
+            shape.id == "block"
+                && model::pixel_to_hex(piece.pos) == hex
+                && (shape.top() - top).abs() < 0.15
+        })
+    })
 }
 
 /// Doors and gates are thresholds you can walk through; everything else that
@@ -31,7 +78,7 @@ fn passable(style: model::Style) -> bool {
     matches!(style, model::Style::Door | model::Style::Gate)
 }
 
-/// Edges barred by placed bars, and hexes occupied by centre-snapped barriers.
+/// Barred steps and hexes occupied by centre-snapped barriers.
 pub fn blocked(pieces: &[Piece]) -> (HashSet<Edge>, HashSet<Hex>) {
     let mut edges = HashSet::new();
     let mut hexes = HashSet::new();
@@ -40,6 +87,7 @@ pub fn blocked(pieces: &[Piece]) -> (HashSet<Edge>, HashSet<Hex>) {
         let Some(shape) = shapes().get(piece.shape) else {
             continue;
         };
+        let here = model::pixel_to_hex(piece.pos);
         match &shape.geom {
             model::Geometry::Bar { .. } => {
                 if passable(shape.style) {
@@ -51,18 +99,42 @@ pub fn blocked(pieces: &[Piece]) -> (HashSet<Edge>, HashSet<Hex>) {
                 let a = model::pixel_to_hex(piece.pos + normal * 0.05);
                 let b = model::pixel_to_hex(piece.pos - normal * 0.05);
                 if a != b {
-                    edges.insert(edge_key(a, b));
+                    edges.insert((a, b));
+                    edges.insert((b, a));
                 }
             }
             model::Geometry::Circle { .. } if shape.category == "Barrier" => {
                 // Pillars sit inside a cell, not on an edge.
-                hexes.insert(model::pixel_to_hex(piece.pos));
+                hexes.insert(here);
+            }
+            model::Geometry::Wedge { .. } => {
+                // A ramp is walkable only up and down its rise. Its four
+                // sloped sides are walls, and its high end is a wall unless
+                // a block of the same height is there to step onto.
+                let axis = rise(piece);
+                for (to, direction) in around(here) {
+                    let dot = direction.dot(axis);
+                    if !is_end(dot) {
+                        edges.insert((here, to));
+                        edges.insert((to, here));
+                    } else if dot > 0.0 && !block_at(to, shape.top(), pieces) {
+                        edges.insert((to, here));
+                    }
+                }
             }
             model::Geometry::Rect { .. } if shape.id == "block" => {
-                // A block fills its cell unless a ramp of the same height leads
-                // onto its top, in which case it is walkable from above.
-                if !ramp_leads_onto(piece, shape.top(), pieces) {
-                    hexes.insert(model::pixel_to_hex(piece.pos));
+                let onto = ramps_onto(here, shape.top(), pieces);
+                if onto.is_empty() {
+                    // Nothing to climb; the block fills its cell.
+                    hexes.insert(here);
+                } else {
+                    // Its top is reachable, but only from the ramp that leads
+                    // onto it. Every other side is a one-way drop off.
+                    for (to, _) in around(here) {
+                        if !onto.contains(&to) {
+                            edges.insert((to, here));
+                        }
+                    }
                 }
             }
             _ => {}
@@ -70,24 +142,6 @@ pub fn blocked(pieces: &[Piece]) -> (HashSet<Edge>, HashSet<Hex>) {
     }
 
     (edges, hexes)
-}
-
-/// True when a wedge of about the same height rises toward this block, so the
-/// block's top is reachable by walking up the ramp.
-fn ramp_leads_onto(block: &Piece, block_top: f32, pieces: &[Piece]) -> bool {
-    for piece in pieces {
-        let Some(shape) = shapes().get(piece.shape) else { continue };
-        let model::Geometry::Wedge { d, h, .. } = shape.geom else { continue };
-        if (h - block_top).abs() > 0.15 {
-            continue;
-        }
-        let rise = Vec2::new(-piece.rot.sin(), piece.rot.cos());
-        let top_edge = piece.pos + rise * (d * 0.5 + 0.35);
-        if top_edge.distance(block.pos) < 1.2 {
-            return true;
-        }
-    }
-    false
 }
 
 fn heuristic(a: Hex, b: Hex) -> u32 {
@@ -144,7 +198,7 @@ pub fn find_path(
         let Some(&here) = cost.get(&at) else { continue };
         for delta in NEIGHBOURS {
             let next = (at.0 + delta.0, at.1 + delta.1);
-            if hexes.contains(&next) || edges.contains(&edge_key(at, next)) {
+            if hexes.contains(&next) || edges.contains(&(at, next)) {
                 continue;
             }
             let step = here + 1;
@@ -169,7 +223,7 @@ pub fn can_step(from: Vec2, to: Vec2, edges: &HashSet<Edge>, hexes: &HashSet<Hex
     if hexes.contains(&b) {
         return false;
     }
-    a == b || !edges.contains(&edge_key(a, b))
+    a == b || !edges.contains(&(a, b))
 }
 
 /// Polyline from the character to the click: exact start, the interior hex
@@ -385,14 +439,14 @@ mod tests {
         let wall = wall_between((0, 0), (1, 0));
         let (edges, _) = blocked(&[wall]);
         assert!(
-            edges.contains(&edge_key((0, 0), (1, 0))),
-            "the wall should bar the shared edge"
+            edges.contains(&((0, 0), (1, 0))) && edges.contains(&((1, 0), (0, 0))),
+            "the wall should bar the shared edge both ways"
         );
 
         let route = find_path((0, 0), (1, 0), &edges, &HashSet::new()).expect("detour");
         assert_eq!(route.len(), 3, "one extra step around the wall: {route:?}");
         for pair in route.windows(2) {
-            assert_ne!(edge_key(pair[0], pair[1]), edge_key((0, 0), (1, 0)));
+            assert_ne!((pair[0], pair[1]), ((0, 0), (1, 0)));
         }
     }
 
@@ -501,6 +555,90 @@ mod tests {
         let (_, hexes) = blocked(&[block, ramp]);
         assert!(!hexes.contains(&(2, 0)));
         assert!(find_path((0, 0), (2, 0), &HashSet::new(), &hexes).is_some());
+    }
+
+    #[test]
+    fn a_ramp_can_only_be_entered_over_its_ends() {
+        let ramp = Piece {
+            id: 1,
+            shape: shape_index("ramp").unwrap(),
+            pos: model::hex_center(1, 0),
+            rot: std::f32::consts::PI * 1.5,
+        };
+        let (edges, _) = blocked(&[ramp]);
+
+        // The low end, towards the start hex, is open in both directions.
+        assert!(!edges.contains(&((0, 0), (1, 0))));
+        assert!(!edges.contains(&((1, 0), (0, 0))));
+
+        // Without a block on top, the high end can be walked off but not up.
+        assert!(!edges.contains(&((1, 0), (2, 0))));
+        assert!(edges.contains(&((2, 0), (1, 0))));
+
+        // Every other edge is a sloped side and a wall both ways.
+        for (to, _) in around((1, 0)) {
+            if to == (0, 0) || to == (2, 0) {
+                continue;
+            }
+            assert!(edges.contains(&((1, 0), to)), "side exit to {to:?}");
+            assert!(edges.contains(&(to, (1, 0))), "side entry from {to:?}");
+        }
+    }
+
+    #[test]
+    fn a_route_to_a_ramp_comes_from_the_low_end() {
+        let ramp = Piece {
+            id: 1,
+            shape: shape_index("ramp").unwrap(),
+            pos: model::hex_center(1, 0),
+            rot: std::f32::consts::PI * 1.5,
+        };
+        let (edges, hexes) = blocked(&[ramp]);
+
+        // Start beside the ramp; the side is walled off, so the A* has to go
+        // around to the front before stepping up.
+        let route = find_path((1, 1), (1, 0), &edges, &hexes).expect("route to the low end");
+        assert_eq!(
+            route[route.len() - 2],
+            (0, 0),
+            "should climb from the low end, got {route:?}"
+        );
+    }
+
+    #[test]
+    fn a_block_is_only_entered_from_the_ramp_that_reaches_its_top() {
+        let ramp = Piece {
+            id: 1,
+            shape: shape_index("ramp").unwrap(),
+            pos: model::hex_center(1, 0),
+            rot: std::f32::consts::PI * 1.5,
+        };
+        let block = Piece {
+            id: 2,
+            shape: shape_index("block").unwrap(),
+            pos: model::hex_center(2, 0),
+            rot: 0.0,
+        };
+        let (edges, hexes) = blocked(&[ramp, block]);
+
+        assert!(!hexes.contains(&(2, 0)), "the ramp reaches the block top");
+        // Walking into the block's side is blocked; stepping on from the ramp
+        // is not. Leaving the top over any edge is a drop, so it stays open.
+        for (side, _) in around((2, 0)) {
+            if side == (1, 0) {
+                assert!(!edges.contains(&((1, 0), (2, 0))));
+            } else {
+                assert!(edges.contains(&(side, (2, 0))), "side entry from {side:?}");
+            }
+            assert!(!edges.contains(&((2, 0), side)), "drop off towards {side:?}");
+        }
+
+        let route = find_path((1, 1), (2, 0), &edges, &hexes).expect("via the ramp");
+        assert_eq!(
+            route[route.len() - 2],
+            (1, 0),
+            "should come up the ramp, got {route:?}"
+        );
     }
 
     #[test]
