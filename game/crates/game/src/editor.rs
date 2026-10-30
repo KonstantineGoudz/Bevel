@@ -84,6 +84,7 @@ impl Plugin for EditorPlugin {
                     interact,
                     sync_visuals,
                     update_palette,
+                    update_touch_buttons,
                     update_status,
                     update_touch_status,
                     draw,
@@ -118,6 +119,9 @@ struct Editor {
     note: &'static str,
     /// Shape picked by the mobile carousel.
     mobile_shape: usize,
+    /// Last palette action and when it fired, so a touch plus its synthesized
+    /// mouse click cannot toggle a tool twice.
+    last_palette: Option<(PaletteAction, f64)>,
 }
 
 impl Default for Editor {
@@ -139,6 +143,7 @@ impl Default for Editor {
             undo: Vec::new(),
             note: "Click a component, then the grid",
             mobile_shape: 0,
+            last_palette: None,
         }
     }
 }
@@ -225,6 +230,8 @@ struct TouchState {
     jump: bool,
     /// Ignore canvas taps until this time; a UI button tap must not also place.
     suppress_until: f64,
+    /// Last touch action and when it fired, for the same double-fire guard.
+    last_action: Option<(TouchAction, f64)>,
     /// Tap captured by the full-screen picking layer (correct coordinate space).
     pending_tap: Option<Vec2>,
     tracks: HashMap<u64, TouchTrack>,
@@ -833,6 +840,9 @@ fn spawn_touch_ui(commands: &mut Commands) {
                 height: percent(100),
                 ..default()
             },
+            // Behind every control, in picking as well as in draw order, so a
+            // toolbar tap never also lands on the grid behind it.
+            ZIndex(-1),
             BackgroundColor(Color::NONE),
         ))
         .id();
@@ -1542,12 +1552,20 @@ fn update_cursor(
 fn on_palette_activate(
     event: On<Activate>,
     buttons: Query<&PaletteButton>,
+    time: Res<Time>,
     mut editor: ResMut<Editor>,
     mut orbit: ResMut<Orbit>,
 ) {
     let Ok(button) = buttons.get(event.entity) else {
         return;
     };
+    let now = time.elapsed_secs_f64();
+    if let Some((last, at)) = editor.last_palette {
+        if last == button.0 && now - at < 0.25 {
+            return;
+        }
+    }
+    editor.last_palette = Some((button.0, now));
     match button.0 {
         PaletteAction::Shape(index) => {
             editor.tool = if editor.tool == Some(index) {
@@ -1593,6 +1611,7 @@ fn interact(
     player: Query<Entity, With<CharacterVisual>>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
 ) {
     let (camera, camera_transform) = *camera;
     let camera_global = GlobalTransform::from(*camera_transform);
@@ -1659,6 +1678,9 @@ fn interact(
     } else {
         cursor.tap || mouse.just_pressed(MouseButton::Left)
     };
+    // A tap that armed a button in this gesture is not a grid tap, even if the
+    // picking layer saw the same press.
+    let clicked = clicked && time.elapsed_secs_f64() >= touch.suppress_until;
 
     if let Some(tool) = editor.tool {
         let shape = &shapes()[tool];
@@ -1751,6 +1773,10 @@ fn interact(
         if clicked {
             let target = surface_target(&cursor, &spatial_query, &surface_filter, world);
             route_to(&mut editor, target, &spatial_query, &surface_filter);
+            // A tap here is a waypoint, never a selection: drop any stale
+            // highlight left over from placing the block.
+            editor.selected = None;
+            editor.drag = None;
         }
         return;
     }
@@ -2402,6 +2428,29 @@ fn sync_shape_label(editor: Res<Editor>, mut label: Single<&mut Text, With<Shape
     label.0 = shapes()[editor.mobile_shape].name.to_string();
 }
 
+fn update_touch_buttons(
+    editor: Res<Editor>,
+    mut buttons: Query<(&TouchButton, &mut BackgroundColor, &mut BorderColor)>,
+) {
+    for (button, mut bg, mut border) in &mut buttons {
+        let on = match button.0 {
+            TouchAction::Path => editor.actor_tool == Some(ActorTool::Path),
+            TouchAction::Place => editor.tool == Some(editor.mobile_shape),
+            _ => false,
+        };
+        bg.0 = if on {
+            BUTTON_ON
+        } else {
+            Color::srgba(0.06, 0.08, 0.11, 0.62)
+        };
+        *border = BorderColor::all(if on {
+            BORDER_ON
+        } else {
+            Color::srgba(0.5, 0.7, 0.85, 0.25)
+        });
+    }
+}
+
 fn update_touch_status(
     editor: Res<Editor>,
     orbit: Res<Orbit>,
@@ -2412,11 +2461,20 @@ fn update_touch_status(
         return;
     }
     let height = editor.character.map(|c| c.feet).unwrap_or(0.0);
+    let tool = match editor.actor_tool {
+        Some(ActorTool::Path) => "path",
+        Some(ActorTool::Place) => "char",
+        None => editor
+            .tool
+            .map(|shape| shapes()[shape].name)
+            .unwrap_or("select"),
+    };
     text.0 = format!(
-        "{}  y{:.2}  {}p",
+        "{}  y{:.2}  {}p  {}",
         orbit.mode.label(),
         height,
-        editor.pieces.len()
+        editor.pieces.len(),
+        tool
     );
 }
 
@@ -2468,7 +2526,15 @@ fn run_touch_action(
         TouchAction::Undo => editor.undo(),
         TouchAction::Path => {
             editor.tool = None;
-            editor.actor_tool = Some(ActorTool::Path);
+            // Toggle, like the palette button, so a second tap leaves path
+            // mode. The active state is shown on the button and in the status.
+            editor.actor_tool = if editor.actor_tool == Some(ActorTool::Path) {
+                None
+            } else {
+                Some(ActorTool::Path)
+            };
+            editor.selected = None;
+            editor.drag = None;
         }
         TouchAction::Place => {
             editor.tool = if editor.tool == Some(editor.mobile_shape) {
@@ -2477,6 +2543,8 @@ fn run_touch_action(
                 Some(editor.mobile_shape)
             };
             editor.actor_tool = None;
+            editor.selected = None;
+            editor.drag = None;
         }
         TouchAction::PrevShape | TouchAction::NextShape => {
             let count = shapes().len();
@@ -2517,9 +2585,19 @@ fn on_touch_button(
     let Ok(button) = buttons.get(event.entity) else {
         return;
     };
+    let now = time.elapsed_secs_f64();
+    // A touch often synthesizes a mouse click too, which would fire this
+    // observer twice and toggle a tool straight back off.
+    if let Some((last, at)) = touch.last_action {
+        if last == button.0 && now - at < 0.25 {
+            return;
+        }
+    }
+    touch.last_action = Some((button.0, now));
     // A UI tap is not a grid tap: drop any tap from this gesture.
-    touch.suppress_until = time.elapsed_secs_f64() + 0.35;
+    touch.suppress_until = now + 0.08;
     touch.tap = None;
+    touch.pending_tap = None;
     run_touch_action(button.0, &mut editor, &mut orbit, &mut touch);
 }
 
