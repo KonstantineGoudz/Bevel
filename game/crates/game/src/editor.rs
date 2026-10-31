@@ -14,7 +14,9 @@ use avian3d::prelude::*;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::input::touch::Touches;
 use bevy::picking::Pickable;
-use bevy::picking::events::{PointerMove, PointerPress, PointerRelease};
+use bevy::picking::events::{
+    PointerCancel, PointerDrag, PointerDragEnd, PointerMove, PointerPress, PointerRelease,
+};
 use bevy::picking::pointer::{PointerButton, PointerId};
 use bevy::prelude::*;
 use bevy::shape::InfinitePlane3d;
@@ -27,7 +29,7 @@ use crate::model::{
     shapes,
 };
 use crate::path;
-use crate::path_edit::Plan;
+use crate::path_edit::{self, PathDrag, PathHandle, Plan};
 
 const PANEL_BG: Color = Color::srgb_u8(0x10, 0x16, 0x1e);
 const BUTTON_BG: Color = Color::srgb_u8(0x14, 0x1c, 0x26);
@@ -89,6 +91,7 @@ impl Plugin for EditorPlugin {
                 ui_scale: 1.0,
                 ..Default::default()
             })
+            .init_resource::<PathGesture>()
             .init_resource::<UiScaleApplied>()
             .init_resource::<Nav>()
             .add_systems(Startup, setup)
@@ -103,6 +106,7 @@ impl Plugin for EditorPlugin {
                     walk,
                     character_move,
                     camera_control,
+                    path_drag,
                     rebuild_nav,
                     refresh_route,
                     update_cursor,
@@ -274,6 +278,8 @@ struct TouchState {
     pending_tap: Option<Vec2>,
     /// Sticky touch equivalent of Shift: append rather than replace.
     append: bool,
+    /// A path handle owns the current touch gesture; suppress camera look.
+    path_drag_active: bool,
     /// Pointer holding the stick, in the picking/UI coordinate space. Using the
     /// pointer position instead of raw touch coordinates keeps the stick lined
     /// up with the drawn pad at any DPR or UiScale.
@@ -287,10 +293,13 @@ struct TouchState {
 #[derive(Clone, Copy)]
 struct TouchTrack {
     last: Vec2,
-    started: f64,
     stick: bool,
     control: bool,
 }
+
+/// Mouse/touch gesture ownership for path handles and taps.
+#[derive(Resource, Default)]
+struct PathGesture(path_edit::Gesture);
 
 #[derive(Resource, Default)]
 struct Cursor {
@@ -937,11 +946,19 @@ fn spawn_touch_ui(commands: &mut Commands) {
         .entity(canvas)
         .observe(on_canvas_press)
         .observe(on_canvas_move)
-        .observe(on_canvas_release);
+        .observe(on_canvas_release)
+        .observe(on_path_press)
+        .observe(on_path_move)
+        .observe(on_path_drag)
+        .observe(on_path_release)
+        .observe(on_path_drag_end)
+        .observe(on_path_cancel);
 
+    // The canvas is top-level and always pickable: desktop mouse presses need
+    // the same pointer stream as touch taps.
     commands
         .entity(root)
-        .add_children(&[canvas, tools, carousel, status, base, jump]);
+        .add_children(&[tools, carousel, status, base, jump]);
 }
 
 fn touch_button(commands: &mut Commands, action: TouchAction, text: &str) -> Entity {
@@ -1592,7 +1609,8 @@ fn camera_control(
     mut orbit: ResMut<Orbit>,
     mut camera: Single<&mut Transform, With<Camera3d>>,
     mut editor: ResMut<Editor>,
-    touch: Res<TouchState>,
+    gesture: Res<PathGesture>,
+    mut touch: ResMut<TouchState>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     mut motion: MessageReader<MouseMotion>,
@@ -1603,7 +1621,10 @@ fn camera_control(
     // finger is down, that synthesized motion must not also steer the camera:
     // dragging the stick should move the character only.
     let raw_delta: Vec2 = motion.read().map(|m| m.delta).sum();
-    let touching = touch.enabled && (touch.stick_pointer.is_some() || !touch.tracks.is_empty());
+    let touching = touch.enabled
+        && (touch.stick_pointer.is_some()
+            || !touch.tracks.is_empty()
+            || gesture.0.dragging());
     let delta = if touching { Vec2::ZERO } else { raw_delta };
     // Browsers report wheel deltas in pixels (often +-100), while some
     // platforms report whole lines. Normalise the big values to lines.
@@ -1661,8 +1682,13 @@ fn camera_control(
         }
     }
 
-    // Touch: one finger looks/orbits, two fingers pan and pinch.
-    if touch.enabled {
+    // Touch: one finger looks/orbits, two fingers pan and pinch. A path
+    // handle drag owns the gesture, so the camera keeps still until release.
+    if gesture.0.dragging() {
+        touch.look = Vec2::ZERO;
+        touch.pan = Vec2::ZERO;
+        touch.zoom = 0.0;
+    } else if touch.enabled {
         match orbit.mode {
             ViewMode::First if editor.character.is_some() => {
                 orbit.yaw -= touch.look.x * 0.005;
@@ -1923,6 +1949,7 @@ fn interact(
     mut orbit: ResMut<Orbit>,
     cursor: Res<Cursor>,
     touch: Res<TouchState>,
+    gesture: Res<PathGesture>,
     nav: Res<Nav>,
     camera: Single<(&Camera, &Transform)>,
     spatial_query: SpatialQuery,
@@ -2015,7 +2042,12 @@ fn interact(
     };
     // A tap that armed a button in this gesture is not a grid tap, even if the
     // picking layer saw the same press.
-    let clicked = clicked && time.elapsed_secs_f64() >= touch.suppress_until;
+    let clicked = clicked && tap_allowed(time.elapsed_secs_f64(), &touch);
+
+    // A handle drag owns the pointer; do not also place or select.
+    if gesture.0.dragging() {
+        return;
+    }
 
     if let Some(tool) = editor.tool {
         let shape = &shapes()[tool];
@@ -2408,6 +2440,35 @@ fn choose_plan(old: Option<Plan>, new: Option<Plan>, ok: bool) -> Option<Plan> {
     if ok { new } else { old }
 }
 
+/// A UI button press must not leak through as a canvas tap.
+fn tap_allowed(now: f64, touch: &TouchState) -> bool {
+    now >= touch.suppress_until
+}
+
+/// Which waypoint/tangent handle is under a screen point. Filled in by the
+/// handle tasks; the gesture layer compiles against the hook.
+fn path_handle_at(
+    _editor: &Editor,
+    _camera: &Camera,
+    _camera_transform: &GlobalTransform,
+    _screen: Vec2,
+    _touch_enabled: bool,
+) -> Option<PathHandle> {
+    None
+}
+
+/// Apply one pointer update to a handle. Filled in by the handle tasks.
+fn apply_path_drag(
+    _editor: &mut Editor,
+    _drag: PathDrag,
+    _screen: Vec2,
+    _nav: &Nav,
+    _spatial_query: &SpatialQuery,
+    _filter: &SpatialQueryFilter,
+) -> bool {
+    false
+}
+
 /// Walk is available only for a stopped, non-empty, reachable plan.
 fn walk_enabled(plan: Option<&Plan>, route: Option<&Route>, walking: bool) -> bool {
     plan.is_some_and(|plan| !plan.is_empty())
@@ -2792,7 +2853,6 @@ fn sync_visuals(
 fn touch_input(
     touches: Res<Touches>,
     window: Single<&Window, With<PrimaryWindow>>,
-    time: Res<Time>,
     mut state: ResMut<TouchState>,
 ) {
     state.look = Vec2::ZERO;
@@ -2816,7 +2876,6 @@ fn touch_input(
     let size = window.size();
     let s = state.ui_scale;
     let centre = stick_centre(size, s);
-    let now = time.elapsed_secs_f64();
 
     // Presses are handled separately: on a slow frame the press and release can
     // arrive together and never appear in `iter()`.
@@ -2833,7 +2892,6 @@ fn touch_input(
             id,
             TouchTrack {
                 last: pos,
-                started: now,
                 stick,
                 control,
             },
@@ -2861,25 +2919,11 @@ fn touch_input(
 
     for touch in touches.iter_just_released() {
         let id = touch.id();
-        let pos = touch.position();
-        let short = pos.distance(touch.start_position()) < 14.0;
-        let track = state.tracks.remove(&id);
-
-        if let Some(track) = track {
-            if track.stick {
-                if state.stick_pointer.is_none() {
-                    state.stick = Vec2::ZERO;
-                }
-                continue;
+        if let Some(track) = state.tracks.remove(&id) {
+            if track.stick && state.stick_pointer.is_none() {
+                state.stick = Vec2::ZERO;
             }
         }
-
-        // A slow frame can swallow the press, so a release with no track is
-        // still a tap if the finger barely moved.
-        let quick = track
-            .map(|track| now - track.started < 0.35 && short)
-            .unwrap_or(short);
-        let _ = quick;
     }
 
     for touch in touches.iter_just_canceled() {
@@ -3131,7 +3175,7 @@ fn on_canvas_press(
     window: Single<&Window, With<PrimaryWindow>>,
     mut touch: ResMut<TouchState>,
 ) {
-    if event.button != PointerButton::Primary {
+    if !touch.enabled || event.button != PointerButton::Primary {
         return;
     }
     let pos = event.pointer.position;
@@ -3141,9 +3185,7 @@ fn on_canvas_press(
         touch.stick = stick_offset(pos, centre, touch.ui_scale);
         touch.tap = None;
         touch.pending_tap = None;
-        return;
     }
-    touch.pending_tap = Some(pos);
 }
 
 fn on_canvas_move(
@@ -3163,6 +3205,130 @@ fn on_canvas_release(event: On<PointerRelease>, mut touch: ResMut<TouchState>) {
         touch.stick_pointer = None;
         touch.stick = Vec2::ZERO;
     }
+}
+
+fn on_path_press(
+    event: On<PointerPress>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    time: Res<Time>,
+    camera: Single<(&Camera, &Transform)>,
+    mut editor: ResMut<Editor>,
+    mut gesture: ResMut<PathGesture>,
+    mut touch: ResMut<TouchState>,
+) {
+    if event.button != PointerButton::Primary {
+        return;
+    }
+    let pos = event.pointer.position;
+    if touch.enabled {
+        let size = window.size();
+        let centre = stick_centre(size, touch.ui_scale);
+        if grabs_stick(pos, centre, STICK_REACH * touch.ui_scale * 1.7)
+            || over_controls(pos, size, touch.ui_scale)
+        {
+            return;
+        }
+    }
+
+    let (camera, transform) = *camera;
+    let global = GlobalTransform::from(*transform);
+    let handle = path_handle_at(&editor, camera, &global, pos, touch.enabled);
+    let now = time.elapsed_secs_f64();
+    let drag = gesture.0.press(event.pointer.id, pos, now, handle);
+    if let Some(drag) = drag {
+        let waypoint = match drag.handle {
+            PathHandle::Waypoint(id) => id,
+            PathHandle::Tangent { waypoint, .. } => waypoint,
+        };
+        if let Some(plan) = editor.plan.as_mut() {
+            plan.select(Some(waypoint));
+        }
+        touch.path_drag_active = true;
+        touch.suppress_until = now + 0.08;
+        touch.pending_tap = None;
+        touch.tap = None;
+    }
+}
+
+fn on_path_move(event: On<PointerMove>, mut gesture: ResMut<PathGesture>) {
+    // Tap candidates track movement here; an active handle drag uses
+    // PointerDrag so it keeps receiving updates over UI nodes.
+    if !gesture.0.dragging() {
+        gesture
+            .0
+            .drag(event.pointer.id, event.pointer.position, event.delta);
+    }
+}
+
+fn on_path_drag(event: On<PointerDrag>, mut gesture: ResMut<PathGesture>) {
+    gesture
+        .0
+        .drag(event.pointer.id, event.pointer.position, event.delta);
+}
+
+fn on_path_release(
+    event: On<PointerRelease>,
+    time: Res<Time>,
+    mut gesture: ResMut<PathGesture>,
+    mut touch: ResMut<TouchState>,
+) {
+    let now = time.elapsed_secs_f64();
+    if let Some(screen) = gesture.0.release(event.pointer.id, now) {
+        if event.pointer.id.is_touch() && tap_allowed(now, &touch) {
+            touch.pending_tap = Some(screen);
+        }
+    }
+    touch.path_drag_active = gesture.0.dragging();
+}
+
+fn on_path_drag_end(
+    event: On<PointerDragEnd>,
+    time: Res<Time>,
+    mut gesture: ResMut<PathGesture>,
+    mut touch: ResMut<TouchState>,
+) {
+    gesture
+        .0
+        .release(event.pointer.id, time.elapsed_secs_f64());
+    touch.path_drag_active = gesture.0.dragging();
+}
+
+fn on_path_cancel(
+    event: On<PointerCancel>,
+    mut gesture: ResMut<PathGesture>,
+    mut touch: ResMut<TouchState>,
+) {
+    gesture.0.cancel(event.pointer.id);
+    touch.path_drag_active = gesture.0.dragging();
+    touch.pending_tap = None;
+}
+
+fn path_drag(
+    mut editor: ResMut<Editor>,
+    gesture: Res<PathGesture>,
+    nav: Res<Nav>,
+    spatial_query: SpatialQuery,
+    player: Query<Entity, With<CharacterVisual>>,
+) {
+    let Some(drag) = gesture.0.drag_target() else {
+        return;
+    };
+    let Some(screen) = gesture.0.screen() else {
+        return;
+    };
+    let filter = player
+        .iter()
+        .next()
+        .map(|entity| SpatialQueryFilter::from_excluded_entities([entity]))
+        .unwrap_or_default();
+    apply_path_drag(
+        &mut editor,
+        drag,
+        screen,
+        &nav,
+        &spatial_query,
+        &filter,
+    );
 }
 
 fn on_touch_button(
@@ -3807,6 +3973,14 @@ mod tests {
         assert!(!walk_enabled(Some(&plan), Some(&test_route(false)), false));
         assert!(!walk_enabled(Some(&empty), Some(&test_route(true)), false));
         assert!(!walk_enabled(None, None, false));
+    }
+
+    #[test]
+    fn touch_suppress_blocks_a_tap_after_a_button() {
+        let mut touch = TouchState::default();
+        touch.suppress_until = 2.0;
+        assert!(!tap_allowed(1.9, &touch));
+        assert!(tap_allowed(2.1, &touch));
     }
 
     #[test]
