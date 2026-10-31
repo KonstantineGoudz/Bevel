@@ -1976,8 +1976,19 @@ fn refresh_route(
         .next()
         .map(|entity| SpatialQueryFilter::from_excluded_entities([entity]))
         .unwrap_or_default();
-    let live = editor.walk.is_some();
-    let _ = rebuild_route(&mut editor, &nav, &spatial_query, &filter, live);
+    let was_walking = editor.walk.is_some();
+    let ok = rebuild_route(&mut editor, &nav, &spatial_query, &filter, was_walking);
+    let (_, valid) = rebuild_walk_state(ok, was_walking);
+    if let Some(route) = editor.route.as_mut() {
+        route.valid = valid;
+    }
+    if !ok {
+        editor.note = if was_walking {
+            "layout broke the plan, still walking"
+        } else {
+            "plan no longer reachable"
+        };
+    }
 }
 
 fn interact(
@@ -2774,6 +2785,11 @@ fn walk_enabled(plan: Option<&Plan>, route: Option<&Route>, walking: bool) -> bo
     plan.is_some_and(|plan| !plan.is_empty())
         && route.is_some_and(|route| route.valid)
         && !walking
+}
+
+/// A nav rebuild may keep or clear validity but may never start a walk.
+fn rebuild_walk_state(valid: bool, was_walking: bool) -> (bool, bool) {
+    (was_walking, valid)
 }
 
 /// Rebuild from the cylinder's current position, then start walking.
@@ -4018,7 +4034,8 @@ fn draw(editor: Res<Editor>, cursor: Res<Cursor>, orbit: Res<Orbit>, mut gizmos:
     }
 
     if let Some(route) = &editor.route {
-        gizmos.linestrip(route.line.iter().copied(), PATH);
+        let colour = if route.valid { PATH } else { AMBER };
+        gizmos.linestrip(route.line.iter().copied(), colour);
 
         // A little target ring so the end of the curve is unambiguous, laid on
         // whatever surface the curve ends on.
@@ -4030,7 +4047,7 @@ fn draw(editor: Res<Editor>, cursor: Res<Cursor>, orbit: Res<Orbit>, mut gizmos:
         gizmos.circle(
             Isometry3d::new(target, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
             0.22,
-            PATH,
+            colour,
         );
     }
 
@@ -4470,6 +4487,14 @@ mod tests {
         assert!(!walk_enabled(Some(&plan), Some(&test_route(false)), false));
         assert!(!walk_enabled(Some(&empty), Some(&test_route(true)), false));
         assert!(!walk_enabled(None, None, false));
+    }
+
+    #[test]
+    fn a_nav_rebuild_never_starts_or_resurrects_a_walk() {
+        assert_eq!(rebuild_walk_state(false, true), (true, false));
+        assert_eq!(rebuild_walk_state(true, true), (true, true));
+        assert_eq!(rebuild_walk_state(false, false), (false, false));
+        assert_eq!(rebuild_walk_state(true, false), (false, true));
     }
 
     #[test]
