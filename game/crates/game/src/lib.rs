@@ -7,6 +7,7 @@ mod editor;
 mod mesh;
 mod model;
 mod path;
+mod path_edit;
 
 /// Entry point for every target. `bevy_main` generates the Android glue.
 #[bevy_main]
