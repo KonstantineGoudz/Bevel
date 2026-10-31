@@ -13,9 +13,9 @@ use avian3d::math::{ToF32Precision, ToRealPrecision};
 use avian3d::prelude::*;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::input::touch::Touches;
+use bevy::picking::Pickable;
 use bevy::picking::events::{PointerMove, PointerPress, PointerRelease};
 use bevy::picking::pointer::{PointerButton, PointerId};
-use bevy::picking::Pickable;
 use bevy::prelude::*;
 use bevy::shape::InfinitePlane3d;
 use bevy::ui_widgets::{Activate, Button};
@@ -1093,8 +1093,22 @@ fn jump_velocity(vy: f32, grounded: bool, jump: bool) -> f32 {
 /// vertical speed still counts as ground. A real jump rises much faster.
 const MAX_GROUNDED_RISE: f32 = JUMP_SPEED * 0.5;
 
-fn grounded_after_step(vy: f32, supported: bool) -> bool {
-    supported && vy <= MAX_GROUNDED_RISE
+/// How far below the feet a surface may sit and still count as the ground
+/// while walking down a slope. A descending character leaves the surface
+/// faster than gravity can pull it back, so contact-only support flickers and
+/// jump presses are silently dropped on most frames.
+const STEP_DOWN: f32 = 0.35;
+
+/// Feet height that should count as ground for a surface under the capsule.
+/// `can_snap` is false while rising, so a fresh jump is not cancelled by the
+/// ground it just left.
+fn snapped_feet(feet: f32, surface: f32, can_snap: bool) -> Option<f32> {
+    let gap = feet - surface;
+    if gap.abs() <= 0.13 || (can_snap && (-0.2..=STEP_DOWN).contains(&gap)) {
+        Some(surface)
+    } else {
+        None
+    }
 }
 
 /// Advance the character along the drawn route at a constant walking pace.
@@ -1117,6 +1131,7 @@ fn walk(
         editor.walk = None;
         return;
     };
+    let was_grounded = character.grounded;
     let Some(entity) = player.iter().next() else {
         return;
     };
@@ -1187,15 +1202,30 @@ fn walk(
         .map(|route| route.track.nearest_distance(moved))
         .unwrap_or(current.distance);
 
-    // Probe down for support so a jump can only launch from solid ground and
-    // cannot be re-triggered at the apex of an arc.
-    let feet = center.y - PILL_HALF;
-    let probe = Vec3::new(center.x, feet + 0.12, center.z);
-    let supported = move_and_slide
+    // Probe down from the capsule centre so a descent can follow the slope for
+    // a short step instead of free-falling between contact frames.
+    let mut feet = center.y - PILL_HALF;
+    let surface = move_and_slide
         .spatial_query
-        .cast_ray(probe.real(), Dir3::NEG_Y, 0.25, true, &filter)
-        .is_some_and(|hit| hit.normal.y > 0.4);
-    let grounded = grounded_after_step(vy, supported);
+        .cast_ray(
+            center.real(),
+            Dir3::NEG_Y,
+            PILL_HALF + STEP_DOWN,
+            true,
+            &filter,
+        )
+        .filter(|hit| hit.normal.y > 0.4)
+        .map(|hit| center.y - hit.distance);
+    let snapped = if vy > MAX_GROUNDED_RISE {
+        None
+    } else {
+        surface.and_then(|surface| snapped_feet(feet, surface, was_grounded))
+    };
+    let grounded = snapped.is_some();
+    if let Some(snapped) = snapped {
+        feet = snapped;
+        vy = 0.0;
+    }
 
     if let Some(target) = editor.character.as_mut() {
         target.pos = moved;
@@ -1287,6 +1317,7 @@ fn character_move(
     let Some(character) = editor.character.as_mut() else {
         return;
     };
+    let was_grounded = character.grounded;
     let Some(entity) = player.iter().next() else {
         return;
     };
@@ -1370,8 +1401,34 @@ fn character_move(
         vy = output.projected_velocity.y;
     }
 
+    // Follow a descending slope for a short step instead of free-falling until
+    // the next contact frame; a jump pressed between those frames was ignored.
+    let mut feet = center.y - PILL_HALF;
+    let surface = move_and_slide
+        .spatial_query
+        .cast_ray(
+            center.real(),
+            Dir3::NEG_Y,
+            PILL_HALF + STEP_DOWN,
+            true,
+            &filter,
+        )
+        .filter(|hit| hit.normal.y > 0.4)
+        .map(|hit| center.y - hit.distance);
+    let snapped = if vy > MAX_GROUNDED_RISE {
+        // A jump must not be cancelled by the ground it is leaving.
+        None
+    } else {
+        surface.and_then(|surface| snapped_feet(feet, surface, was_grounded))
+    };
+    let grounded = snapped.is_some();
+    if let Some(snapped) = snapped {
+        feet = snapped;
+        vy = 0.0;
+    }
+
     character.pos = Vec2::new(center.x, center.z);
-    character.feet = center.y - PILL_HALF;
+    character.feet = feet;
     if orbit.mode == ViewMode::First {
         character.yaw = orbit.yaw;
     } else if direction != Vec2::ZERO {
@@ -1384,16 +1441,8 @@ fn character_move(
         }
     }
 
-    // A short ray straight down is a much steadier support test than a capsule
-    // shape cast, which starts off intersecting the surface it rests on.
-    let probe = Vec3::new(center.x, character.feet + 0.12, center.z);
-    let supported = move_and_slide
-        .spatial_query
-        .cast_ray(probe.real(), Dir3::NEG_Y, 0.25, true, &filter)
-        .is_some_and(|hit| hit.normal.y > 0.4);
-
-    character.grounded = grounded_after_step(vy, supported);
-    character.vy = if character.grounded { 0.0 } else { vy };
+    character.grounded = grounded;
+    character.vy = if grounded { 0.0 } else { vy };
 }
 
 /// The test course: a starting pad, a ramp rising along +x, a 0.9 m block at
@@ -3503,14 +3552,19 @@ mod tests {
     }
 
     #[test]
-    fn climbing_a_slope_still_counts_as_grounded() {
-        assert!(grounded_after_step(1.14, true), "walking up a ramp");
-        assert!(grounded_after_step(0.0, true), "standing");
-        assert!(grounded_after_step(-3.0, true), "landing");
-        assert!(!grounded_after_step(0.0, false), "in the air");
-        assert!(
-            !grounded_after_step(JUMP_SPEED, true),
-            "the probe still touches the ground on the launch frame"
+    fn a_slope_counts_as_ground_on_the_way_down() {
+        assert_eq!(snapped_feet(0.5, 0.5, false), Some(0.5), "standing");
+        assert_eq!(snapped_feet(0.5, 0.49, false), Some(0.49), "contact");
+        assert_eq!(
+            snapped_feet(0.5, 0.3, true),
+            Some(0.3),
+            "walking down a ramp"
+        );
+        assert_eq!(snapped_feet(0.5, 0.3, false), None, "falling past a ledge");
+        assert_eq!(
+            snapped_feet(0.5, 0.1, true),
+            None,
+            "too far below to step down"
         );
     }
 
@@ -3669,6 +3723,63 @@ mod tests {
         assert!(
             character.vy > 4.0,
             "jump should launch from the ramp, vy={}",
+            character.vy
+        );
+    }
+
+    #[test]
+    fn can_jump_while_descending_a_ramp() {
+        let mut app = physics_app();
+        let ramp = &shapes()[model::shape_index("ramp").unwrap()];
+        app.world_mut().spawn((
+            RigidBody::Static,
+            piece_collider(ramp).unwrap(),
+            Position::from_xyz(2.0, 0.0, 0.0),
+            Rotation(model::yaw_quat(std::f32::consts::PI * 1.5)),
+        ));
+        app.update();
+
+        app.world_mut().resource_mut::<Orbit>().mode = ViewMode::First;
+        // Forward along -x, i.e. down the ramp.
+        app.world_mut().resource_mut::<Orbit>().yaw = std::f32::consts::FRAC_PI_2;
+        {
+            let mut editor = app.world_mut().resource_mut::<Editor>();
+            editor.character = Some(Character {
+                pos: Vec2::new(2.9, 0.0),
+                feet: 0.85,
+                yaw: std::f32::consts::FRAC_PI_2,
+                vy: 0.0,
+                grounded: true,
+            });
+            editor.walk = None;
+        }
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ShiftLeft);
+
+        let mut descending = false;
+        for _ in 0..180 {
+            tick_character(&mut app);
+            let character = app.world().resource::<Editor>().character.unwrap();
+            if (0.25..0.7).contains(&character.feet) {
+                descending = true;
+                break;
+            }
+        }
+        assert!(descending, "character should walk down the ramp");
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Space);
+        tick_character(&mut app);
+
+        let character = app.world().resource::<Editor>().character.unwrap();
+        assert!(
+            character.vy > 4.0,
+            "jump should launch while descending the ramp, vy={}",
             character.vy
         );
     }
