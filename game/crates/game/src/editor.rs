@@ -27,6 +27,7 @@ use crate::model::{
     shapes,
 };
 use crate::path;
+use crate::path_edit::Plan;
 
 const PANEL_BG: Color = Color::srgb_u8(0x10, 0x16, 0x1e);
 const BUTTON_BG: Color = Color::srgb_u8(0x14, 0x1c, 0x26);
@@ -41,12 +42,27 @@ const GRID_Y: f32 = 0.004;
 const PATH: Color = Color::srgb_u8(0x5f, 0xe0, 0xc0);
 const GIZMO_X: Color = Color::srgb_u8(0xe0, 0x5a, 0x52);
 const GIZMO_Z: Color = Color::srgb_u8(0x5a, 0x8c, 0xe0);
-const GIZMO_RING: f32 = 0.8;
+/// Gizmo handles are sized against the selected piece's bounding box and stay
+/// bigger than it, so big selections keep visible handles and small ones keep a
+/// grabbable one.
+const GIZMO_GROWTH: f32 = 1.25;
+/// Yaw ring radius as a fraction of the piece's bounding box.
+const GIZMO_RING_SCALE: f32 = 0.8;
+/// Screen-space grab tolerance for an axis handle, in logical pixels.
+const GIZMO_HANDLE_HIT: f32 = 10.0;
+/// What fraction of the yaw ring radius still counts as the handle.
+const GIZMO_YAW_HIT: f32 = 0.1;
+/// Arrow head back offset, as a fraction of the handle length.
+const GIZMO_ARROW_BACK: f32 = 0.16;
+/// Arrow head side offset, as a fraction of the handle length.
+const GIZMO_ARROW_SIDE: f32 = 0.07;
 const PILL_COLOR: Color = Color::srgb_u8(0x3f, 0xd0, 0xb0);
 const BAR_BG: Color = Color::srgba(0.04, 0.05, 0.07, 0.82);
-/// Eye height and capsule half-height, in metres.
+/// Eye height and capsule dimensions, in metres.
 const EYE_HEIGHT: f32 = 1.55;
-const PILL_HALF: f32 = 0.87;
+const PILL_RADIUS: f32 = 0.32;
+const PILL_CYLINDER: f32 = 1.1;
+const PILL_HALF: f32 = PILL_CYLINDER * 0.5 + PILL_RADIUS;
 /// Walking pace, in metres per second.
 const WALK_SPEED: f32 = 2.2;
 /// Gravity, in m/s^2. A little above earth so the character does not float.
@@ -115,6 +131,7 @@ struct Editor {
     tool: Option<usize>,
     actor_tool: Option<ActorTool>,
     character: Option<Character>,
+    plan: Option<Plan>,
     route: Option<Route>,
     walk: Option<Walk>,
     selected: Option<u32>,
@@ -133,9 +150,6 @@ struct Editor {
     last_palette: Option<(PaletteAction, f64)>,
     /// Navigation revision the current route was planned against.
     seen_nav: u64,
-    /// Last requested destination, kept so a nav rebuild can retry a route
-    /// that was previously unreachable (e.g. before its ramp was placed).
-    path_target: Option<Vec2>,
 }
 
 impl Default for Editor {
@@ -145,6 +159,7 @@ impl Default for Editor {
             tool: None,
             actor_tool: None,
             character: None,
+            plan: None,
             route: None,
             walk: None,
             selected: None,
@@ -159,7 +174,6 @@ impl Default for Editor {
             mobile_shape: 0,
             last_palette: None,
             seen_nav: 0,
-            path_target: None,
         }
     }
 }
@@ -183,11 +197,17 @@ struct Character {
 }
 
 /// A routed path with arc length, so the walker moves at a constant speed.
+#[derive(Clone)]
 struct Route {
     track: path::Track,
     /// Track samples lifted onto the surface, ready to draw.
     line: Vec<Vec3>,
-    target: Vec2,
+    /// Arc length of each waypoint along `track`.
+    distances: Vec<f32>,
+    /// Curve handles aligned with the waypoints.
+    controls: Vec<path::AnchorControls>,
+    /// False when a level change made the plan unreachable.
+    valid: bool,
     hexes: usize,
 }
 
@@ -250,6 +270,8 @@ struct TouchState {
     last_action: Option<(TouchAction, f64)>,
     /// Tap captured by the full-screen picking layer (correct coordinate space).
     pending_tap: Option<Vec2>,
+    /// Sticky touch equivalent of Shift: append rather than replace.
+    append: bool,
     /// Pointer holding the stick, in the picking/UI coordinate space. Using the
     /// pointer position instead of raw touch coordinates keeps the stick lined
     /// up with the drawn pad at any DPR or UiScale.
@@ -347,7 +369,7 @@ impl Editor {
         self.walk = None;
         self.tool = None;
         self.actor_tool = None;
-        self.path_target = None;
+        self.plan = None;
         self.undo.clear();
         self.note = "course: walk straight, up the ramp, over the block, drop";
     }
@@ -569,7 +591,7 @@ fn setup(
         ghost,
         pill,
         pill_mat,
-        character_collider: Collider::capsule(0.32, 1.1),
+        character_collider: Collider::capsule(PILL_RADIUS, PILL_CYLINDER),
     });
 
     let panel = commands
@@ -1098,17 +1120,31 @@ const MAX_GROUNDED_RISE: f32 = JUMP_SPEED * 0.5;
 /// faster than gravity can pull it back, so contact-only support flickers and
 /// jump presses are silently dropped on most frames.
 const STEP_DOWN: f32 = 0.35;
+/// Surfaces steeper than this are walls, not ground.
+const MIN_GROUND_NORMAL: f32 = 0.4;
 
-/// Feet height that should count as ground for a surface under the capsule.
-/// `can_snap` is false while rising, so a fresh jump is not cancelled by the
-/// ground it just left.
-fn snapped_feet(feet: f32, surface: f32, can_snap: bool) -> Option<f32> {
-    let gap = feet - surface;
-    if gap.abs() <= 0.13 || (can_snap && (-0.2..=STEP_DOWN).contains(&gap)) {
-        Some(surface)
+/// Ground support from a contact gap, as `(grounded, drop_to_contact)`. A
+/// negative gap means the capsule is touching or slightly penetrating; it is
+/// never moved up, the physics resolves that. Positive gaps up to `STEP_DOWN`
+/// are followed when already walking, so a descent does not free-fall.
+fn ground_support(gap: f32, can_snap: bool, uphill: bool) -> (bool, Option<f32>) {
+    if gap <= 0.0 {
+        (gap >= -0.2, None)
+    } else if gap <= 0.13 {
+        (true, if uphill { None } else { Some(gap) })
+    } else if can_snap && !uphill && gap <= STEP_DOWN {
+        (true, Some(gap))
     } else {
-        None
+        (false, None)
     }
+}
+
+/// How much to lower the capsule for a downward ray from the bottom sphere's
+/// centre. A capsule touches a slope along the surface normal, not at its
+/// lowest point, so a plain vertical chord overstates the gap on an ascent and
+/// snapping by it would fight the climb.
+fn contact_gap(ray_distance: f32, normal_y: f32) -> f32 {
+    ray_distance - PILL_RADIUS / normal_y.max(0.01)
 }
 
 /// Advance the character along the drawn route at a constant walking pace.
@@ -1208,23 +1244,29 @@ fn walk(
     let surface = move_and_slide
         .spatial_query
         .cast_ray(
-            center.real(),
+            Vec3::new(center.x, feet + PILL_RADIUS, center.z).real(),
             Dir3::NEG_Y,
-            PILL_HALF + STEP_DOWN,
+            PILL_RADIUS / MIN_GROUND_NORMAL + STEP_DOWN,
             true,
             &filter,
         )
-        .filter(|hit| hit.normal.y > 0.4)
-        .map(|hit| center.y - hit.distance);
-    let snapped = if vy > MAX_GROUNDED_RISE {
-        None
+        .filter(|hit| hit.normal.y > MIN_GROUND_NORMAL)
+        .map(|hit| {
+            let uphill = Vec2::new(hit.normal.x, hit.normal.z).dot(direction) < -0.05;
+            (contact_gap(hit.distance, hit.normal.y), uphill)
+        });
+    let (grounded, drop) = if vy > MAX_GROUNDED_RISE {
+        (false, None)
     } else {
-        surface.and_then(|surface| snapped_feet(feet, surface, was_grounded))
+        surface.map_or((false, None), |(gap, uphill)| {
+            ground_support(gap, was_grounded, uphill)
+        })
     };
-    let grounded = snapped.is_some();
-    if let Some(snapped) = snapped {
-        feet = snapped;
+    if grounded {
         vy = 0.0;
+    }
+    if let Some(drop) = drop {
+        feet -= drop;
     }
 
     if let Some(target) = editor.character.as_mut() {
@@ -1242,6 +1284,20 @@ fn walk(
     }
 
     current.distance = nearest.clamp(current.distance - 0.2, total);
+
+    // Reached waypoints stop being part of the live plan; the drawn line
+    // stays behind as a record.
+    {
+        let Editor { plan, route, .. } = &mut *editor;
+        if let (Some(plan), Some(route)) = (plan, route) {
+            let removed = plan.prune(&route.distances, current.distance);
+            if removed > 0 {
+                route.distances.drain(..removed);
+                route.controls.drain(..removed);
+            }
+        }
+    }
+
     if travelled < 0.005 {
         current.stuck += frame;
     } else {
@@ -1407,24 +1463,30 @@ fn character_move(
     let surface = move_and_slide
         .spatial_query
         .cast_ray(
-            center.real(),
+            Vec3::new(center.x, feet + PILL_RADIUS, center.z).real(),
             Dir3::NEG_Y,
-            PILL_HALF + STEP_DOWN,
+            PILL_RADIUS / MIN_GROUND_NORMAL + STEP_DOWN,
             true,
             &filter,
         )
-        .filter(|hit| hit.normal.y > 0.4)
-        .map(|hit| center.y - hit.distance);
-    let snapped = if vy > MAX_GROUNDED_RISE {
+        .filter(|hit| hit.normal.y > MIN_GROUND_NORMAL)
+        .map(|hit| {
+            let uphill = Vec2::new(hit.normal.x, hit.normal.z).dot(direction) < -0.05;
+            (contact_gap(hit.distance, hit.normal.y), uphill)
+        });
+    let (grounded, drop) = if vy > MAX_GROUNDED_RISE {
         // A jump must not be cancelled by the ground it is leaving.
-        None
+        (false, None)
     } else {
-        surface.and_then(|surface| snapped_feet(feet, surface, was_grounded))
+        surface.map_or((false, None), |(gap, uphill)| {
+            ground_support(gap, was_grounded, uphill)
+        })
     };
-    let grounded = snapped.is_some();
-    if let Some(snapped) = snapped {
-        feet = snapped;
+    if grounded {
         vy = 0.0;
+    }
+    if let Some(drop) = drop {
+        feet -= drop;
     }
 
     character.pos = Vec2::new(center.x, center.z);
@@ -1649,9 +1711,11 @@ fn cycle_view(orbit: &mut Orbit, editor: &Editor) {
         ViewMode::First => {
             orbit.pitch = 0.0;
             if let (Some(character), Some(route)) = (editor.character, editor.route.as_ref()) {
-                let towards = route.target - character.pos;
-                if towards.length_squared() > 0.01 {
-                    orbit.yaw = (-towards.x).atan2(-towards.y);
+                if let Some(target) = route.line.last() {
+                    let towards = Vec2::new(target.x, target.z) - character.pos;
+                    if towards.length_squared() > 0.01 {
+                        orbit.yaw = (-towards.x).atan2(-towards.y);
+                    }
                 }
             } else if let Some(character) = editor.character {
                 orbit.yaw = character.yaw;
@@ -1771,20 +1835,16 @@ fn refresh_route(
         return;
     }
     editor.seen_nav = nav.revision;
-    let Some(target) = editor
-        .route
-        .as_ref()
-        .map(|route| route.target)
-        .or(editor.path_target)
-    else {
+    if editor.plan.as_ref().is_none_or(|plan| plan.is_empty()) {
         return;
-    };
+    }
     let filter = player
         .iter()
         .next()
         .map(|entity| SpatialQueryFilter::from_excluded_entities([entity]))
         .unwrap_or_default();
-    route_to(&mut editor, target, &nav, &spatial_query, &filter);
+    let live = editor.walk.is_some();
+    let _ = rebuild_route(&mut editor, &nav, &spatial_query, &filter, live);
 }
 
 fn interact(
@@ -1819,7 +1879,6 @@ fn interact(
         editor.drag = None;
         editor.route = None;
         editor.walk = None;
-        editor.path_target = None;
         editor.note = "Click a component, then the grid";
     }
 
@@ -1951,7 +2010,6 @@ fn interact(
             editor.character = Some(character);
             editor.route = None;
             editor.walk = None;
-            editor.path_target = None;
             focus(&mut orbit, Some(character));
             editor.note = "character placed";
         }
@@ -1959,9 +2017,24 @@ fn interact(
     }
 
     if editor.actor_tool == Some(ActorTool::Path) {
-        if clicked {
-            let target = surface_target(&cursor, &spatial_query, &surface_filter, world);
-            route_to(&mut editor, target, &nav, &spatial_query, &surface_filter);
+        if clicked && orbit.mode != ViewMode::First {
+            let (target, height) =
+                surface_target(&cursor, &spatial_query, &surface_filter, world);
+            let cell = resolve_cell(&editor.pieces, target, height);
+            let shift =
+                keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+            let append = append_for(shift, touch.append);
+            add_waypoint(
+                &mut editor,
+                target,
+                cell,
+                height,
+                append,
+                true,
+                &nav,
+                &spatial_query,
+                &surface_filter,
+            );
             // A tap here is a waypoint, never a selection: drop any stale
             // highlight left over from placing the block.
             editor.selected = None;
@@ -1982,8 +2055,23 @@ fn interact(
             && editor.character.is_some()
             && (hit.is_none() || on_surface)
         {
-            let target = surface_target(&cursor, &spatial_query, &surface_filter, world);
-            route_to(&mut editor, target, &nav, &spatial_query, &surface_filter);
+            let (target, height) =
+                surface_target(&cursor, &spatial_query, &surface_filter, world);
+            let cell = resolve_cell(&editor.pieces, target, height);
+            let shift =
+                keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+            let append = orbit.mode == ViewMode::Top && append_for(shift, touch.append);
+            add_waypoint(
+                &mut editor,
+                target,
+                cell,
+                height,
+                append,
+                true,
+                &nav,
+                &spatial_query,
+                &surface_filter,
+            );
             editor.selected = None;
             editor.drag = None;
         } else if let Some(hit) = hit {
@@ -2051,7 +2139,7 @@ fn surface_target(
     spatial_query: &SpatialQuery,
     filter: &SpatialQueryFilter,
     fallback: Vec2,
-) -> Vec2 {
+) -> (Vec2, f32) {
     cursor
         .ray
         .and_then(|ray| {
@@ -2059,8 +2147,8 @@ fn surface_target(
                 .cast_ray(ray.origin.real(), ray.direction, 80.0, true, filter)
                 .map(|hit| ray.get_point(hit.distance))
         })
-        .map(|point| Vec2::new(point.x, point.z))
-        .unwrap_or(fallback)
+        .map(|point| (Vec2::new(point.x, point.z), point.y))
+        .unwrap_or((fallback, 0.0))
 }
 
 /// Height of the walkable surface under `at`, ignoring walls' vertical faces.
@@ -2160,56 +2248,153 @@ fn smooth_heights(heights: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-/// Ask for a route to `target` from the character, if both ends are reachable.
-fn route_to(
+/// A plan-mode click while stopped only lays out the route; Path mode and a
+/// moving cylinder start walking.
+fn click_starts_walk(plan_mode: bool, walking: bool) -> bool {
+    !plan_mode || walking
+}
+
+/// Shift on desktop and the sticky Add toggle on touch both append.
+fn append_for(shift: bool, touch_add: bool) -> bool {
+    shift || touch_add
+}
+
+/// The cell of the block/ramp under a point, or the rounded ground cell.
+fn resolve_cell(pieces: &[Piece], at: Vec2, height: f32) -> path::Hex {
+    path::cell_under(pieces, at, height).unwrap_or_else(|| model::pixel_to_hex(at))
+}
+
+/// The drawn line up to the sample nearest `point`.
+fn line_prefix(track: &path::Track, line: &[Vec3], point: Vec2) -> Vec<Vec3> {
+    if line.is_empty() {
+        return Vec::new();
+    }
+    let index = track.nearest_index(point).min(line.len() - 1);
+    line[..=index].to_vec()
+}
+
+/// Where a live rebuild starts: the current track point, not the old start.
+fn rebuild_start(live: bool, route: Option<&Route>, walk: Option<&Walk>, character: Vec2) -> Vec2 {
+    if live {
+        if let (Some(route), Some(walk)) = (route, walk) {
+            return route.track.at(walk.distance).0;
+        }
+    }
+    character
+}
+
+/// Keep the old plan unless the new one built successfully.
+fn choose_plan(old: Option<Plan>, new: Option<Plan>, ok: bool) -> Option<Plan> {
+    if ok { new } else { old }
+}
+
+/// Rebuild the route geometry from the current plan. `live` keeps the walked
+/// line prefix and restarts the suffix at the current track point.
+fn rebuild_route(
     editor: &mut Editor,
-    target: Vec2,
     nav: &Nav,
     spatial_query: &SpatialQuery,
     filter: &SpatialQueryFilter,
-) {
-    editor.seen_nav = nav.revision;
-    editor.path_target = Some(target);
+    live: bool,
+) -> bool {
     let Some(character) = editor.character else {
         editor.note = "place a character first (C)";
-        return;
+        return false;
     };
-    // Round x/z alone can name the empty cell beside a block or ramp, because
-    // their square footprints poke into the neighbouring hex. Prefer the piece
-    // the walker is standing on and the piece under the click.
-    let start = path::cell_under(&editor.pieces, character.pos, character.feet)
-        .unwrap_or_else(|| model::pixel_to_hex(character.pos));
-    let goal_height = surface_height(spatial_query, filter, target).unwrap_or(character.feet);
-    let goal = path::cell_under(&editor.pieces, target, goal_height)
-        .unwrap_or_else(|| model::pixel_to_hex(target));
+    let Some(plan) = editor.plan.as_ref() else {
+        return false;
+    };
+    let waypoints = plan.waypoints.clone();
+    let live = live && editor.route.is_some() && editor.walk.is_some();
+    let start = rebuild_start(live, editor.route.as_ref(), editor.walk.as_ref(), character.pos);
+    let height = character.feet;
+    let start_cell = resolve_cell(&editor.pieces, start, height);
+    let Some(route_plan) = path::plan_route(
+        start,
+        start_cell,
+        &waypoints,
+        &nav.edges,
+        &nav.hexes,
+    ) else {
+        editor.note = "no route to that point";
+        return false;
+    };
 
-    match path::find_path(start, goal, &nav.edges, &nav.hexes) {
-        Some(route) => {
-            let points = path::waypoints(character.pos, target, &route);
-            let track = path::Track::new(path::sample(&path::smooth(&points), 18));
-            let line = route_line(&track, spatial_query, filter, character.feet);
-            editor.walk = (track.total() > 0.1).then_some(Walk {
-                distance: 0.0,
-                stuck: 0.0,
-            });
-            editor.note = if editor.walk.is_some() {
-                "walking"
-            } else {
-                "route drawn"
-            };
-            editor.route = Some(Route {
-                track,
-                line,
-                target,
-                hexes: route.len(),
-            });
+    let new_line = route_line(&route_plan.track, spatial_query, filter, height);
+    let line = if live {
+        if let Some(old) = editor.route.as_ref() {
+            let mut prefix = line_prefix(&old.track, &old.line, start);
+            prefix.extend(new_line.iter().skip(1).copied());
+            prefix
+        } else {
+            new_line
         }
-        None => {
-            editor.route = None;
-            editor.walk = None;
-            editor.note = "no route to that point";
+    } else {
+        new_line
+    };
+
+    editor.route = Some(Route {
+        track: route_plan.track,
+        line,
+        distances: route_plan.distances,
+        controls: route_plan.controls,
+        valid: true,
+        hexes: route_plan.hexes,
+    });
+    if live {
+        if let Some(walk) = editor.walk.as_mut() {
+            walk.distance = 0.0;
         }
     }
+    true
+}
+
+/// Add or replace a waypoint and rebuild. On failure the previous plan, route
+/// and walk are restored unchanged.
+fn add_waypoint(
+    editor: &mut Editor,
+    target: Vec2,
+    cell: path::Hex,
+    height: f32,
+    append: bool,
+    start_walk: bool,
+    nav: &Nav,
+    spatial_query: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+) -> bool {
+    if editor.character.is_none() {
+        editor.note = "place a character first (C)";
+        return false;
+    }
+
+    let old_plan = editor.plan.clone();
+    let old_route = editor.route.clone();
+    let old_walk = editor.walk;
+    let live = old_walk.is_some();
+
+    let mut plan = old_plan.clone().unwrap_or_default();
+    if append && !plan.is_empty() {
+        plan.append(target, cell, height);
+    } else {
+        plan.replace(target, cell, height);
+    }
+
+    editor.plan = Some(plan.clone());
+    let ok = rebuild_route(editor, nav, spatial_query, filter, live);
+    editor.plan = choose_plan(old_plan, Some(plan), ok);
+    if !ok {
+        editor.route = old_route;
+        editor.walk = old_walk;
+        return false;
+    }
+
+    editor.walk = start_walk.then_some(Walk {
+        distance: 0.0,
+        stuck: 0.0,
+    });
+    editor.seen_nav = nav.revision;
+    editor.note = if start_walk { "walking" } else { "route drawn" };
+    true
 }
 
 /// Ray against each piece's local bounding box, expanded by the click pad.
@@ -3019,7 +3204,7 @@ fn draw(editor: Res<Editor>, cursor: Res<Cursor>, orbit: Res<Orbit>, mut gizmos:
             .line
             .last()
             .copied()
-            .unwrap_or(Vec3::new(route.target.x, 0.07, route.target.y));
+            .unwrap_or(Vec3::new(0.0, 0.07, 0.0));
         gizmos.circle(
             Isometry3d::new(target, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
             0.22,
@@ -3047,32 +3232,74 @@ fn placement_spot(editor: &Editor, world: Vec2) -> (Vec2, f32) {
     }
 }
 
-/// Three handles on the selected piece: X and Z arrows plus a yaw ring.
+/// Three handles on the selected piece: X and Z arrows plus a yaw ring, sized
+/// bigger than the piece's bounding box.
 fn transform_gizmo(gizmos: &mut Gizmos, piece: &Piece, shape: &model::Shape) {
     let base = shape.base.max(0.0) + 0.04;
     let origin = Vec3::new(piece.pos.x, base, piece.pos.y);
-    let x_end = origin + Vec3::X * 1.1;
-    let z_end = origin + Vec3::Z * 1.1;
+    let (reach, ring) = gizmo_frame(piece, shape);
+    let x_end = origin + Vec3::X * reach;
+    let z_end = origin + Vec3::Z * reach;
 
     gizmos.line(origin, x_end, GIZMO_X);
     gizmos.line(origin, z_end, GIZMO_Z);
-    // Arrow heads as diamonds so they still read edge-on.
+    // Arrow heads as diamonds so they still read edge-on, scaled to the handle.
     for (end, dir) in [(x_end, Vec3::X), (z_end, Vec3::Z)] {
-        let side = Vec3::new(dir.z, 0.0, dir.x) * 0.07;
+        let back = end - dir * (reach * GIZMO_ARROW_BACK);
+        let side = Vec3::new(dir.z, 0.0, dir.x) * (reach * GIZMO_ARROW_SIDE);
         closed(
             gizmos,
-            &[end - dir * 0.16 + side, end, end - dir * 0.16 - side],
+            &[back + side, end, back - side],
             if dir == Vec3::X { GIZMO_X } else { GIZMO_Z },
         );
     }
 
-    let ring: Vec<Vec3> = (0..32)
+    let ring_points: Vec<Vec3> = (0..32)
         .map(|i| {
             let a = std::f32::consts::TAU * i as f32 / 32.0;
-            origin + Vec3::new(a.cos() * GIZMO_RING, 0.0, a.sin() * GIZMO_RING)
+            origin + Vec3::new(a.cos() * ring, 0.0, a.sin() * ring)
         })
         .collect();
-    closed(gizmos, &ring, AMBER);
+    closed(gizmos, &ring_points, AMBER);
+}
+
+/// Gizmo geometry for a piece: how far an X or Z handle reaches from the piece's
+/// origin and how wide the yaw ring is. Both are sized against the piece's
+/// bounding box, so the gizmo stays bigger than the selection it belongs to.
+fn gizmo_frame(piece: &Piece, shape: &model::Shape) -> (f32, f32) {
+    let size = bounding_size(piece, shape);
+    (size * GIZMO_GROWTH, size * GIZMO_RING_SCALE)
+}
+
+/// The piece's bounding box as the largest of its ground-plane extent and its
+/// height, in metres.
+fn bounding_size(piece: &Piece, shape: &model::Shape) -> f32 {
+    let (low, high) = piece_bounds(piece, shape);
+    let ground = Vec2::new(high.x - low.x, high.y - low.y);
+    ground.x.max(ground.y).max(shape.top() - shape.base)
+}
+
+/// World-space bounding box of a piece: the low and high corners of its
+/// rotated ground outline, in `(x, z)`.
+fn piece_bounds(piece: &Piece, shape: &model::Shape) -> (Vec2, Vec2) {
+    let points = model::shape_points(shape);
+    let (sin, cos) = piece.rot.sin_cos();
+    let at = |p: Vec2| {
+        Vec2::new(
+            piece.pos.x + p.x * cos - p.y * sin,
+            piece.pos.y + p.x * sin + p.y * cos,
+        )
+    };
+    let mut low = Vec2::splat(f32::MAX);
+    let mut high = Vec2::splat(f32::MIN);
+    for point in &points {
+        let p = at(*point);
+        low.x = low.x.min(p.x);
+        low.y = low.y.min(p.y);
+        high.x = high.x.max(p.x);
+        high.y = high.y.max(p.y);
+    }
+    (low, high)
 }
 
 /// Closest point on the line `origin + s * axis` to the ray, as `s`.
@@ -3111,14 +3338,18 @@ fn gizmo_hit(
     let shape = shapes().get(piece.shape)?;
     let base = shape.base.max(0.0) + 0.04;
     let origin = Vec3::new(piece.pos.x, base, piece.pos.y);
+    let (reach, ring) = gizmo_frame(piece, shape);
 
     let project = |point: Vec3| camera.world_to_viewport(camera_transform, point).ok();
     let mut best: Option<(f32, GizmoAxis)> = None;
     if let Ok(origin_screen) = camera.world_to_viewport(camera_transform, origin) {
-        for (end, axis) in [(origin + Vec3::X * 1.1, GizmoAxis::X), (origin + Vec3::Z * 1.1, GizmoAxis::Z)] {
+        for (end, axis) in [
+            (origin + Vec3::X * reach, GizmoAxis::X),
+            (origin + Vec3::Z * reach, GizmoAxis::Z),
+        ] {
             if let Some(end_screen) = project(end) {
                 let distance = point_segment_distance(screen, origin_screen, end_screen);
-                if distance < 10.0 && best.is_none_or(|(d, _)| distance < d) {
+                if distance < GIZMO_HANDLE_HIT && best.is_none_or(|(d, _)| distance < d) {
                     best = Some((distance, axis));
                 }
             }
@@ -3128,7 +3359,7 @@ fn gizmo_hit(
     if best.is_none() {
         if let Some(hit) = ray.plane_intersection_point(origin, InfinitePlane3d::new(Vec3::Y)) {
             let radius = Vec2::new(hit.x - origin.x, hit.z - origin.z).length();
-            if (radius - GIZMO_RING).abs() < 0.07 {
+            if (radius - ring).abs() < ring * GIZMO_YAW_HIT {
                 best = Some((0.0, GizmoAxis::Yaw));
             }
         }
@@ -3289,6 +3520,75 @@ mod tests {
     fn ray_towards(target: Vec3) -> Ray3d {
         let eye = Vec3::new(3.5, 5.9, 3.1);
         Ray3d::new(eye, Dir3::new(target - eye).unwrap())
+    }
+
+    #[test]
+    fn plan_and_path_modes_choose_walk_and_append_correctly() {
+        assert!(!click_starts_walk(true, false));
+        assert!(click_starts_walk(true, true));
+        assert!(click_starts_walk(false, false));
+        assert!(click_starts_walk(false, true));
+        assert!(append_for(true, false));
+        assert!(append_for(false, true));
+        assert!(!append_for(false, false));
+    }
+
+    #[test]
+    fn the_line_prefix_stops_at_the_current_sample() {
+        let track = path::Track::new(vec![
+            Vec2::ZERO,
+            Vec2::new(1.0, 0.0),
+            Vec2::new(2.0, 0.0),
+        ]);
+        let line = vec![Vec3::ZERO, Vec3::X, Vec3::X * 2.0];
+        let prefix = line_prefix(&track, &line, Vec2::new(1.1, 0.0));
+        assert_eq!(prefix.len(), 2);
+    }
+
+    #[test]
+    fn a_live_rebuild_starts_at_the_current_track_point() {
+        let route = Route {
+            track: path::Track::new(vec![Vec2::ZERO, Vec2::new(4.0, 0.0)]),
+            line: Vec::new(),
+            distances: vec![4.0],
+            controls: Vec::new(),
+            valid: true,
+            hexes: 2,
+        };
+        let walk = Walk {
+            distance: 2.0,
+            stuck: 0.0,
+        };
+        assert_eq!(
+            rebuild_start(true, Some(&route), Some(&walk), Vec2::new(9.0, 9.0)),
+            Vec2::new(2.0, 0.0)
+        );
+        assert_eq!(
+            rebuild_start(false, Some(&route), Some(&walk), Vec2::new(9.0, 9.0)),
+            Vec2::new(9.0, 9.0)
+        );
+    }
+
+    #[test]
+    fn a_refused_edit_keeps_the_old_plan() {
+        let mut old = Plan::default();
+        old.replace(Vec2::ZERO, (0, 0), 0.0);
+        let mut new = old.clone();
+        new.append(Vec2::new(2.0, 0.0), (1, 0), 0.0);
+        assert_eq!(
+            choose_plan(Some(old.clone()), Some(new.clone()), false)
+                .expect("old plan")
+                .waypoints
+                .len(),
+            1
+        );
+        assert_eq!(
+            choose_plan(Some(old), Some(new), true)
+                .expect("new plan")
+                .waypoints
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -3489,6 +3789,30 @@ mod tests {
     }
 
     #[test]
+    fn the_gizmo_is_bigger_than_the_selected_pieces_bounding_box() {
+        for (shape_index, shape) in shapes().iter().enumerate() {
+            let piece = Piece {
+                id: 0,
+                shape: shape_index,
+                pos: Vec2::ZERO,
+                rot: 0.0,
+            };
+            let (reach, ring) = gizmo_frame(&piece, shape);
+            let size = bounding_size(&piece, shape);
+            assert!(
+                reach > size,
+                "{}: gizmo handle reach {reach} should be bigger than its bounding box {size}",
+                shape.id
+            );
+            assert!(
+                ring > size * 0.5,
+                "{}: gizmo yaw ring {ring} should clear half its bounding box {size}",
+                shape.id
+            );
+        }
+    }
+
+    #[test]
     fn gizmo_axis_projection_and_screen_distance() {
         // A ray straight down at x = 2 hits the X axis at s = 2.
         let ray = Ray3d::new(Vec3::new(2.0, 5.0, 0.0), Dir3::NEG_Y);
@@ -3553,18 +3877,46 @@ mod tests {
 
     #[test]
     fn a_slope_counts_as_ground_on_the_way_down() {
-        assert_eq!(snapped_feet(0.5, 0.5, false), Some(0.5), "standing");
-        assert_eq!(snapped_feet(0.5, 0.49, false), Some(0.49), "contact");
+        assert_eq!(ground_support(0.0, false, false), (true, None), "standing");
         assert_eq!(
-            snapped_feet(0.5, 0.3, true),
-            Some(0.3),
+            ground_support(0.01, false, false),
+            (true, Some(0.01)),
+            "contact"
+        );
+        assert_eq!(
+            ground_support(0.2, true, false),
+            (true, Some(0.2)),
             "walking down a ramp"
         );
-        assert_eq!(snapped_feet(0.5, 0.3, false), None, "falling past a ledge");
         assert_eq!(
-            snapped_feet(0.5, 0.1, true),
-            None,
+            ground_support(0.2, false, false),
+            (false, None),
+            "falling past a ledge"
+        );
+        assert_eq!(
+            ground_support(0.4, true, false),
+            (false, None),
             "too far below to step down"
+        );
+        assert_eq!(
+            ground_support(-0.02, false, false),
+            (true, None),
+            "slight penetration is ground, but must not be lifted"
+        );
+        assert_eq!(
+            ground_support(0.05, true, true),
+            (true, None),
+            "an ascent is ground but is never re-seated"
+        );
+    }
+
+    #[test]
+    fn a_rounded_capsule_on_a_slope_has_no_gap() {
+        assert!((contact_gap(PILL_RADIUS, 1.0)).abs() < 1e-6, "flat");
+        assert!((contact_gap(PILL_RADIUS / 0.9, 0.9)).abs() < 1e-5, "slope");
+        assert!(
+            contact_gap(PILL_RADIUS + 0.06, 1.0) > 0.0,
+            "above the ground"
         );
     }
 
@@ -3590,7 +3942,7 @@ mod tests {
             ghost: Handle::default(),
             pill: Handle::default(),
             pill_mat: Handle::default(),
-            character_collider: Collider::capsule(0.32, 1.1),
+            character_collider: Collider::capsule(PILL_RADIUS, PILL_CYLINDER),
         });
         app.init_resource::<Editor>();
         app.init_resource::<Orbit>();
