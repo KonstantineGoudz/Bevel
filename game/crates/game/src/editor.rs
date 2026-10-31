@@ -66,7 +66,12 @@ impl Plugin for EditorPlugin {
             .init_resource::<Cursor>()
             .init_resource::<Orbit>()
             .init_resource::<Visuals>()
-            .init_resource::<TouchState>()
+            // One UI unit per logical pixel unless a phone display scales it
+            // down; a zero scale would put the stick centre off screen.
+            .insert_resource(TouchState {
+                ui_scale: 1.0,
+                ..Default::default()
+            })
             .init_resource::<UiScaleApplied>()
             .init_resource::<Nav>()
             .add_systems(Startup, setup)
@@ -79,7 +84,7 @@ impl Plugin for EditorPlugin {
                     sync_knob,
                     sync_shape_label,
                     walk,
-                    first_person_move,
+                    character_move,
                     camera_control,
                     rebuild_nav,
                     refresh_route,
@@ -1065,13 +1070,27 @@ fn solid_parts(shape: &model::Shape) -> Vec<(Vec<Vec2>, f32, f32, u8)> {
 // Walking
 // ---------------------------------------------------------------------------
 
+/// Vertical velocity for a physics step. A jump request only launches when the
+/// character is standing on something; in the air it is ignored.
+fn jump_velocity(vy: f32, grounded: bool, jump: bool) -> f32 {
+    if jump && grounded { JUMP_SPEED } else { vy }
+}
+
+/// A slope pushes the character upward while it climbs, so a small positive
+/// vertical speed still counts as ground. A real jump rises much faster.
+const MAX_GROUNDED_RISE: f32 = JUMP_SPEED * 0.5;
+
+fn grounded_after_step(vy: f32, supported: bool) -> bool {
+    supported && vy <= MAX_GROUNDED_RISE
+}
+
 /// Advance the character along the drawn route at a constant walking pace.
 /// The camera's orbit centre follows in third/top view; in first person the
 /// look direction follows the tangent.
 fn walk(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
-    touch: Res<TouchState>,
+    mut touch: ResMut<TouchState>,
     mut editor: ResMut<Editor>,
     mut orbit: ResMut<Orbit>,
     kit: Res<Kit>,
@@ -1088,6 +1107,7 @@ fn walk(
     let Some(entity) = player.iter().next() else {
         return;
     };
+
     let Some((total, look)) = editor.route.as_ref().map(|route| {
         let total = route.track.total();
         (total, route.track.at((current.distance + 0.7).min(total)).0)
@@ -1103,6 +1123,13 @@ fn walk(
         return;
     }
 
+    // The jump button works while the route keeps steering, so a jump carries
+    // forward along the path instead of cancelling it. Read it only after the
+    // arrival check: a jump pressed as the route ends is left for the free
+    // controller so the button still lands.
+    let jump = keys.pressed(KeyCode::Space) || touch.jump;
+    touch.jump = false;
+
     // Steering, not teleporting: the same capsule and move-and-slide as
     // first-person control, so ramps, gaps and gravity are resolved by physics.
     let direction = to_target.normalize_or_zero();
@@ -1112,7 +1139,7 @@ fn walk(
     let filter = SpatialQueryFilter::from_excluded_entities([entity]);
     let rotation = Quat::from_rotation_y(character.yaw);
     let mut center = Vec3::new(character.pos.x, character.feet + PILL_HALF, character.pos.y);
-    let mut vy = character.vy;
+    let mut vy = jump_velocity(character.vy, character.grounded, jump);
     let mut travelled = 0.0;
 
     for _ in 0..steps {
@@ -1147,11 +1174,21 @@ fn walk(
         .map(|route| route.track.nearest_distance(moved))
         .unwrap_or(current.distance);
 
+    // Probe down for support so a jump can only launch from solid ground and
+    // cannot be re-triggered at the apex of an arc.
+    let feet = center.y - PILL_HALF;
+    let probe = Vec3::new(center.x, feet + 0.12, center.z);
+    let supported = move_and_slide
+        .spatial_query
+        .cast_ray(probe.real(), Dir3::NEG_Y, 0.25, true, &filter)
+        .is_some_and(|hit| hit.normal.y > 0.4);
+    let grounded = grounded_after_step(vy, supported);
+
     if let Some(target) = editor.character.as_mut() {
         target.pos = moved;
-        target.feet = center.y - PILL_HALF;
-        target.vy = vy;
-        target.grounded = vy > -0.05;
+        target.feet = feet;
+        target.vy = if grounded { 0.0 } else { vy };
+        target.grounded = grounded;
         target.yaw = yaw;
     }
 
@@ -1217,20 +1254,21 @@ fn delete_piece(editor: &mut Editor) {
     }
 }
 
-/// WASD movement in first person, resolved by Avian's move-and-slide against
-/// the real colliders: gravity, wall sliding, step-up and jumping. Shift runs;
-/// any manual input takes over from the walk.
-fn first_person_move(
+/// Free movement resolved by Avian's move-and-slide against the real colliders:
+/// gravity, wall sliding, step-up and jumping. WASD and sprint only apply in
+/// first person; jumping and gravity apply in every view, including while no
+/// route is steering.
+fn character_move(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     mut editor: ResMut<Editor>,
-    orbit: Res<Orbit>,
+    mut orbit: ResMut<Orbit>,
     mut touch: ResMut<TouchState>,
     kit: Res<Kit>,
     player: Query<Entity, With<CharacterVisual>>,
     move_and_slide: MoveAndSlide,
 ) {
-    if orbit.mode != ViewMode::First || editor.walk.is_some() {
+    if editor.walk.is_some() {
         return;
     }
     let Some(character) = editor.character.as_mut() else {
@@ -1240,31 +1278,42 @@ fn first_person_move(
         return;
     };
 
+    // The stick and WASD both steer, in every view. Third person is the
+    // default on a phone, and the pad is the only movement control there.
     let mut wish = Vec2::ZERO;
-    if touch.enabled && touch.stick.length_squared() > 0.002 {
-        wish = touch.stick;
-    } else {
-        if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
-            wish.y += 1.0;
-        }
-        if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
-            wish.y -= 1.0;
-        }
-        if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
-            wish.x += 1.0;
-        }
-        if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
-            wish.x -= 1.0;
-        }
+    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
+        wish.y += 1.0;
     }
-    let wish = wish.normalize_or_zero();
+    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
+        wish.y -= 1.0;
+    }
+    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
+        wish.x += 1.0;
+    }
+    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
+        wish.x -= 1.0;
+    }
+    if touch.enabled && touch.stick.length_squared() > 0.01 {
+        wish = touch.stick;
+    }
+    // An analogue pad moves slower near the middle; a small dead zone stops a
+    // resting thumb from drifting.
+    let mut strength = wish.length().clamp(0.0, 1.0);
+    if strength < 0.12 {
+        strength = 0.0;
+    }
+    let wish = if strength > 0.0 {
+        wish.normalize_or_zero()
+    } else {
+        Vec2::ZERO
+    };
 
     let forward = Vec2::new(-orbit.yaw.sin(), -orbit.yaw.cos());
     let right = Vec2::new(orbit.yaw.cos(), -orbit.yaw.sin());
     let direction = (forward * wish.y + right * wish.x).normalize_or_zero();
 
     let sprint = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    let speed = if sprint { 5.5 } else { 2.8 };
+    let speed = (if sprint { 5.5 } else { 2.8 }) * strength;
 
     // Split a long frame into short substeps. Under software rendering a frame
     // can be 0.3 s; a single step that long lets gravity cancel a jump and
@@ -1273,14 +1322,11 @@ fn first_person_move(
     let steps = ((frame / (1.0 / 60.0)).ceil() as usize).clamp(1, 10);
     let step_dt = frame / steps as f32;
 
-    let mut vy = character.vy;
     // `pressed`, not `just_pressed`: a frame can span the whole key tap on a
     // slow frame, and a held space should still jump on landing.
     let jump = keys.pressed(KeyCode::Space) || touch.jump;
     touch.jump = false;
-    if jump && character.grounded {
-        vy = JUMP_SPEED;
-    }
+    let mut vy = jump_velocity(character.vy, character.grounded, jump);
 
     let filter = SpatialQueryFilter::from_excluded_entities([entity]);
     let rotation = Quat::from_rotation_y(character.yaw);
@@ -1313,23 +1359,25 @@ fn first_person_move(
 
     character.pos = Vec2::new(center.x, center.z);
     character.feet = center.y - PILL_HALF;
-    character.yaw = orbit.yaw;
+    if orbit.mode == ViewMode::First {
+        character.yaw = orbit.yaw;
+    } else if direction != Vec2::ZERO {
+        // Face the way the pad points, and keep the orbit centred on the pill
+        // as it walks, so third person follows like the scripted walk.
+        character.yaw = (-direction.x).atan2(-direction.y);
+        orbit.target = Vec3::new(character.pos.x, 0.0, character.pos.y);
+    }
 
     // A short ray straight down is a much steadier support test than a capsule
     // shape cast, which starts off intersecting the surface it rests on.
     let probe = Vec3::new(center.x, character.feet + 0.12, center.z);
-    let grounded = move_and_slide
+    let supported = move_and_slide
         .spatial_query
         .cast_ray(probe.real(), Dir3::NEG_Y, 0.25, true, &filter)
         .is_some_and(|hit| hit.normal.y > 0.4);
 
-    character.grounded = vy <= 0.01 && grounded;
+    character.grounded = grounded_after_step(vy, supported);
     character.vy = if character.grounded { 0.0 } else { vy };
-
-    if editor.walk.is_some() {
-        editor.walk = None;
-        editor.note = "manual control";
-    }
 }
 
 /// The test course: a starting pad, a ramp rising along +x, a 0.9 m block at
@@ -2056,8 +2104,14 @@ fn route_to(
         editor.note = "place a character first (C)";
         return;
     };
-    let start = model::pixel_to_hex(character.pos);
-    let goal = model::pixel_to_hex(target);
+    // Round x/z alone can name the empty cell beside a block or ramp, because
+    // their square footprints poke into the neighbouring hex. Prefer the piece
+    // the walker is standing on and the piece under the click.
+    let start = path::cell_under(&editor.pieces, character.pos, character.feet)
+        .unwrap_or_else(|| model::pixel_to_hex(character.pos));
+    let goal_height = surface_height(spatial_query, filter, target).unwrap_or(character.feet);
+    let goal = path::cell_under(&editor.pieces, target, goal_height)
+        .unwrap_or_else(|| model::pixel_to_hex(target));
 
     match path::find_path(start, goal, &nav.edges, &nav.hexes) {
         Some(route) => {
@@ -2372,8 +2426,10 @@ fn touch_input(
     for touch in touches.iter_just_pressed() {
         let id = touch.id();
         let pos = touch.position() / window.scale_factor();
-        let control = over_controls(pos, size, s);
-        let stick = !control && pos.distance(centre) <= STICK_REACH * s;
+        // The stick sits inside the bottom-left control zone, so decide the
+        // stick first: a press on the pad is a grip, not a camera gesture.
+        let stick = grabs_stick(pos, centre, STICK_REACH * s);
+        let control = !stick && over_controls(pos, size, s);
         state.tracks.insert(
             id,
             TouchTrack {
@@ -2455,6 +2511,12 @@ fn touch_input(
     } else {
         state.two_finger = None;
     }
+}
+
+/// A press inside the stick's reach grabs it, even though the pad also lies in
+/// the bottom-left control zone.
+fn grabs_stick(pos: Vec2, centre: Vec2, reach: f32) -> bool {
+    pos.distance(centre) <= reach
 }
 
 /// Stick deflection: screen right is x, screen up is +y, clamped to 1.
@@ -3095,6 +3157,7 @@ fn save(editor: &Editor) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::system::RunSystemOnce;
     use bevy::math::Dir3;
 
     /// The default camera eye, looking wherever `target` is.
@@ -3197,6 +3260,30 @@ mod tests {
         assert!(over_controls(Vec2::new(60.0, 800.0), size, 1.0), "stick");
         assert!(over_controls(Vec2::new(340.0, 800.0), size, 1.0), "jump");
         assert!(!over_controls(Vec2::new(195.0, 420.0), size, 1.0), "canvas");
+    }
+
+    #[test]
+    fn grabbing_the_stick_wins_over_the_control_zone() {
+        let size = Vec2::new(390.0, 844.0);
+        let s = 0.5;
+        let centre = Vec2::new(
+            (STICK_MARGIN + STICK_BASE * 0.5) * s,
+            size.y - (STICK_MARGIN + STICK_BASE * 0.5) * s,
+        );
+        // The pad deliberately sits inside the bottom-left control zone; a
+        // press on it must still grab the stick rather than be ignored.
+        assert!(over_controls(centre, size, s), "the pad is a control");
+        assert!(grabs_stick(centre, centre, STICK_REACH * s), "pad centre");
+        assert!(grabs_stick(
+            centre + Vec2::new(STICK_REACH * s * 0.9, 0.0),
+            centre,
+            STICK_REACH * s
+        ));
+        assert!(!grabs_stick(
+            centre + Vec2::new(STICK_REACH * s * 1.5, 0.0),
+            centre,
+            STICK_REACH * s
+        ));
     }
 
     #[test]
@@ -3330,6 +3417,184 @@ mod tests {
                 shape.id
             );
         }
+    }
+
+    #[test]
+    fn a_jump_launches_only_from_the_ground() {
+        assert_eq!(jump_velocity(0.0, true, true), JUMP_SPEED);
+        assert_eq!(jump_velocity(0.0, true, false), 0.0);
+        assert_eq!(jump_velocity(-3.0, false, true), -3.0);
+    }
+
+    #[test]
+    fn climbing_a_slope_still_counts_as_grounded() {
+        assert!(grounded_after_step(1.14, true), "walking up a ramp");
+        assert!(grounded_after_step(0.0, true), "standing");
+        assert!(grounded_after_step(-3.0, true), "landing");
+        assert!(!grounded_after_step(0.0, false), "in the air");
+        assert!(
+            !grounded_after_step(JUMP_SPEED, true),
+            "the probe still touches the ground on the launch frame"
+        );
+    }
+
+    /// A world with the invisible floor and a character, without any of the
+    /// rendering or UI plugins.
+    fn physics_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            AssetPlugin::default(),
+            TransformPlugin,
+            PhysicsPlugins::new(PostUpdate),
+        ));
+        app.init_asset::<Mesh>();
+        app.init_resource::<SpatialQueryDiagnostics>();
+        app.init_resource::<avian3d::collider_tree::ColliderTreeDiagnostics>();
+        app.init_resource::<avian3d::collision::CollisionDiagnostics>();
+        app.init_resource::<avian3d::dynamics::solver::SolverDiagnostics>();
+        app.insert_resource(Kit {
+            parts: Vec::new(),
+            mats: Vec::new(),
+            glass: Handle::default(),
+            ghost: Handle::default(),
+            pill: Handle::default(),
+            pill_mat: Handle::default(),
+            character_collider: Collider::capsule(0.32, 1.1),
+        });
+        app.init_resource::<Editor>();
+        app.init_resource::<Orbit>();
+        app.init_resource::<TouchState>();
+        app.init_resource::<ButtonInput<KeyCode>>();
+        app.world_mut().spawn((
+            RigidBody::Static,
+            Collider::cuboid(20.0, 0.2, 20.0),
+            Position::from_xyz(0.0, -0.1, 0.0),
+        ));
+        app.world_mut().spawn(CharacterVisual);
+        // Let the physics pipeline build its broad phase for the floor.
+        app.update();
+        app.update();
+        app
+    }
+
+    fn tick_character(app: &mut App) {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(16));
+        app.world_mut()
+            .run_system_once(character_move)
+            .expect("character move");
+    }
+
+    #[test]
+    fn third_person_can_jump_without_a_route() {
+        let mut app = physics_app();
+        {
+            let mut editor = app.world_mut().resource_mut::<Editor>();
+            editor.character = Some(Character {
+                pos: Vec2::ZERO,
+                feet: 0.0,
+                yaw: 0.0,
+                vy: 0.0,
+                grounded: true,
+            });
+            editor.walk = None;
+        }
+        app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Space);
+
+        tick_character(&mut app);
+
+        let feet = app.world().resource::<Editor>().character.unwrap().feet;
+        assert!(
+            feet > 0.05,
+            "character should leave the ground, feet={feet}"
+        );
+    }
+
+    #[test]
+    fn an_airborne_character_lands_without_a_route() {
+        let mut app = physics_app();
+        {
+            let mut editor = app.world_mut().resource_mut::<Editor>();
+            editor.character = Some(Character {
+                pos: Vec2::ZERO,
+                feet: 1.0,
+                yaw: 0.0,
+                vy: 0.0,
+                grounded: false,
+            });
+            editor.walk = None;
+        }
+        app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+
+        for _ in 0..120 {
+            tick_character(&mut app);
+        }
+
+        let character = app.world().resource::<Editor>().character.unwrap();
+        assert!(
+            character.feet < 0.2,
+            "should fall back to the floor, feet={}",
+            character.feet
+        );
+        assert!(character.grounded, "should be grounded after landing");
+    }
+
+    #[test]
+    fn can_jump_while_climbing_a_ramp() {
+        let mut app = physics_app();
+        let ramp = &shapes()[model::shape_index("ramp").unwrap()];
+        app.world_mut().spawn((
+            RigidBody::Static,
+            piece_collider(ramp).unwrap(),
+            Position::from_xyz(2.0, 0.0, 0.0),
+            Rotation(model::yaw_quat(std::f32::consts::PI * 1.5)),
+        ));
+        app.update();
+
+        app.world_mut().resource_mut::<Orbit>().mode = ViewMode::First;
+        app.world_mut().resource_mut::<Orbit>().yaw = -std::f32::consts::FRAC_PI_2;
+        {
+            let mut editor = app.world_mut().resource_mut::<Editor>();
+            editor.character = Some(Character {
+                pos: Vec2::new(0.5, 0.0),
+                feet: 0.0,
+                yaw: -std::f32::consts::FRAC_PI_2,
+                vy: 0.0,
+                grounded: true,
+            });
+            editor.walk = None;
+        }
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+
+        let mut on_ramp = false;
+        for _ in 0..180 {
+            tick_character(&mut app);
+            let character = app.world().resource::<Editor>().character.unwrap();
+            if (0.25..0.7).contains(&character.feet) {
+                on_ramp = true;
+                break;
+            }
+        }
+        assert!(on_ramp, "character should climb the ramp");
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Space);
+        tick_character(&mut app);
+
+        let character = app.world().resource::<Editor>().character.unwrap();
+        assert!(
+            character.vy > 4.0,
+            "jump should launch from the ramp, vy={}",
+            character.vy
+        );
     }
 
     #[test]

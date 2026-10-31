@@ -72,6 +72,82 @@ fn block_at(hex: Hex, top: f32, pieces: &[Piece]) -> bool {
     })
 }
 
+/// Hexes whose top leads onto the block at `hex`: ramps that reach its height
+/// and neighbouring block tops at the same height. Two blocks one hex apart
+/// leave a gap narrower than the walker's capsule, so it can step across.
+fn entries_onto(hex: Hex, top: f32, pieces: &[Piece]) -> Vec<Hex> {
+    let mut onto = ramps_onto(hex, top, pieces);
+    for piece in pieces {
+        let Some(shape) = shapes().get(piece.shape) else {
+            continue;
+        };
+        if shape.id != "block" || (shape.top() - top).abs() > 0.15 {
+            continue;
+        }
+        let here = model::pixel_to_hex(piece.pos);
+        if here != hex && around(hex).any(|(to, _)| to == here) {
+            onto.push(here);
+        }
+    }
+    onto
+}
+
+/// The nav cell of the block or ramp whose walkable surface is at `height` and
+/// whose footprint contains `at`.
+///
+/// Blocks and ramps are square-ish, not hex-shaped: their corners reach past
+/// the hex they are placed in. Rounding such a corner names the empty cell
+/// next door, so a walker standing there would be planned as if it were on the
+/// ground beside the block — hence a step back could detour to the ramp.
+/// Matching the piece under the walker keeps the route on its own cell.
+pub fn cell_under(pieces: &[Piece], at: Vec2, height: f32) -> Option<Hex> {
+    let mut best: Option<(f32, Hex)> = None;
+    for piece in pieces {
+        let Some(shape) = shapes().get(piece.shape) else {
+            continue;
+        };
+        let Some(surface) = walkable_surface(shape, piece, at) else {
+            continue;
+        };
+        let difference = (surface - height).abs();
+        if difference > 0.2 {
+            continue;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|(best_difference, _)| difference < *best_difference)
+        {
+            best = Some((difference, model::pixel_to_hex(piece.pos)));
+        }
+    }
+    best.map(|(_, hex)| hex)
+}
+
+/// Height of a block's or ramp's top at `at`, if `at` is over its footprint.
+/// Floors are hex-shaped, so rounding already finds their cell; barriers are
+/// not standable, so neither needs to be matched here.
+fn walkable_surface(shape: &model::Shape, piece: &Piece, at: Vec2) -> Option<f32> {
+    /// A walker's centre can sit slightly past the edge of the block it is
+    /// balanced on, so allow a little slack around the footprint.
+    const EDGE_SLACK: f32 = 0.2;
+    let local = model::to_local(piece, at);
+
+    match &shape.geom {
+        model::Geometry::Rect { w, h } if shape.id == "block" => (
+            local.x.abs() <= w * 0.5 + EDGE_SLACK && local.y.abs() <= h * 0.5 + EDGE_SLACK
+        )
+            .then(|| shape.top()),
+        model::Geometry::Wedge { w, d, h } => {
+            if local.x.abs() > w * 0.5 + EDGE_SLACK || local.y.abs() > d * 0.5 + EDGE_SLACK {
+                return None;
+            }
+            let t = ((local.y + d * 0.5) / d).clamp(0.0, 1.0);
+            Some(shape.base + t * h)
+        }
+        _ => None,
+    }
+}
+
 /// Doors and gates are thresholds you can walk through; everything else that
 /// is a bar across a hex edge is a wall.
 fn passable(style: model::Style) -> bool {
@@ -123,17 +199,16 @@ pub fn blocked(pieces: &[Piece]) -> (HashSet<Edge>, HashSet<Hex>) {
                 }
             }
             model::Geometry::Rect { .. } if shape.id == "block" => {
-                let onto = ramps_onto(here, shape.top(), pieces);
-                if onto.is_empty() {
-                    // Nothing to climb; the block fills its cell.
-                    hexes.insert(here);
-                } else {
-                    // Its top is reachable, but only from the ramp that leads
-                    // onto it. Every other side is a one-way drop off.
-                    for (to, _) in around(here) {
-                        if !onto.contains(&to) {
-                            edges.insert((to, here));
-                        }
+                // The top is a walkable cell, but only entered from a ramp
+                // that reaches it or from an equal-height block beside it.
+                // Every other side is a wall; leaving over any side is a
+                // drop, which is why only entries are barred. Keeping the
+                // cell out of `hexes` also lets a route start on a block
+                // that has no way up.
+                let onto = entries_onto(here, shape.top(), pieces);
+                for (to, _) in around(here) {
+                    if !onto.contains(&to) {
+                        edges.insert((to, here));
                     }
                 }
             }
@@ -511,16 +586,20 @@ mod tests {
     }
 
     #[test]
-    fn blocks_fill_cells_but_ramps_do_not() {
+    fn blocks_are_walled_off_but_ramps_are_not() {
         let block = Piece {
             id: 1,
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(1, 0),
             rot: 0.0,
         };
-        let (_, hexes) = blocked(&[block]);
-        assert!(hexes.contains(&(1, 0)));
-        assert_eq!(find_path((0, 0), (1, 0), &HashSet::new(), &hexes), None);
+        let (edges, hexes) = blocked(&[block]);
+        assert!(hexes.is_empty(), "a block top is a walkable cell");
+        assert_eq!(
+            find_path((0, 0), (1, 0), &edges, &hexes),
+            None,
+            "with no ramp there is no way up from the ground"
+        );
 
         let ramp = Piece {
             id: 2,
@@ -547,14 +626,13 @@ mod tests {
             rot: std::f32::consts::PI * 1.5,
         };
 
-        // Alone, the block bars its cell.
-        let (_, hexes) = blocked(&[block]);
-        assert!(hexes.contains(&(2, 0)));
+        // Alone, the block cannot be entered from its sides.
+        let (edges, hexes) = blocked(&[block]);
+        assert_eq!(find_path((0, 0), (2, 0), &edges, &hexes), None);
 
-        // With the ramp facing it at the same height, it does not.
-        let (_, hexes) = blocked(&[block, ramp]);
-        assert!(!hexes.contains(&(2, 0)));
-        assert!(find_path((0, 0), (2, 0), &HashSet::new(), &hexes).is_some());
+        // With the ramp facing it at the same height, it can.
+        let (edges, hexes) = blocked(&[block, ramp]);
+        assert!(find_path((0, 0), (2, 0), &edges, &hexes).is_some());
     }
 
     #[test]
@@ -606,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn a_block_is_only_entered_from_the_ramp_that_reaches_its_top() {
+    fn a_block_is_entered_only_from_its_ramp_or_another_block_top() {
         let ramp = Piece {
             id: 1,
             shape: shape_index("ramp").unwrap(),
@@ -638,6 +716,99 @@ mod tests {
             route[route.len() - 2],
             (1, 0),
             "should come up the ramp, got {route:?}"
+        );
+    }
+
+    #[test]
+    fn a_path_steps_across_adjacent_block_tops() {
+        let ramp = Piece {
+            id: 1,
+            shape: shape_index("ramp").unwrap(),
+            pos: model::hex_center(1, 0),
+            rot: std::f32::consts::PI * 1.5,
+        };
+        let first = Piece {
+            id: 2,
+            shape: shape_index("block").unwrap(),
+            pos: model::hex_center(2, 0),
+            rot: 0.0,
+        };
+        let second = Piece {
+            id: 3,
+            shape: shape_index("block").unwrap(),
+            pos: model::hex_center(2, 1),
+            rot: 0.0,
+        };
+
+        let (edges, hexes) = blocked(&[ramp, first, second]);
+        assert!(
+            !hexes.contains(&(2, 1)),
+            "the second block top should be walkable"
+        );
+        // The whole run: up the ramp, over the first block, onto the next.
+        let route = find_path((0, 0), (2, 1), &edges, &hexes).expect("route over both blocks");
+        assert!(
+            route.contains(&(2, 0)),
+            "the route should cross the first block top: {route:?}"
+        );
+        assert!(
+            find_path((2, 0), (2, 1), &edges, &hexes).is_some(),
+            "should step from the first block top to the next"
+        );
+        assert_eq!(
+            find_path((2, 1), (2, 0), &edges, &hexes),
+            Some(vec![(2, 1), (2, 0)]),
+            "the way back is a single step, not a loop around the ramp"
+        );
+
+        // A pair of blocks with no ramp is still walled off from the ground.
+        let (edges, hexes) = blocked(&[first, second]);
+        assert_eq!(find_path((0, 0), (2, 1), &edges, &hexes), None);
+    }
+
+    #[test]
+    fn a_point_on_a_block_corner_uses_the_block_cell() {
+        let block = Piece {
+            id: 1,
+            shape: shape_index("block").unwrap(),
+            pos: model::hex_center(2, 1),
+            rot: 0.0,
+        };
+        // The square corner pokes into the next hex.
+        let corner = model::hex_center(2, 1) + Vec2::new(0.9, -0.9);
+        assert_eq!(
+            model::pixel_to_hex(corner),
+            (3, 0),
+            "rounding alone names the empty cell next door"
+        );
+        assert_eq!(cell_under(&[block], corner, 0.9), Some((2, 1)));
+        assert_eq!(
+            cell_under(&[block], corner, 0.0),
+            None,
+            "a walker on the ground does not snap up to the block"
+        );
+
+        // Planning home from that corner stays on the block and steps back.
+        let ramp = Piece {
+            id: 2,
+            shape: shape_index("ramp").unwrap(),
+            pos: model::hex_center(1, 0),
+            rot: std::f32::consts::PI * 1.5,
+        };
+        let home = Piece {
+            id: 3,
+            shape: shape_index("block").unwrap(),
+            pos: model::hex_center(2, 0),
+            rot: 0.0,
+        };
+        let pieces = [ramp, home, block];
+        let (edges, hexes) = blocked(&pieces);
+        let start = cell_under(&pieces, corner, 0.9).expect("standing on the block");
+        let goal = cell_under(&pieces, model::hex_center(2, 0), 0.9).expect("click the old block");
+        assert_eq!(
+            find_path(start, goal, &edges, &hexes),
+            Some(vec![(2, 1), (2, 0)]),
+            "a corner stop should still step straight back"
         );
     }
 
