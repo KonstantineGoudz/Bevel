@@ -336,6 +336,53 @@ fn simplify(points: Vec<Vec2>) -> Vec<Vec2> {
     out
 }
 
+/// Simplify near-collinear interior points while keeping every anchor. The
+/// returned indices are the anchors' positions in the new polyline, in the
+/// same order as the input anchors (duplicates allowed).
+fn simplify_anchored(points: Vec<Vec2>, anchors: &[usize]) -> (Vec<Vec2>, Vec<usize>) {
+    if points.len() < 3 {
+        return (points, anchors.to_vec());
+    }
+
+    let anchored: std::collections::HashSet<usize> = anchors.iter().copied().collect();
+    let mut out = vec![points[0]];
+    let mut kept = vec![0usize];
+    for i in 1..points.len() - 1 {
+        let a = *out.last().unwrap();
+        let b = points[i];
+        let c = points[i + 1];
+        let before = (b - a).normalize_or_zero();
+        let after = (c - b).normalize_or_zero();
+        if anchored.contains(&i) || before.dot(after) < 0.995 {
+            out.push(b);
+            kept.push(i);
+        }
+    }
+    out.push(*points.last().unwrap());
+    kept.push(points.len() - 1);
+
+    let remapped = anchors
+        .iter()
+        .map(|anchor| {
+            kept.iter()
+                .position(|old| old == anchor)
+                .unwrap_or_else(|| {
+                    kept.iter()
+                        .position(|old| old >= anchor)
+                        .unwrap_or(kept.len() - 1)
+                })
+        })
+        .collect();
+
+    (out, remapped)
+}
+
+/// Clamp a manual Bezier handle to twice the span it controls.
+fn clamp_control(anchor: Vec2, other: Vec2, control: Vec2) -> Vec2 {
+    let limit = anchor.distance(other) * 2.0;
+    anchor + (control - anchor).clamp_length_max(limit)
+}
+
 /// A flattened curve with cumulative arc length, so a walker can advance at a
 /// constant speed instead of at a constant Bezier parameter.
 #[derive(Clone, Debug)]
@@ -539,6 +586,7 @@ pub fn plan_route(
     }
 
     let mut points = Vec::new();
+    let mut anchors = Vec::with_capacity(targets.len());
     let mut from = start;
     let mut from_cell = start_cell;
     let mut hexes = 0;
@@ -552,36 +600,42 @@ pub fn plan_route(
         } else {
             points.extend(leg_points.into_iter().skip(1));
         }
+        anchors.push(points.len() - 1);
         from = waypoint.pos;
         from_cell = waypoint.cell;
     }
 
-    let points = simplify(points);
-    let curves = smooth(&points);
+    let (points, anchors) = simplify_anchored(points, &anchors);
+    let mut curves = smooth(&points);
+    for (waypoint, &index) in targets.iter().zip(anchors.iter()) {
+        if let Some(control) = waypoint.outgoing {
+            if let Some(next) = points.get(index + 1).copied() {
+                if let Some(curve) = curves.get_mut(index) {
+                    curve.p1 = clamp_control(points[index], next, control);
+                }
+            }
+        }
+        if let Some(control) = waypoint.incoming {
+            if let Some(previous) = index.checked_sub(1) {
+                if let Some(curve) = curves.get_mut(previous) {
+                    curve.p2 = clamp_control(points[previous], points[index], control);
+                }
+            }
+        }
+    }
     let track = Track::new(sample(&curves, 18));
     let distances = targets
         .iter()
         .map(|waypoint| track.nearest_distance(waypoint.pos))
         .collect();
-    let controls = targets
+    let controls = anchors
         .iter()
-        .map(|waypoint| {
-            let index = points
-                .iter()
-                .enumerate()
-                .min_by(|(_, a), (_, b)| {
-                    a.distance_squared(waypoint.pos)
-                        .total_cmp(&b.distance_squared(waypoint.pos))
-                })
-                .map(|(index, _)| index)
-                .unwrap_or(0);
-            AnchorControls {
-                incoming: index
-                    .checked_sub(1)
-                    .and_then(|previous| curves.get(previous))
-                    .map(|curve| curve.p2),
-                outgoing: curves.get(index).map(|curve| curve.p1),
-            }
+        .map(|&index| AnchorControls {
+            incoming: index
+                .checked_sub(1)
+                .and_then(|previous| curves.get(previous))
+                .map(|curve| curve.p2),
+            outgoing: curves.get(index).map(|curve| curve.p1),
         })
         .collect();
 
@@ -1104,5 +1158,143 @@ mod tests {
         ]);
         assert_eq!(track.nearest_index(Vec2::new(1.9, 0.1)), 1);
         assert_eq!(track.nearest_index(Vec2::new(2.1, 1.8)), 2);
+    }
+
+    #[test]
+    fn manual_controls_replace_only_the_adjacent_segments() {
+        let waypoints = [
+            Waypoint {
+                id: 1,
+                pos: Vec2::new(2.0, 0.0),
+                cell: (1, 0),
+                height: 0.0,
+                incoming: None,
+                outgoing: None,
+            },
+            Waypoint {
+                id: 2,
+                pos: Vec2::new(4.0, 0.0),
+                cell: (2, 0),
+                height: 0.0,
+                incoming: Some(Vec2::new(3.5, 0.4)),
+                outgoing: None,
+            },
+        ];
+        let plan = plan_route(
+            Vec2::ZERO,
+            (0, 0),
+            &waypoints,
+            &HashSet::new(),
+            &HashSet::new(),
+        )
+        .expect("route");
+        let auto = plan_route(
+            Vec2::ZERO,
+            (0, 0),
+            &[
+                Waypoint {
+                    incoming: None,
+                    ..waypoints[0]
+                },
+                Waypoint {
+                    incoming: None,
+                    ..waypoints[1]
+                },
+            ],
+            &HashSet::new(),
+            &HashSet::new(),
+        )
+        .expect("auto route");
+
+        assert_eq!(plan.controls[1].incoming, Some(Vec2::new(3.5, 0.4)));
+        assert!(plan.track.points().len() >= auto.track.points().len());
+        assert!(plan.controls[0].outgoing.is_some());
+    }
+
+    #[test]
+    fn the_last_waypoint_has_no_outgoing_control() {
+        let waypoint = Waypoint {
+            id: 1,
+            pos: Vec2::new(2.0, 0.0),
+            cell: (1, 0),
+            height: 0.0,
+            incoming: None,
+            outgoing: None,
+        };
+        let plan = plan_route(
+            Vec2::ZERO,
+            (0, 0),
+            &[waypoint],
+            &HashSet::new(),
+            &HashSet::new(),
+        )
+        .expect("route");
+        assert!(plan.controls[0].incoming.is_some());
+        assert!(plan.controls[0].outgoing.is_none());
+    }
+
+    #[test]
+    fn a_manual_control_is_clamped_to_twice_the_segment() {
+        let waypoint = Waypoint {
+            id: 1,
+            pos: Vec2::new(2.0, 0.0),
+            cell: (1, 0),
+            height: 0.0,
+            incoming: Some(Vec2::new(100.0, 0.0)),
+            outgoing: None,
+        };
+        let plan = plan_route(
+            Vec2::ZERO,
+            (0, 0),
+            &[waypoint],
+            &HashSet::new(),
+            &HashSet::new(),
+        )
+        .expect("route");
+        let control = plan.controls[0].incoming.expect("incoming");
+        assert!(
+            control.distance(waypoint.pos)
+                <= 2.0 * (waypoint.pos - Vec2::ZERO).length() + 1e-3
+        );
+    }
+
+    #[test]
+    fn a_collinear_waypoint_is_not_simplified_away() {
+        let points = vec![
+            Vec2::ZERO,
+            Vec2::new(2.0, 0.0),
+            Vec2::new(4.0, 0.0),
+        ];
+        let (kept, anchors) = simplify_anchored(points.clone(), &[1]);
+        assert_eq!(kept, points, "the anchored point must stay in the polyline");
+        assert_eq!(anchors, vec![1]);
+
+        let waypoints = [
+            Waypoint {
+                id: 1,
+                pos: Vec2::new(2.0, 0.0),
+                cell: (1, 0),
+                height: 0.0,
+                incoming: None,
+                outgoing: None,
+            },
+            Waypoint {
+                id: 2,
+                pos: Vec2::new(4.0, 0.0),
+                cell: (2, 0),
+                height: 0.0,
+                incoming: None,
+                outgoing: None,
+            },
+        ];
+        let plan = plan_route(
+            Vec2::ZERO,
+            (0, 0),
+            &waypoints,
+            &HashSet::new(),
+            &HashSet::new(),
+        )
+        .expect("route");
+        assert_eq!(plan.controls.len(), 2);
     }
 }
