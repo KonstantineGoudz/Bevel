@@ -2096,6 +2096,33 @@ fn interact(
         return;
     }
 
+    editor.ghost = None;
+
+    // Gizmo handles take priority over selecting whatever is under them.
+    if gizmo_takes_pointer(&editor, touch.tap.is_some()) {
+        if let (Some(screen), Some(ray)) = (cursor.screen, cursor.ray) {
+            if mouse.just_pressed(MouseButton::Left) {
+                if let Some(axis) = gizmo_hit(&editor, camera, &camera_global, screen, ray) {
+                    if let Some(id) = editor.selected {
+                        editor.commit();
+                        editor.gizmo_drag = Some(GizmoDrag { id, axis });
+                        editor.ghost = None;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(drag) = editor.gizmo_drag {
+        if mouse.pressed(MouseButton::Left) {
+            apply_gizmo_drag(&mut editor, drag, cursor.ray);
+        }
+        if mouse.just_released(MouseButton::Left) {
+            editor.gizmo_drag = None;
+        }
+        return;
+    }
+
     if let Some(tool) = editor.tool {
         let shape = &shapes()[tool];
         let raw = Piece {
@@ -2134,32 +2161,6 @@ fn interact(
                 SnapKind::Grid => "placed: grid snap",
                 SnapKind::Free => "placed: free",
             };
-        }
-        return;
-    }
-
-    editor.ghost = None;
-
-    // Gizmo handles take priority over selecting whatever is under them.
-    if editor.tool.is_none() && editor.actor_tool.is_none() && touch.tap.is_none() {
-        if let (Some(screen), Some(ray)) = (cursor.screen, cursor.ray) {
-            if mouse.just_pressed(MouseButton::Left) {
-                if let Some(axis) = gizmo_hit(&editor, camera, &camera_global, screen, ray) {
-                    if let Some(id) = editor.selected {
-                        editor.commit();
-                        editor.gizmo_drag = Some(GizmoDrag { id, axis });
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(drag) = editor.gizmo_drag {
-        if mouse.pressed(MouseButton::Left) {
-            apply_gizmo_drag(&mut editor, drag, cursor.ray);
-        }
-        if mouse.just_released(MouseButton::Left) {
-            editor.gizmo_drag = None;
         }
         return;
     }
@@ -4285,6 +4286,13 @@ fn point_segment_distance(p: Vec2, a: Vec2, b: Vec2) -> f32 {
     p.distance(a + ab * t)
 }
 
+/// Select/shape-place modes let a gizmo handle take the pointer. Character,
+/// path and plan modes own the pointer for their own actions; touch taps are
+/// handled by the path gesture layer.
+fn gizmo_takes_pointer(editor: &Editor, touch_tap: bool) -> bool {
+    editor.actor_tool.is_none() && !touch_tap
+}
+
 /// Which gizmo handle is under the pointer, if any.
 fn gizmo_hit(
     editor: &Editor,
@@ -4648,6 +4656,22 @@ mod tests {
                 .iter()
                 .all(|w| w.incoming.is_none() && w.outgoing.is_none())
         );
+    }
+
+    #[test]
+    fn a_gizmo_handle_wins_over_an_armed_shape_tool() {
+        let mut editor = Editor {
+            tool: Some(0),
+            ..Default::default()
+        };
+        assert!(
+            gizmo_takes_pointer(&editor, false),
+            "a gizmo handle must be grabbable while placing shapes"
+        );
+        editor.actor_tool = Some(ActorTool::Place);
+        assert!(!gizmo_takes_pointer(&editor, false));
+        editor.actor_tool = Some(ActorTool::Path);
+        assert!(!gizmo_takes_pointer(&editor, false));
     }
 
     #[test]
