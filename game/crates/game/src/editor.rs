@@ -13,8 +13,9 @@ use avian3d::math::{ToF32Precision, ToRealPrecision};
 use avian3d::prelude::*;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::input::touch::Touches;
-use bevy::picking::events::PointerPress;
-use bevy::picking::pointer::PointerButton;
+use bevy::picking::events::{PointerMove, PointerPress, PointerRelease};
+use bevy::picking::pointer::{PointerButton, PointerId};
+use bevy::picking::Pickable;
 use bevy::prelude::*;
 use bevy::shape::InfinitePlane3d;
 use bevy::ui_widgets::{Activate, Button};
@@ -249,6 +250,10 @@ struct TouchState {
     last_action: Option<(TouchAction, f64)>,
     /// Tap captured by the full-screen picking layer (correct coordinate space).
     pending_tap: Option<Vec2>,
+    /// Pointer holding the stick, in the picking/UI coordinate space. Using the
+    /// pointer position instead of raw touch coordinates keeps the stick lined
+    /// up with the drawn pad at any DPR or UiScale.
+    stick_pointer: Option<PointerId>,
     tracks: HashMap<u64, TouchTrack>,
     two_finger: Option<(Vec2, f32)>,
     /// UI scale on this display: 1 / window scale factor.
@@ -793,6 +798,9 @@ fn spawn_touch_ui(commands: &mut Commands) {
     // Thumbstick.
     let base = commands
         .spawn((
+            // Let the canvas behind receive the drag; the visual pad is a
+            // drawing, not an input target.
+            Pickable::IGNORE,
             Node {
                 position_type: PositionType::Absolute,
                 left: px(STICK_MARGIN),
@@ -810,6 +818,7 @@ fn spawn_touch_ui(commands: &mut Commands) {
     let knob = commands
         .spawn((
             TouchKnob,
+            Pickable::IGNORE,
             Node {
                 position_type: PositionType::Absolute,
                 left: px((STICK_BASE - STICK_KNOB) * 0.5),
@@ -873,7 +882,11 @@ fn spawn_touch_ui(commands: &mut Commands) {
             BackgroundColor(Color::NONE),
         ))
         .id();
-    commands.entity(canvas).observe(on_canvas_press);
+    commands
+        .entity(canvas)
+        .observe(on_canvas_press)
+        .observe(on_canvas_move)
+        .observe(on_canvas_release);
 
     commands
         .entity(root)
@@ -1362,10 +1375,13 @@ fn character_move(
     if orbit.mode == ViewMode::First {
         character.yaw = orbit.yaw;
     } else if direction != Vec2::ZERO {
-        // Face the way the pad points, and keep the orbit centred on the pill
-        // as it walks, so third person follows like the scripted walk.
+        // Face the way the pad points. Third person follows the pill so it
+        // stays in frame; top down keeps the camera put, so the pill visibly
+        // moves across the map instead of the grid appearing to stand still.
         character.yaw = (-direction.x).atan2(-direction.y);
-        orbit.target = Vec3::new(character.pos.x, 0.0, character.pos.y);
+        if orbit.mode == ViewMode::Third {
+            orbit.target = Vec3::new(character.pos.x, 0.0, character.pos.y);
+        }
     }
 
     // A short ray straight down is a much steadier support test than a capsule
@@ -2415,10 +2431,7 @@ fn touch_input(
 
     let size = window.size();
     let s = state.ui_scale;
-    let centre = Vec2::new(
-        (STICK_MARGIN + STICK_BASE * 0.5) * s,
-        size.y - (STICK_MARGIN + STICK_BASE * 0.5) * s,
-    );
+    let centre = stick_centre(size, s);
     let now = time.elapsed_secs_f64();
 
     // Presses are handled separately: on a slow frame the press and release can
@@ -2427,8 +2440,10 @@ fn touch_input(
         let id = touch.id();
         let pos = touch.position() / window.scale_factor();
         // The stick sits inside the bottom-left control zone, so decide the
-        // stick first: a press on the pad is a grip, not a camera gesture.
-        let stick = grabs_stick(pos, centre, STICK_REACH * s);
+        // stick first: a press on the pad is a grip, not a camera gesture. The
+        // grab radius is deliberately larger than the drawn pad so DPR and
+        // UiScale rounding cannot put the thumb just outside it.
+        let stick = grabs_stick(pos, centre, STICK_REACH * s * 1.7);
         let control = !stick && over_controls(pos, size, s);
         state.tracks.insert(
             id,
@@ -2451,7 +2466,9 @@ fn touch_input(
             let delta = pos - track.last;
             track.last = pos;
             if track.stick {
-                state.stick = stick_offset(pos, centre, s);
+                if state.stick_pointer.is_none() {
+                    state.stick = stick_offset(pos, centre, s);
+                }
             } else if !track.control {
                 state.look += delta;
             }
@@ -2466,7 +2483,9 @@ fn touch_input(
 
         if let Some(track) = track {
             if track.stick {
-                state.stick = Vec2::ZERO;
+                if state.stick_pointer.is_none() {
+                    state.stick = Vec2::ZERO;
+                }
                 continue;
             }
         }
@@ -2481,10 +2500,23 @@ fn touch_input(
 
     for touch in touches.iter_just_canceled() {
         if let Some(track) = state.tracks.remove(&touch.id()) {
-            if track.stick {
+            if track.stick && state.stick_pointer.is_none() {
                 state.stick = Vec2::ZERO;
             }
         }
+    }
+
+    // A picked stick drives itself from pointer events in the UI space; raw
+    // touch deltas must not also rotate the camera from the same finger.
+    if state.stick_pointer.is_some() {
+        state.look = Vec2::ZERO;
+        state.pan = Vec2::ZERO;
+        state.zoom = 0.0;
+    }
+    if touches.iter().next().is_none() && state.stick_pointer != Some(PointerId::Mouse) {
+        // Release can be missed if the pointer leaves the canvas.
+        state.stick_pointer = None;
+        state.stick = Vec2::ZERO;
     }
 
     // CDP touch emulation (and some browsers) deliver taps as mouse clicks.
@@ -2701,12 +2733,51 @@ fn run_touch_action(
     }
 }
 
-fn on_canvas_press(event: On<PointerPress>, mut touch: ResMut<TouchState>) {
+/// Centre of the stick pad in the picking/UI coordinate space.
+fn stick_centre(size: Vec2, scale: f32) -> Vec2 {
+    Vec2::new(
+        (STICK_MARGIN + STICK_BASE * 0.5) * scale,
+        size.y - (STICK_MARGIN + STICK_BASE * 0.5) * scale,
+    )
+}
+
+fn on_canvas_press(
+    event: On<PointerPress>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    mut touch: ResMut<TouchState>,
+) {
     if event.button != PointerButton::Primary {
         return;
     }
-    let location = event.pointer.location();
-    touch.pending_tap = Some(location.position);
+    let pos = event.pointer.position;
+    let centre = stick_centre(window.size(), touch.ui_scale);
+    if grabs_stick(pos, centre, STICK_REACH * touch.ui_scale * 1.7) {
+        touch.stick_pointer = Some(event.pointer.id);
+        touch.stick = stick_offset(pos, centre, touch.ui_scale);
+        touch.tap = None;
+        touch.pending_tap = None;
+        return;
+    }
+    touch.pending_tap = Some(pos);
+}
+
+fn on_canvas_move(
+    event: On<PointerMove>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    mut touch: ResMut<TouchState>,
+) {
+    if touch.stick_pointer != Some(event.pointer.id) {
+        return;
+    }
+    let centre = stick_centre(window.size(), touch.ui_scale);
+    touch.stick = stick_offset(event.pointer.position, centre, touch.ui_scale);
+}
+
+fn on_canvas_release(event: On<PointerRelease>, mut touch: ResMut<TouchState>) {
+    if touch.stick_pointer == Some(event.pointer.id) {
+        touch.stick_pointer = None;
+        touch.stick = Vec2::ZERO;
+    }
 }
 
 fn on_touch_button(
