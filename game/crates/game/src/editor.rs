@@ -109,6 +109,7 @@ impl Plugin for EditorPlugin {
                     interact,
                     sync_visuals,
                     update_palette,
+                    sync_path_actions,
                     update_touch_buttons,
                     update_status,
                     update_touch_status,
@@ -183,6 +184,7 @@ impl Default for Editor {
 enum ActorTool {
     Place,
     Path,
+    Plan,
 }
 
 #[derive(Clone, Copy)]
@@ -403,11 +405,18 @@ struct Nav {
 #[derive(Component)]
 struct PaletteButton(PaletteAction);
 
+/// Desktop Walk/Smooth row, shown only while Plan mode is active.
+#[derive(Component)]
+struct PathActions;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PaletteAction {
     Shape(usize),
     Character,
     Path,
+    Plan,
+    Walk,
+    Smooth,
     Course,
 }
 
@@ -658,10 +667,30 @@ fn setup(
     let actor_buttons = [
         palette_compact_button(&mut commands, PaletteAction::Character, "Char"),
         palette_compact_button(&mut commands, PaletteAction::Path, "Path"),
+        palette_compact_button(&mut commands, PaletteAction::Plan, "Plan"),
         palette_compact_button(&mut commands, PaletteAction::Course, "Course"),
     ];
     commands.entity(actor_row).add_children(&actor_buttons);
     children.push(actor_row);
+
+    let path_actions = commands
+        .spawn((
+            PathActions,
+            Node {
+                width: percent(100),
+                flex_direction: FlexDirection::Row,
+                column_gap: px(4),
+                display: Display::None,
+                ..default()
+            },
+        ))
+        .id();
+    let path_buttons = [
+        palette_compact_button(&mut commands, PaletteAction::Walk, "Walk"),
+        palette_compact_button(&mut commands, PaletteAction::Smooth, "Smooth"),
+    ];
+    commands.entity(path_actions).add_children(&path_buttons);
+    children.push(path_actions);
 
     commands.entity(panel).add_children(&children);
 
@@ -1759,10 +1788,18 @@ fn on_palette_activate(
     time: Res<Time>,
     mut editor: ResMut<Editor>,
     mut orbit: ResMut<Orbit>,
+    nav: Res<Nav>,
+    spatial_query: SpatialQuery,
+    player: Query<Entity, With<CharacterVisual>>,
 ) {
     let Ok(button) = buttons.get(event.entity) else {
         return;
     };
+    let filter = player
+        .iter()
+        .next()
+        .map(|entity| SpatialQueryFilter::from_excluded_entities([entity]))
+        .unwrap_or_default();
     let now = time.elapsed_secs_f64();
     if let Some((last, at)) = editor.last_palette {
         if last == button.0 && now - at < 0.25 {
@@ -1794,6 +1831,40 @@ fn on_palette_activate(
                 Some(ActorTool::Path)
             };
             editor.tool = None;
+        }
+        PaletteAction::Plan => {
+            let entering = editor.actor_tool != Some(ActorTool::Plan);
+            editor.actor_tool = if entering {
+                Some(ActorTool::Plan)
+            } else {
+                None
+            };
+            editor.tool = None;
+            if entering {
+                orbit.mode = ViewMode::Top;
+                orbit.pitch = 1.4;
+                orbit.distance = 13.0;
+                focus(&mut orbit, editor.character);
+            }
+        }
+        PaletteAction::Walk => {
+            if editor.actor_tool == Some(ActorTool::Plan)
+                && walk_enabled(editor.plan.as_ref(), editor.route.as_ref(), editor.walk.is_some())
+                && rebuild_route(&mut editor, &nav, &spatial_query, &filter, false)
+            {
+                editor.walk = Some(Walk {
+                    distance: 0.0,
+                    stuck: 0.0,
+                });
+                editor.note = "walking";
+            }
+        }
+        PaletteAction::Smooth => {
+            if editor.actor_tool == Some(ActorTool::Plan)
+                && smooth_plan(&mut editor, &nav, &spatial_query, &filter)
+            {
+                editor.note = "smoothed";
+            }
         }
         PaletteAction::Course => {
             editor.load_course();
@@ -1877,9 +1948,26 @@ fn interact(
         editor.selected = None;
         editor.ghost = None;
         editor.drag = None;
+        editor.plan = None;
         editor.route = None;
         editor.walk = None;
         editor.note = "Click a component, then the grid";
+    }
+
+    if keys.just_pressed(KeyCode::Enter)
+        && editor.actor_tool == Some(ActorTool::Plan)
+        && walk_enabled(
+            editor.plan.as_ref(),
+            editor.route.as_ref(),
+            editor.walk.is_some(),
+        )
+        && rebuild_route(&mut editor, &nav, &spatial_query, &surface_filter, false)
+    {
+        editor.walk = Some(Walk {
+            distance: 0.0,
+            stuck: 0.0,
+        });
+        editor.note = "walking";
     }
 
     if keys.just_pressed(KeyCode::KeyC) {
@@ -2037,6 +2125,38 @@ fn interact(
             );
             // A tap here is a waypoint, never a selection: drop any stale
             // highlight left over from placing the block.
+            editor.selected = None;
+            editor.drag = None;
+        }
+        return;
+    }
+
+    if editor.actor_tool == Some(ActorTool::Plan) {
+        if orbit.mode != ViewMode::Top {
+            if clicked {
+                editor.note = "plan editing is top-down";
+            }
+            return;
+        }
+        if clicked {
+            let (target, height) =
+                surface_target(&cursor, &spatial_query, &surface_filter, world);
+            let cell = resolve_cell(&editor.pieces, target, height);
+            let shift =
+                keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+            let append = append_for(shift, touch.append);
+            let start_walk = click_starts_walk(true, editor.walk.is_some());
+            add_waypoint(
+                &mut editor,
+                target,
+                cell,
+                height,
+                append,
+                start_walk,
+                &nav,
+                &spatial_query,
+                &surface_filter,
+            );
             editor.selected = None;
             editor.drag = None;
         }
@@ -2286,6 +2406,31 @@ fn rebuild_start(live: bool, route: Option<&Route>, walk: Option<&Walk>, charact
 /// Keep the old plan unless the new one built successfully.
 fn choose_plan(old: Option<Plan>, new: Option<Plan>, ok: bool) -> Option<Plan> {
     if ok { new } else { old }
+}
+
+/// Walk is available only for a stopped, non-empty, reachable plan.
+fn walk_enabled(plan: Option<&Plan>, route: Option<&Route>, walking: bool) -> bool {
+    plan.is_some_and(|plan| !plan.is_empty())
+        && route.is_some_and(|route| route.valid)
+        && !walking
+}
+
+/// Return the plan's curve handles to the automatic tangents and rebuild.
+fn smooth_plan(
+    editor: &mut Editor,
+    nav: &Nav,
+    spatial_query: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+) -> bool {
+    let Some(plan) = editor.plan.as_mut() else {
+        return false;
+    };
+    for waypoint in &mut plan.waypoints {
+        waypoint.incoming = None;
+        waypoint.outgoing = None;
+    }
+    let live = editor.walk.is_some();
+    rebuild_route(editor, nav, spatial_query, filter, live)
 }
 
 /// Rebuild the route geometry from the current plan. `live` keeps the walked
@@ -2869,6 +3014,7 @@ fn update_touch_status(
     let height = editor.character.map(|c| c.feet).unwrap_or(0.0);
     let tool = match editor.actor_tool {
         Some(ActorTool::Path) => "path",
+        Some(ActorTool::Plan) => "plan",
         Some(ActorTool::Place) => "char",
         None => editor
             .tool
@@ -3059,10 +3205,34 @@ fn update_palette(
             PaletteAction::Shape(index) => editor.tool == Some(index),
             PaletteAction::Character => editor.actor_tool == Some(ActorTool::Place),
             PaletteAction::Path => editor.actor_tool == Some(ActorTool::Path),
+            PaletteAction::Plan => editor.actor_tool == Some(ActorTool::Plan),
+            PaletteAction::Walk => {
+                editor.actor_tool == Some(ActorTool::Plan)
+                    && walk_enabled(
+                        editor.plan.as_ref(),
+                        editor.route.as_ref(),
+                        editor.walk.is_some(),
+                    )
+            }
+            PaletteAction::Smooth => {
+                editor.actor_tool == Some(ActorTool::Plan)
+                    && editor.plan.as_ref().is_some_and(|plan| !plan.is_empty())
+            }
             PaletteAction::Course => false,
         };
         bg.0 = if on { BUTTON_ON } else { BUTTON_BG };
         *border = BorderColor::all(if on { BORDER_ON } else { BORDER });
+    }
+}
+
+fn sync_path_actions(editor: Res<Editor>, mut row: Single<&mut Node, With<PathActions>>) {
+    let display = if editor.actor_tool == Some(ActorTool::Plan) {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    if row.display != display {
+        row.display = display;
     }
 }
 
@@ -3094,8 +3264,28 @@ fn update_status(
     let tool = match editor.actor_tool {
         Some(ActorTool::Place) => "character",
         Some(ActorTool::Path) => "path",
+        Some(ActorTool::Plan) => "plan",
         None => tool,
     };
+
+    let plan = editor
+        .plan
+        .as_ref()
+        .map(|plan| {
+            format!(
+                "   |   plan {}wp sel {} {}",
+                plan.waypoints.len(),
+                plan.selected
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                if editor.walk.is_some() {
+                    "walking"
+                } else {
+                    "stopped"
+                }
+            )
+        })
+        .unwrap_or_default();
 
     let selection = editor
         .selected
@@ -3113,15 +3303,17 @@ fn update_status(
         .unwrap_or("none");
 
     text.0 = format!(
-        "{}   |   {} placed   |   tool: {}   |   view: {}{}   |   selected: {}   |   snap {}   |   {:.0} m   |   {}",
+        "{}   |   {} placed   |   tool: {}   |   view: {}{}{}   |   selected: {}   |   snap {}   |   {:.0} m   |   {}",
         hex,
         editor.pieces.len(),
         tool,
         orbit.mode.label(),
         match editor.route.as_ref() {
-            Some(route) => format!(" (route {} hexes)", route.hexes),
+            Some(route) if route.valid => format!(" (route {} hexes)", route.hexes),
+            Some(_) => " (route invalid)".to_string(),
             None => String::new(),
         },
+        plan,
         selection,
         snap,
         orbit.distance,
@@ -3589,6 +3781,43 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    fn test_route(valid: bool) -> Route {
+        Route {
+            track: path::Track::new(vec![Vec2::ZERO, Vec2::X]),
+            line: Vec::new(),
+            distances: vec![1.0],
+            controls: vec![path::AnchorControls {
+                incoming: None,
+                outgoing: None,
+            }],
+            valid,
+            hexes: 2,
+        }
+    }
+
+    #[test]
+    fn walk_is_enabled_only_for_a_stopped_valid_plan() {
+        let mut plan = Plan::default();
+        plan.replace(Vec2::ZERO, (0, 0), 0.0);
+        let empty = Plan::default();
+        assert!(walk_enabled(Some(&plan), Some(&test_route(true)), false));
+        assert!(!walk_enabled(Some(&plan), Some(&test_route(true)), true));
+        assert!(!walk_enabled(Some(&plan), Some(&test_route(false)), false));
+        assert!(!walk_enabled(Some(&empty), Some(&test_route(true)), false));
+        assert!(!walk_enabled(None, None, false));
+    }
+
+    #[test]
+    fn leaving_plan_keeps_the_plan() {
+        let mut editor = Editor::default();
+        let mut plan = Plan::default();
+        plan.replace(Vec2::ZERO, (0, 0), 0.0);
+        editor.plan = Some(plan);
+        editor.actor_tool = Some(ActorTool::Plan);
+        editor.actor_tool = Some(ActorTool::Path);
+        assert_eq!(editor.plan.as_ref().map(|p| p.waypoints.len()), Some(1));
     }
 
     #[test]
