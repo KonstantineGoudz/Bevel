@@ -765,7 +765,7 @@ fn setup(
     let hint_text = commands
         .spawn((
             Text::new(
-                "LMB place / drag  |  RMB orbit / look  |  MMB pan  |  wheel zoom  |  V view  |  WASD move  |  C character  |  R rotate  |  S save",
+                "LMB place / drag  |  Shift+click add waypoint  |  Enter walk  |  drag waypoints / curve handles  |  RMB orbit  |  MMB pan  |  wheel zoom  |  V view  |  C character  |  R rotate  |  S save",
             ),
             TextFont { font_size: FontSize::Px(11.0), ..default() },
             TextColor(Color::srgb_u8(0x6b, 0x7d, 0x93)),
@@ -1851,6 +1851,7 @@ fn update_cursor(
 // Input
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn on_palette_activate(
     event: On<Activate>,
     buttons: Query<&PaletteButton>,
@@ -1991,6 +1992,7 @@ fn refresh_route(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn interact(
     mut editor: ResMut<Editor>,
     mut orbit: ResMut<Orbit>,
@@ -2584,6 +2586,7 @@ fn path_handle_at(
 
 /// Apply one pointer update to a handle. The tangent branch is added by the
 /// curve task.
+#[allow(clippy::too_many_arguments)]
 fn apply_path_drag(
     editor: &mut Editor,
     drag: PathDrag,
@@ -2709,6 +2712,7 @@ fn set_tangent(
 }
 
 /// Move one waypoint and rebuild, restoring the old plan on failure.
+#[allow(clippy::too_many_arguments)]
 fn set_waypoint(
     editor: &mut Editor,
     id: u32,
@@ -2909,6 +2913,7 @@ fn rebuild_route(
 
 /// Add or replace a waypoint and rebuild. On failure the previous plan, route
 /// and walk are restored unchanged.
+#[allow(clippy::too_many_arguments)]
 fn add_waypoint(
     editor: &mut Editor,
     target: Vec2,
@@ -3665,6 +3670,7 @@ fn on_canvas_release(event: On<PointerRelease>, mut touch: ResMut<TouchState>) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn on_path_press(
     event: On<PointerPress>,
     window: Single<&Window, With<PrimaryWindow>>,
@@ -3795,6 +3801,7 @@ fn path_drag(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn on_touch_button(
     event: On<Activate>,
     buttons: Query<&TouchButton>,
@@ -4520,8 +4527,10 @@ mod tests {
 
     #[test]
     fn touch_suppress_blocks_a_tap_after_a_button() {
-        let mut touch = TouchState::default();
-        touch.suppress_until = 2.0;
+        let touch = TouchState {
+            suppress_until: 2.0,
+            ..Default::default()
+        };
         assert!(!tap_allowed(1.9, &touch));
         assert!(tap_allowed(2.1, &touch));
     }
