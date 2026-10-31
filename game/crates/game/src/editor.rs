@@ -1459,7 +1459,12 @@ fn camera_control(
     mut wheel: MessageReader<MouseWheel>,
     window: Single<&Window, With<PrimaryWindow>>,
 ) {
-    let delta: Vec2 = motion.read().map(|m| m.delta).sum();
+    // Touch browsers also synthesize mouse motion for a finger drag. While a
+    // finger is down, that synthesized motion must not also steer the camera:
+    // dragging the stick should move the character only.
+    let raw_delta: Vec2 = motion.read().map(|m| m.delta).sum();
+    let touching = touch.enabled && (touch.stick_pointer.is_some() || !touch.tracks.is_empty());
+    let delta = if touching { Vec2::ZERO } else { raw_delta };
     // Browsers report wheel deltas in pixels (often +-100), while some
     // platforms report whole lines. Normalise the big values to lines.
     let raw_scroll: f32 = wheel.read().map(|w| w.y).sum();
