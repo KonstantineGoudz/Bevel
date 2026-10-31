@@ -2014,7 +2014,21 @@ fn interact(
     }
 
     if keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::Backspace) {
-        delete_piece(&mut editor);
+        let waypoint_selected = editor.actor_tool == Some(ActorTool::Plan)
+            && editor
+                .plan
+                .as_ref()
+                .is_some_and(|plan| plan.selected.is_some());
+        if waypoint_selected {
+            delete_waypoint(
+                &mut editor,
+                &nav,
+                &spatial_query,
+                &surface_filter,
+            );
+        } else {
+            delete_piece(&mut editor);
+        }
     }
 
     if keys.just_pressed(KeyCode::KeyZ)
@@ -2445,28 +2459,168 @@ fn tap_allowed(now: f64, touch: &TouchState) -> bool {
     now >= touch.suppress_until
 }
 
-/// Which waypoint/tangent handle is under a screen point. Filled in by the
-/// handle tasks; the gesture layer compiles against the hook.
-fn path_handle_at(
-    _editor: &Editor,
-    _camera: &Camera,
-    _camera_transform: &GlobalTransform,
-    _screen: Vec2,
-    _touch_enabled: bool,
-) -> Option<PathHandle> {
-    None
+fn within_radius(screen: Vec2, target: Vec2, radius: f32) -> bool {
+    screen.distance(target) <= radius
 }
 
-/// Apply one pointer update to a handle. Filled in by the handle tasks.
+/// Which waypoint is under a screen point, if any.
+fn waypoint_hit(
+    editor: &Editor,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    screen: Vec2,
+    radius: f32,
+) -> Option<u32> {
+    let plan = editor.plan.as_ref()?;
+    let mut best: Option<(f32, u32)> = None;
+    for waypoint in &plan.waypoints {
+        let at = Vec3::new(waypoint.pos.x, waypoint.height + 0.06, waypoint.pos.y);
+        let Ok(target) = camera.world_to_viewport(camera_transform, at) else {
+            continue;
+        };
+        if !within_radius(screen, target, radius) {
+            continue;
+        }
+        let distance = screen.distance(target);
+        if best.is_none_or(|(best_distance, _)| distance < best_distance) {
+            best = Some((distance, waypoint.id));
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
+/// Which waypoint/tangent handle is under a screen point. The tangent branch
+/// is added by the curve task.
+fn path_handle_at(
+    editor: &Editor,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    screen: Vec2,
+    touch_enabled: bool,
+    orbit: &Orbit,
+) -> Option<PathHandle> {
+    if editor.actor_tool != Some(ActorTool::Plan) || orbit.mode != ViewMode::Top {
+        return None;
+    }
+    let radius = if touch_enabled { 24.0 } else { 10.0 };
+    waypoint_hit(editor, camera, camera_transform, screen, radius).map(PathHandle::Waypoint)
+}
+
+/// Apply one pointer update to a handle. The tangent branch is added by the
+/// curve task.
 fn apply_path_drag(
-    _editor: &mut Editor,
-    _drag: PathDrag,
-    _screen: Vec2,
-    _nav: &Nav,
-    _spatial_query: &SpatialQuery,
-    _filter: &SpatialQueryFilter,
+    editor: &mut Editor,
+    drag: PathDrag,
+    screen: Vec2,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    nav: &Nav,
+    spatial_query: &SpatialQuery,
+    filter: &SpatialQueryFilter,
 ) -> bool {
-    false
+    let PathHandle::Waypoint(id) = drag.handle else {
+        return false;
+    };
+    let Some(ray) = camera
+        .viewport_to_world(camera_transform, screen)
+        .ok()
+    else {
+        return false;
+    };
+    let hit = spatial_query
+        .cast_ray(ray.origin.real(), ray.direction, 80.0, true, filter)
+        .map(|hit| ray.get_point(hit.distance))
+        .or_else(|| {
+            ray.plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))
+        });
+    let Some(point) = hit else {
+        return false;
+    };
+    let pos = Vec2::new(point.x, point.z);
+    let height = point.y;
+    let cell = resolve_cell(&editor.pieces, pos, height);
+    set_waypoint(
+        editor,
+        id,
+        pos,
+        cell,
+        height,
+        nav,
+        spatial_query,
+        filter,
+    )
+}
+
+/// Move one waypoint and rebuild, restoring the old plan on failure.
+fn set_waypoint(
+    editor: &mut Editor,
+    id: u32,
+    pos: Vec2,
+    cell: path::Hex,
+    height: f32,
+    nav: &Nav,
+    spatial_query: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+) -> bool {
+    let old_plan = editor.plan.clone();
+    let old_route = editor.route.clone();
+    let old_walk = editor.walk;
+    let live = old_walk.is_some();
+
+    {
+        let Some(plan) = editor.plan.as_mut() else {
+            return false;
+        };
+        let Some(waypoint) = plan.get_mut(id) else {
+            return false;
+        };
+        waypoint.pos = pos;
+        waypoint.cell = cell;
+        waypoint.height = height;
+    }
+
+    let ok = rebuild_route(editor, nav, spatial_query, filter, live);
+    if !ok {
+        editor.plan = old_plan;
+        editor.route = old_route;
+        editor.walk = old_walk;
+    }
+    ok
+}
+
+/// Delete the selected waypoint. The last waypoint clears the plan entirely.
+fn delete_waypoint(
+    editor: &mut Editor,
+    nav: &Nav,
+    spatial_query: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+) -> bool {
+    let old_plan = editor.plan.clone();
+    let old_route = editor.route.clone();
+    let old_walk = editor.walk;
+
+    let Some(plan) = editor.plan.as_mut() else {
+        return false;
+    };
+    if !plan.delete_selected() {
+        return false;
+    }
+    if plan.is_empty() {
+        editor.plan = None;
+        editor.route = None;
+        editor.walk = None;
+        editor.note = "plan cleared";
+        return true;
+    }
+
+    let live = old_walk.is_some();
+    let ok = rebuild_route(editor, nav, spatial_query, filter, live);
+    if !ok {
+        editor.plan = old_plan;
+        editor.route = old_route;
+        editor.walk = old_walk;
+    }
+    ok
 }
 
 /// Walk is available only for a stopped, non-empty, reachable plan.
@@ -3212,6 +3366,7 @@ fn on_path_press(
     window: Single<&Window, With<PrimaryWindow>>,
     time: Res<Time>,
     camera: Single<(&Camera, &Transform)>,
+    orbit: Res<Orbit>,
     mut editor: ResMut<Editor>,
     mut gesture: ResMut<PathGesture>,
     mut touch: ResMut<TouchState>,
@@ -3232,7 +3387,7 @@ fn on_path_press(
 
     let (camera, transform) = *camera;
     let global = GlobalTransform::from(*transform);
-    let handle = path_handle_at(&editor, camera, &global, pos, touch.enabled);
+    let handle = path_handle_at(&editor, camera, &global, pos, touch.enabled, &orbit);
     let now = time.elapsed_secs_f64();
     let drag = gesture.0.press(event.pointer.id, pos, now, handle);
     if let Some(drag) = drag {
@@ -3306,6 +3461,7 @@ fn on_path_cancel(
 fn path_drag(
     mut editor: ResMut<Editor>,
     gesture: Res<PathGesture>,
+    camera: Single<(&Camera, &Transform)>,
     nav: Res<Nav>,
     spatial_query: SpatialQuery,
     player: Query<Entity, With<CharacterVisual>>,
@@ -3316,6 +3472,8 @@ fn path_drag(
     let Some(screen) = gesture.0.screen() else {
         return;
     };
+    let (camera, transform) = *camera;
+    let global = GlobalTransform::from(*transform);
     let filter = player
         .iter()
         .next()
@@ -3325,6 +3483,8 @@ fn path_drag(
         &mut editor,
         drag,
         screen,
+        camera,
+        &global,
         &nav,
         &spatial_query,
         &filter,
@@ -3568,6 +3728,25 @@ fn draw(editor: Res<Editor>, cursor: Res<Cursor>, orbit: Res<Orbit>, mut gizmos:
             0.22,
             PATH,
         );
+    }
+
+    if editor.actor_tool == Some(ActorTool::Plan) && orbit.mode == ViewMode::Top {
+        if let Some(plan) = &editor.plan {
+            for waypoint in &plan.waypoints {
+                let at = Vec3::new(waypoint.pos.x, waypoint.height + 0.06, waypoint.pos.y);
+                let colour = if plan.selected == Some(waypoint.id) {
+                    AMBER
+                } else {
+                    PATH
+                };
+                gizmos.circle(
+                    Isometry3d::new(at, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+                    0.16,
+                    colour,
+                );
+                gizmos.sphere(Isometry3d::new(at, Quat::IDENTITY), 0.06, colour);
+            }
+        }
     }
 
     if let Some(character) = editor.character {
@@ -3973,6 +4152,12 @@ mod tests {
         assert!(!walk_enabled(Some(&plan), Some(&test_route(false)), false));
         assert!(!walk_enabled(Some(&empty), Some(&test_route(true)), false));
         assert!(!walk_enabled(None, None, false));
+    }
+
+    #[test]
+    fn a_waypoint_handle_has_a_fingertip_target() {
+        assert!(within_radius(Vec2::ZERO, Vec2::new(20.0, 0.0), 24.0));
+        assert!(!within_radius(Vec2::ZERO, Vec2::new(25.0, 0.0), 24.0));
     }
 
     #[test]
