@@ -29,7 +29,7 @@ use crate::model::{
     shapes,
 };
 use crate::path;
-use crate::path_edit::{self, PathDrag, PathHandle, Plan};
+use crate::path_edit::{self, PathDrag, PathHandle, Plan, TangentSide};
 
 const PANEL_BG: Color = Color::srgb_u8(0x10, 0x16, 0x1e);
 const BUTTON_BG: Color = Color::srgb_u8(0x14, 0x1c, 0x26);
@@ -2489,8 +2489,44 @@ fn waypoint_hit(
     best.map(|(_, id)| id)
 }
 
-/// Which waypoint/tangent handle is under a screen point. The tangent branch
-/// is added by the curve task.
+/// Which tangent control is under a screen point, if any.
+fn tangent_hit(
+    editor: &Editor,
+    route: &Route,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    screen: Vec2,
+    radius: f32,
+) -> Option<(u32, TangentSide)> {
+    let plan = editor.plan.as_ref()?;
+    let mut best: Option<(f32, u32, TangentSide)> = None;
+    for (waypoint, controls) in plan.waypoints.iter().zip(route.controls.iter()) {
+        let height = waypoint.height + 0.06;
+        let handles = [
+            (controls.incoming, TangentSide::Incoming),
+            (controls.outgoing, TangentSide::Outgoing),
+        ];
+        for (control, side) in handles {
+            let Some(control) = control else {
+                continue;
+            };
+            let at = Vec3::new(control.x, height, control.y);
+            let Ok(target) = camera.world_to_viewport(camera_transform, at) else {
+                continue;
+            };
+            if !within_radius(screen, target, radius) {
+                continue;
+            }
+            let distance = screen.distance(target);
+            if best.is_none_or(|(best_distance, _, _)| distance < best_distance) {
+                best = Some((distance, waypoint.id, side));
+            }
+        }
+    }
+    best.map(|(_, waypoint, side)| (waypoint, side))
+}
+
+/// Which waypoint/tangent handle is under a screen point.
 fn path_handle_at(
     editor: &Editor,
     camera: &Camera,
@@ -2503,7 +2539,12 @@ fn path_handle_at(
         return None;
     }
     let radius = if touch_enabled { 24.0 } else { 10.0 };
-    waypoint_hit(editor, camera, camera_transform, screen, radius).map(PathHandle::Waypoint)
+    if let Some(id) = waypoint_hit(editor, camera, camera_transform, screen, radius) {
+        return Some(PathHandle::Waypoint(id));
+    }
+    let route = editor.route.as_ref()?;
+    tangent_hit(editor, route, camera, camera_transform, screen, radius)
+        .map(|(waypoint, side)| PathHandle::Tangent { waypoint, side })
 }
 
 /// Apply one pointer update to a handle. The tangent branch is added by the
@@ -2518,37 +2559,118 @@ fn apply_path_drag(
     spatial_query: &SpatialQuery,
     filter: &SpatialQueryFilter,
 ) -> bool {
-    let PathHandle::Waypoint(id) = drag.handle else {
-        return false;
-    };
     let Some(ray) = camera
         .viewport_to_world(camera_transform, screen)
         .ok()
     else {
         return false;
     };
-    let hit = spatial_query
-        .cast_ray(ray.origin.real(), ray.direction, 80.0, true, filter)
-        .map(|hit| ray.get_point(hit.distance))
-        .or_else(|| {
-            ray.plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))
-        });
-    let Some(point) = hit else {
-        return false;
-    };
-    let pos = Vec2::new(point.x, point.z);
-    let height = point.y;
-    let cell = resolve_cell(&editor.pieces, pos, height);
-    set_waypoint(
-        editor,
-        id,
-        pos,
-        cell,
-        height,
-        nav,
-        spatial_query,
-        filter,
-    )
+
+    match drag.handle {
+        PathHandle::Waypoint(id) => {
+            let hit = spatial_query
+                .cast_ray(ray.origin.real(), ray.direction, 80.0, true, filter)
+                .map(|hit| ray.get_point(hit.distance))
+                .or_else(|| {
+                    ray.plane_intersection_point(
+                        Vec3::ZERO,
+                        InfinitePlane3d::new(Vec3::Y),
+                    )
+                });
+            let Some(point) = hit else {
+                return false;
+            };
+            let pos = Vec2::new(point.x, point.z);
+            let height = point.y;
+            let cell = resolve_cell(&editor.pieces, pos, height);
+            set_waypoint(
+                editor,
+                id,
+                pos,
+                cell,
+                height,
+                nav,
+                spatial_query,
+                filter,
+            )
+        }
+        PathHandle::Tangent { waypoint, side } => {
+            let Some(point) =
+                ray.plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))
+            else {
+                return false;
+            };
+            set_tangent(
+                editor,
+                waypoint,
+                side,
+                Vec2::new(point.x, point.z),
+                nav,
+                spatial_query,
+                filter,
+            )
+        }
+    }
+}
+
+/// Move one tangent control (clamped against its adjacent anchor) and rebuild.
+fn set_tangent(
+    editor: &mut Editor,
+    waypoint_id: u32,
+    side: TangentSide,
+    control: Vec2,
+    nav: &Nav,
+    spatial_query: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+) -> bool {
+    let old_plan = editor.plan.clone();
+    let old_route = editor.route.clone();
+    let old_walk = editor.walk;
+    let character = editor.character;
+    let live = old_walk.is_some();
+
+    {
+        let Some(plan) = editor.plan.as_mut() else {
+            return false;
+        };
+        let Some(waypoint) = plan.get(waypoint_id).copied() else {
+            return false;
+        };
+        let Some(index) = plan
+            .waypoints
+            .iter()
+            .position(|candidate| candidate.id == waypoint_id)
+        else {
+            return false;
+        };
+        let adjacent = match side {
+            TangentSide::Outgoing => plan
+                .waypoints
+                .get(index + 1)
+                .map(|next| next.pos)
+                .unwrap_or(waypoint.pos),
+            TangentSide::Incoming => plan
+                .waypoints
+                .get(index.wrapping_sub(1))
+                .map(|previous| previous.pos)
+                .or_else(|| character.map(|character| character.pos))
+                .unwrap_or(waypoint.pos),
+        };
+        let limit = waypoint.pos.distance(adjacent) * 2.0;
+        let control = waypoint.pos + (control - waypoint.pos).clamp_length_max(limit);
+        match side {
+            TangentSide::Incoming => plan.waypoints[index].incoming = Some(control),
+            TangentSide::Outgoing => plan.waypoints[index].outgoing = Some(control),
+        }
+    }
+
+    let ok = rebuild_route(editor, nav, spatial_query, filter, live);
+    if !ok {
+        editor.plan = old_plan;
+        editor.route = old_route;
+        editor.walk = old_walk;
+    }
+    ok
 }
 
 /// Move one waypoint and rebuild, restoring the old plan on failure.
@@ -2630,6 +2752,20 @@ fn walk_enabled(plan: Option<&Plan>, route: Option<&Route>, walking: bool) -> bo
         && !walking
 }
 
+/// Drop every manual tangent. Returns how many handles were cleared.
+fn clear_tangents(plan: &mut Plan) -> usize {
+    let mut cleared = 0;
+    for waypoint in &mut plan.waypoints {
+        if waypoint.incoming.take().is_some() {
+            cleared += 1;
+        }
+        if waypoint.outgoing.take().is_some() {
+            cleared += 1;
+        }
+    }
+    cleared
+}
+
 /// Return the plan's curve handles to the automatic tangents and rebuild.
 fn smooth_plan(
     editor: &mut Editor,
@@ -2640,10 +2776,7 @@ fn smooth_plan(
     let Some(plan) = editor.plan.as_mut() else {
         return false;
     };
-    for waypoint in &mut plan.waypoints {
-        waypoint.incoming = None;
-        waypoint.outgoing = None;
-    }
+    clear_tangents(plan);
     let live = editor.walk.is_some();
     rebuild_route(editor, nav, spatial_query, filter, live)
 }
@@ -3732,7 +3865,12 @@ fn draw(editor: Res<Editor>, cursor: Res<Cursor>, orbit: Res<Orbit>, mut gizmos:
 
     if editor.actor_tool == Some(ActorTool::Plan) && orbit.mode == ViewMode::Top {
         if let Some(plan) = &editor.plan {
-            for waypoint in &plan.waypoints {
+            let controls = editor
+                .route
+                .as_ref()
+                .map(|route| route.controls.as_slice())
+                .unwrap_or(&[]);
+            for (index, waypoint) in plan.waypoints.iter().enumerate() {
                 let at = Vec3::new(waypoint.pos.x, waypoint.height + 0.06, waypoint.pos.y);
                 let colour = if plan.selected == Some(waypoint.id) {
                     AMBER
@@ -3745,6 +3883,15 @@ fn draw(editor: Res<Editor>, cursor: Res<Cursor>, orbit: Res<Orbit>, mut gizmos:
                     colour,
                 );
                 gizmos.sphere(Isometry3d::new(at, Quat::IDENTITY), 0.06, colour);
+
+                if let Some(controls) = controls.get(index) {
+                    for control in [controls.incoming, controls.outgoing].into_iter().flatten() {
+                        let handle =
+                            Vec3::new(control.x, waypoint.height + 0.06, control.y);
+                        gizmos.line(at, handle, colour);
+                        gizmos.sphere(Isometry3d::new(handle, Quat::IDENTITY), 0.05, colour);
+                    }
+                }
             }
         }
     }
@@ -4152,6 +4299,21 @@ mod tests {
         assert!(!walk_enabled(Some(&plan), Some(&test_route(false)), false));
         assert!(!walk_enabled(Some(&empty), Some(&test_route(true)), false));
         assert!(!walk_enabled(None, None, false));
+    }
+
+    #[test]
+    fn smoothing_clears_manual_tangents() {
+        let mut plan = Plan::default();
+        plan.replace(Vec2::ZERO, (0, 0), 0.0);
+        plan.append(Vec2::new(2.0, 0.0), (1, 0), 0.0);
+        plan.waypoints[0].outgoing = Some(Vec2::new(1.0, 1.0));
+        plan.waypoints[1].incoming = Some(Vec2::new(1.0, 1.0));
+        clear_tangents(&mut plan);
+        assert!(
+            plan.waypoints
+                .iter()
+                .all(|w| w.incoming.is_none() && w.outgoing.is_none())
+        );
     }
 
     #[test]
