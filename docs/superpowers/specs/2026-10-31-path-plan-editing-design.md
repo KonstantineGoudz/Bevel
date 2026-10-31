@@ -132,9 +132,10 @@ route is built. Waypoints are used for:
   passes its arc length.
 
 Clicking a waypoint handle in Plan mode selects it. Dragging moves it and
-re-plans the future route. Delete/Backspace removes the selected waypoint and
-re-plans. The handle hit test is screen-space, like the existing transform
-gizmo, and runs before piece/path hit tests.
+re-plans the future route; the drag resolves the surface under the pointer the
+same way a click does. Tangent drags resolve on the ground plane. Delete removes
+the selected waypoint and re-plans. The handle hit test is screen-space, like
+the existing transform gizmo, and runs before piece/path hit tests.
 
 ## Route construction
 
@@ -262,29 +263,35 @@ working and the path tools get a compact row.
 
 - **Plan** is added to the top toolbar next to Path and Course. Tapping it
   switches to Top view and enters Plan mode.
-- A path row appears below the shape carousel when Plan mode is active, with
-  **Add**, **Walk**, and **Smooth**. In Path mode only **Add** is shown, next to
-  Place. Add is a sticky toggle; it maps to Shift and shows its active state.
+- A path row appears below the shape carousel when Path or Plan mode is active:
+  **Add** in Path mode, and **Add**, **Walk**, **Smooth** in Plan mode. Add is a
+  sticky toggle; it maps to Shift and shows its active state.
 - Walk confirms the plan. Smooth resets manual tangents. Both are disabled in
   the same cases as desktop.
 - The existing Del button deletes the selected waypoint in Plan mode; otherwise
   it deletes the selected piece.
-- Taps on empty world space act as a normal or Add tap according to the toggle.
-  A tap that starts on a waypoint or tangent handle does **not** place a
-  waypoint.
-- Taps are classified on **release**, not on press: one non-control,
-  non-stick finger, short duration, movement below the tap threshold, no handle
-  drag, and no second finger during the gesture. Presses that become drags,
-  pinches or pans never place a waypoint. This replaces the current
-  `pending_tap`-on-press flow, which would turn a second finger into a click.
-- One finger owns a handle drag, tracked by pointer id. While that drag is
-  active, camera look, pan and pinch are suspended for the gesture (they resume
-  when the last finger lifts); the thumbstick and jump are separate controls and
-  keep working. Additional fingers neither steer the camera nor place points.
-  A handle touch that never moves past the tap threshold is a select, not a
-  move.
-- Waypoint selection works the same as desktop: tap a handle to select it, then
-  drag it or press Del.
+- Path gestures use the existing full-screen picking canvas and its pointer
+  events, so positions stay in the same coordinate space as the UI. This covers
+  mouse and touch with one path.
+- `PointerPress` on the canvas: if the press hits a waypoint or tangent handle
+  in Plan/Top, start a handle drag for that pointer, select the waypoint, and
+  mark the gesture as a path drag. Otherwise record it as a tap candidate.
+- A pointer move/drag while a path drag is active updates the handle from the
+  pointer's world ray. Pointer release ends the drag. A drag that never moved
+  past the tap threshold is a select, not a move.
+- A tap is emitted on **release**, not on press, and only when the whole
+  gesture was one pointer, started and ended on the canvas (not a UI button),
+  stayed under the movement threshold and tap duration, had no second pointer,
+  and was not a handle drag. This replaces the current `pending_tap`-on-press
+  flow, which would turn a second finger into a click and could place a point
+  during a pinch.
+- While a path drag is active, `TouchState` suppresses one-finger look and
+  two-finger pan/pinch for the whole gesture; they resume when the pointers
+  lift. The thumbstick and jump are separate controls and keep working.
+  Additional fingers neither steer the camera nor place points.
+- Taps on empty world space act as a normal or Add tap according to the sticky
+  toggle. Waypoint and tangent handles get a generous touch hit radius (at
+  least ~24 logical pixels) so they are reachable with a fingertip.
 - Plan authoring and handle drags are still Top-view only. Switching away keeps
   the plan and walk but hides handle interaction, same as desktop.
 - The touch status line includes Add on/off, Plan/Path, waypoint count, and
@@ -316,15 +323,17 @@ working and the path tools get a compact row.
   - `load_course` clears plan state.
   - `update_palette`, `update_status`, hint text and disabled states.
   - Touch: `TouchAction::{Plan, Add, Walk, Smooth}`; `TouchState` gains the
-    sticky `append` flag, the active drag pointer id, per-pointer positions, and
-    the active handle-drag target. `on_touch_button`/`run_touch_action` handle
-    the new buttons, and the touch layer draws them in the toolbar/path row.
-  - Finish the release-classified tap the current `touch_input` stubs out
-    (`quick` is computed then discarded): emit `tap` only for a single-finger,
-    short, stationary gesture with no handle drag or second finger. Use that for
-    both waypoint placement and handle selection.
-  - `touch_input` and `camera_control` cooperate so an active handle drag
-    suspends look/pan/pinch for the gesture; the stick and jump stay independent.
+    sticky `append` flag, a `path_drag` (pointer id, handle target, last
+    position) and a drag-active flag. `on_touch_button`/`run_touch_action`
+    handle the new buttons, and the touch layer draws them in the toolbar/path
+    row.
+  - Extend the picking-canvas observers: press starts a handle drag or records
+    a tap candidate; move updates the drag; release ends the drag or emits the
+    tap. This replaces `on_canvas_press` setting `pending_tap` and the stubbed
+    release logic in `touch_input` (`quick` is computed then discarded).
+  - `touch_input` no longer promotes a press into a tap. `camera_control` skips
+    look/pan/pinch while a path drag is active; the stick and jump stay
+    independent.
 - `save`/`level_json` unchanged.
 
 ## Testing
@@ -368,8 +377,9 @@ Manual verification:
   teleports and the route stays continuous.
 - Repeat the same flow on a phone or touch emulation: Plan, Add on, tap the
   waypoints, Walk, Add+tap mid-walk, drag a waypoint and a tangent handle, then
-  Smooth. Confirm the camera does not spin while dragging, pinch/pan still work,
-  and tapping a handle selects instead of adding a point.
+  Smooth. Confirm the camera does not spin while dragging, pinch/pan work again
+  after the handle is released, and tapping a handle selects instead of adding a
+  point.
 
 ## Build order
 
@@ -423,6 +433,8 @@ These are the designer's calls for the touch layer:
    can never place a waypoint.
 7. Path-mode append works in Top and Third (where routing already works);
    handle editing is Top-only.
+8. Path gestures use the picking canvas's pointer events for both mouse and
+   touch, and a drag-active flag suspends camera look/pan/pinch for that gesture.
 
 ## Risks
 

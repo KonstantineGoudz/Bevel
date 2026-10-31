@@ -365,6 +365,16 @@ impl Track {
         self.lengths.last().copied().unwrap_or(0.0)
     }
 
+    /// Index of the sample closest to `point`, or 0 for an empty track.
+    pub fn nearest_index(&self, point: Vec2) -> usize {
+        self.points
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.distance_squared(point).total_cmp(&b.distance_squared(point)))
+            .map(|(index, _)| index)
+            .unwrap_or(0)
+    }
+
     /// Arc length of the point on the track closest to `point`.
     pub fn nearest_distance(&self, point: Vec2) -> f32 {
         let mut best = (f32::MAX, 0.0);
@@ -426,6 +436,36 @@ impl Track {
     }
 }
 
+/// One point the user asked the route to pass through.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Waypoint {
+    pub id: u32,
+    pub pos: Vec2,
+    pub cell: Hex,
+    /// Surface height used by the editor for drawing; the planner ignores it.
+    pub height: f32,
+    pub incoming: Option<Vec2>,
+    pub outgoing: Option<Vec2>,
+}
+
+/// The curve handles drawn at one waypoint.
+#[derive(Clone, Copy, Debug)]
+pub struct AnchorControls {
+    pub incoming: Option<Vec2>,
+    pub outgoing: Option<Vec2>,
+}
+
+/// A planned multi-leg route, ready to walk and draw.
+#[derive(Clone, Debug)]
+pub struct RoutePlan {
+    pub track: Track,
+    /// Arc length of each waypoint along `track`.
+    pub distances: Vec<f32>,
+    /// Curve handles aligned with the waypoints.
+    pub controls: Vec<AnchorControls>,
+    pub hexes: usize,
+}
+
 /// One cubic Bezier segment.
 #[derive(Clone, Copy, Debug)]
 pub struct Cubic {
@@ -481,6 +521,77 @@ pub fn sample(curves: &[Cubic], per_segment: usize) -> Vec<Vec2> {
         out.push(last.p3);
     }
     out
+}
+
+/// Plan one route through `waypoints` in order, starting at `start`.
+///
+/// Each leg is an independent A* query; the legs are joined into one polyline
+/// and smoothed as a single curve. `None` means at least one leg is walled off.
+pub fn plan_route(
+    start: Vec2,
+    start_cell: Hex,
+    targets: &[Waypoint],
+    edges: &HashSet<Edge>,
+    blocked: &HashSet<Hex>,
+) -> Option<RoutePlan> {
+    if targets.is_empty() {
+        return None;
+    }
+
+    let mut points = Vec::new();
+    let mut from = start;
+    let mut from_cell = start_cell;
+    let mut hexes = 0;
+
+    for waypoint in targets {
+        let leg = find_path(from_cell, waypoint.cell, edges, blocked)?;
+        hexes += leg.len();
+        let leg_points = waypoints(from, waypoint.pos, &leg);
+        if points.is_empty() {
+            points.extend(leg_points);
+        } else {
+            points.extend(leg_points.into_iter().skip(1));
+        }
+        from = waypoint.pos;
+        from_cell = waypoint.cell;
+    }
+
+    let points = simplify(points);
+    let curves = smooth(&points);
+    let track = Track::new(sample(&curves, 18));
+    let distances = targets
+        .iter()
+        .map(|waypoint| track.nearest_distance(waypoint.pos))
+        .collect();
+    let controls = targets
+        .iter()
+        .map(|waypoint| {
+            let index = points
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| {
+                    a.distance_squared(waypoint.pos)
+                        .total_cmp(&b.distance_squared(waypoint.pos))
+                })
+                .map(|(index, _)| index)
+                .unwrap_or(0);
+            AnchorControls {
+                incoming: index
+                    .checked_sub(1)
+                    .and_then(|previous| curves.get(previous))
+                    .map(|curve| curve.p2),
+                outgoing: curves.get(index).map(|curve| curve.p1),
+            }
+        })
+        .collect();
+
+    let joins = targets.len().saturating_sub(1);
+    Some(RoutePlan {
+        track,
+        distances,
+        controls,
+        hexes: hexes.saturating_sub(joins).max(1),
+    })
 }
 
 #[cfg(test)]
@@ -894,5 +1005,104 @@ mod tests {
                 "curve wandered to {p}"
             );
         }
+    }
+
+    #[test]
+    fn a_multi_leg_route_visits_each_waypoint() {
+        let ramp = Piece {
+            id: 1,
+            shape: shape_index("ramp").unwrap(),
+            pos: model::hex_center(1, 0),
+            rot: std::f32::consts::PI * 1.5,
+        };
+        let first = Piece {
+            id: 2,
+            shape: shape_index("block").unwrap(),
+            pos: model::hex_center(2, 0),
+            rot: 0.0,
+        };
+        let second = Piece {
+            id: 3,
+            shape: shape_index("block").unwrap(),
+            pos: model::hex_center(2, 1),
+            rot: 0.0,
+        };
+        let (edges, blocked) = blocked(&[ramp, first, second]);
+
+        let waypoints = [
+            Waypoint {
+                id: 1,
+                pos: model::hex_center(2, 0),
+                cell: (2, 0),
+                height: 0.9,
+                incoming: None,
+                outgoing: None,
+            },
+            Waypoint {
+                id: 2,
+                pos: model::hex_center(2, 1),
+                cell: (2, 1),
+                height: 0.9,
+                incoming: None,
+                outgoing: None,
+            },
+        ];
+        let plan = plan_route(
+            model::hex_center(0, 0),
+            (0, 0),
+            &waypoints,
+            &edges,
+            &blocked,
+        )
+        .expect("route");
+
+        assert_eq!(plan.distances.len(), 2);
+        assert!(plan.distances[0] < plan.distances[1]);
+        assert_eq!(plan.controls.len(), 2);
+        assert!(
+            plan.track
+                .points()
+                .iter()
+                .any(|p| p.distance(waypoints[0].pos) < 0.05)
+        );
+        assert!(
+            plan.track
+                .points()
+                .iter()
+                .any(|p| p.distance(waypoints[1].pos) < 0.05)
+        );
+    }
+
+    #[test]
+    fn an_unreachable_leg_returns_none() {
+        let waypoint = Waypoint {
+            id: 1,
+            pos: model::hex_center(2, 0),
+            cell: (2, 0),
+            height: 0.0,
+            incoming: None,
+            outgoing: None,
+        };
+        assert!(
+            plan_route(
+                Vec2::ZERO,
+                (0, 0),
+                &[waypoint],
+                &HashSet::new(),
+                &HashSet::from([(2, 0)])
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn nearest_index_finds_the_closest_sample() {
+        let track = Track::new(vec![
+            Vec2::ZERO,
+            Vec2::new(2.0, 0.0),
+            Vec2::new(2.0, 2.0),
+        ]);
+        assert_eq!(track.nearest_index(Vec2::new(1.9, 0.1)), 1);
+        assert_eq!(track.nearest_index(Vec2::new(2.1, 1.8)), 2);
     }
 }
