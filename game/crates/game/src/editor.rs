@@ -217,7 +217,9 @@ struct Character {
 #[derive(Clone)]
 struct Route {
     track: path::Track,
-    /// Track samples lifted onto the surface, ready to draw.
+    /// The walked part of the line, frozen across live edits.
+    trail: Vec<Vec3>,
+    /// Lifted samples of the current (future) track, ready to draw.
     line: Vec<Vec3>,
     /// Arc length of each waypoint along `track`.
     distances: Vec<f32>,
@@ -291,6 +293,8 @@ struct TouchState {
     append: bool,
     /// A path handle owns the current touch gesture; suppress camera look.
     path_drag_active: bool,
+    /// Sticky for the current gesture: more than one finger has been down.
+    multi: bool,
     /// Pointer holding the stick, in the picking/UI coordinate space. Using the
     /// pointer position instead of raw touch coordinates keeps the stick lined
     /// up with the drawn pad at any DPR or UiScale.
@@ -1271,6 +1275,7 @@ fn walk(
 
     let to_target = look - character.pos;
     if current.distance >= total - 0.12 && to_target.length() < 0.2 {
+        prune_plan(&mut editor, current.distance);
         editor.walk = None;
         editor.note = "arrived";
         return;
@@ -1376,16 +1381,7 @@ fn walk(
 
     // Reached waypoints stop being part of the live plan; the drawn line
     // stays behind as a record.
-    {
-        let Editor { plan, route, .. } = &mut *editor;
-        if let (Some(plan), Some(route)) = (plan, route) {
-            let removed = plan.prune(&route.distances, current.distance);
-            if removed > 0 {
-                route.distances.drain(..removed);
-                route.controls.drain(..removed);
-            }
-        }
-    }
+    prune_plan(&mut editor, current.distance);
 
     if travelled < 0.005 {
         current.stuck += frame;
@@ -1809,7 +1805,7 @@ fn cycle_view(orbit: &mut Orbit, editor: &Editor) {
         ViewMode::First => {
             orbit.pitch = 0.0;
             if let (Some(character), Some(route)) = (editor.character, editor.route.as_ref()) {
-                if let Some(target) = route.line.last() {
+                if let Some(target) = route.line.last().or_else(|| route.trail.last()) {
                     let towards = Vec2::new(target.x, target.z) - character.pos;
                     if towards.length_squared() > 0.01 {
                         orbit.yaw = (-towards.x).atan2(-towards.y);
@@ -2476,6 +2472,34 @@ fn line_prefix(track: &path::Track, line: &[Vec3], point: Vec2) -> Vec<Vec3> {
     line[..=index].to_vec()
 }
 
+/// Remove waypoints the walker has reached and trim the matching route data.
+fn prune_plan(editor: &mut Editor, walked: f32) {
+    let Editor { plan, route, .. } = editor;
+    if let (Some(plan), Some(route)) = (plan, route) {
+        let removed = plan.prune(&route.distances, walked);
+        if removed > 0 {
+            route.distances.drain(..removed);
+            route.controls.drain(..removed);
+        }
+    }
+}
+
+/// Extend the frozen walked trail with the walked part of the old suffix.
+/// The suffix line starts where the existing trail ends, so its first point is
+/// skipped once the trail is non-empty.
+fn walked_trail(
+    trail: &[Vec3],
+    old_track: &path::Track,
+    old_line: &[Vec3],
+    start: Vec2,
+) -> Vec<Vec3> {
+    let mut out = trail.to_vec();
+    let walked = line_prefix(old_track, old_line, start);
+    let skip = usize::from(!out.is_empty());
+    out.extend(walked.into_iter().skip(skip));
+    out
+}
+
 /// Where a live rebuild starts: the current track point, not the old start.
 fn rebuild_start(live: bool, route: Option<&Route>, walk: Option<&Walk>, character: Vec2) -> Vec2 {
     if live {
@@ -2493,7 +2517,7 @@ fn choose_plan(old: Option<Plan>, new: Option<Plan>, ok: bool) -> Option<Plan> {
 
 /// A UI button press must not leak through as a canvas tap.
 fn tap_allowed(now: f64, touch: &TouchState) -> bool {
-    now >= touch.suppress_until
+    now >= touch.suppress_until && !touch.multi
 }
 
 fn within_radius(screen: Vec2, target: Vec2, radius: f32) -> bool {
@@ -2707,8 +2731,31 @@ fn set_tangent(
         editor.plan = old_plan;
         editor.route = old_route;
         editor.walk = old_walk;
+        return false;
     }
-    ok
+
+    // Store the control exactly as the curve builder clamped it, so the
+    // handle and the drawn curve cannot drift apart on the next rebuild.
+    let Editor { plan, route, .. } = editor;
+    if let (Some(plan), Some(route)) = (plan.as_mut(), route.as_ref()) {
+        if let Some(index) = plan
+            .waypoints
+            .iter()
+            .position(|waypoint| waypoint.id == waypoint_id)
+        {
+            if let Some(controls) = route.controls.get(index) {
+                match side {
+                    TangentSide::Incoming => {
+                        plan.waypoints[index].incoming = controls.incoming;
+                    }
+                    TangentSide::Outgoing => {
+                        plan.waypoints[index].outgoing = controls.outgoing;
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Move one waypoint and rebuild, restoring the old plan on failure.
@@ -2842,12 +2889,21 @@ fn smooth_plan(
     spatial_query: &SpatialQuery,
     filter: &SpatialQueryFilter,
 ) -> bool {
+    let old_plan = editor.plan.clone();
+    let old_route = editor.route.clone();
+    let old_walk = editor.walk;
+    let live = old_walk.is_some();
     let Some(plan) = editor.plan.as_mut() else {
         return false;
     };
     clear_tangents(plan);
-    let live = editor.walk.is_some();
-    rebuild_route(editor, nav, spatial_query, filter, live)
+    let ok = rebuild_route(editor, nav, spatial_query, filter, live);
+    if !ok {
+        editor.plan = old_plan;
+        editor.route = old_route;
+        editor.walk = old_walk;
+    }
+    ok
 }
 
 /// Rebuild the route geometry from the current plan. `live` keeps the walked
@@ -2883,20 +2939,22 @@ fn rebuild_route(
     };
 
     let new_line = route_line(&route_plan.track, spatial_query, filter, height);
-    let line = if live {
+    let (trail, line) = if live {
         if let Some(old) = editor.route.as_ref() {
-            let mut prefix = line_prefix(&old.track, &old.line, start);
-            prefix.extend(new_line.iter().skip(1).copied());
-            prefix
+            (
+                walked_trail(&old.trail, &old.track, &old.line, start),
+                new_line,
+            )
         } else {
-            new_line
+            (Vec::new(), new_line)
         }
     } else {
-        new_line
+        (Vec::new(), new_line)
     };
 
     editor.route = Some(Route {
         track: route_plan.track,
+        trail,
         line,
         distances: route_plan.distances,
         controls: route_plan.controls,
@@ -3255,6 +3313,12 @@ fn touch_input(
         );
     }
 
+    // A second finger anywhere (canvas, stick or a control) makes this
+    // gesture multi-touch, so its release can never be a placement tap.
+    if state.tracks.len() > 1 {
+        state.multi = true;
+    }
+
     for touch in touches.iter() {
         if touches.just_pressed(touch.id()) {
             continue;
@@ -3327,6 +3391,10 @@ fn touch_input(
         state.two_finger = Some((centroid, span));
     } else {
         state.two_finger = None;
+    }
+
+    if state.tracks.is_empty() && touches.iter().next().is_none() {
+        state.multi = false;
     }
 }
 
@@ -3675,6 +3743,7 @@ fn on_path_press(
     event: On<PointerPress>,
     window: Single<&Window, With<PrimaryWindow>>,
     time: Res<Time>,
+    touches: Res<Touches>,
     camera: Single<(&Camera, &Transform)>,
     orbit: Res<Orbit>,
     mut editor: ResMut<Editor>,
@@ -3683,6 +3752,9 @@ fn on_path_press(
 ) {
     if event.button != PointerButton::Primary {
         return;
+    }
+    if touches.iter().count() > 1 {
+        touch.multi = true;
     }
     let pos = event.pointer.position;
     if touch.enabled {
@@ -3734,9 +3806,13 @@ fn on_path_drag(event: On<PointerDrag>, mut gesture: ResMut<PathGesture>) {
 fn on_path_release(
     event: On<PointerRelease>,
     time: Res<Time>,
+    touches: Res<Touches>,
     mut gesture: ResMut<PathGesture>,
     mut touch: ResMut<TouchState>,
 ) {
+    if touches.iter().count() > 1 {
+        touch.multi = true;
+    }
     let now = time.elapsed_secs_f64();
     if let Some(screen) = gesture.0.release(event.pointer.id, now) {
         if event.pointer.id.is_touch() && tap_allowed(now, &touch) {
@@ -3978,6 +4054,7 @@ fn update_status(
 // Drawing (gizmo overlays only; the solids are entities)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::collapsible_if)]
 fn draw(editor: Res<Editor>, cursor: Res<Cursor>, orbit: Res<Orbit>, mut gizmos: Gizmos) {
     let (cq, cr) = model::pixel_to_hex(Vec2::new(orbit.target.x, orbit.target.z));
     for dq in -8..=8 {
@@ -4042,13 +4119,17 @@ fn draw(editor: Res<Editor>, cursor: Res<Cursor>, orbit: Res<Orbit>, mut gizmos:
 
     if let Some(route) = &editor.route {
         let colour = if route.valid { PATH } else { AMBER };
-        gizmos.linestrip(route.line.iter().copied(), colour);
+        gizmos.linestrip(
+            route.trail.iter().chain(route.line.iter()).copied(),
+            colour,
+        );
 
         // A little target ring so the end of the curve is unambiguous, laid on
         // whatever surface the curve ends on.
         let target = route
             .line
             .last()
+            .or_else(|| route.trail.last())
             .copied()
             .unwrap_or(Vec3::new(0.0, 0.07, 0.0));
         gizmos.circle(
@@ -4425,9 +4506,58 @@ mod tests {
     }
 
     #[test]
+    fn successive_live_edits_keep_the_walked_prefix() {
+        let a = Vec3::ZERO;
+        let b = Vec3::X;
+        let c = Vec3::X * 2.0;
+        let d = Vec3::X * 3.0;
+        let first_track = path::Track::new(vec![
+            Vec2::ZERO,
+            Vec2::new(1.0, 0.0),
+            Vec2::new(2.0, 0.0),
+        ]);
+        let trail = walked_trail(
+            &[],
+            &first_track,
+            &[a, b, c],
+            Vec2::new(1.0, 0.0),
+        );
+        assert_eq!(trail, vec![a, b]);
+
+        let second_track = path::Track::new(vec![
+            Vec2::new(1.0, 0.0),
+            Vec2::new(2.0, 0.0),
+            Vec2::new(3.0, 0.0),
+        ]);
+        let trail = walked_trail(
+            &trail,
+            &second_track,
+            &[b, c, d],
+            Vec2::new(2.0, 0.0),
+        );
+        assert_eq!(trail, vec![a, b, c], "the first walked prefix is immutable");
+    }
+
+    #[test]
+    fn arrival_prunes_the_final_waypoint() {
+        let mut editor = Editor::default();
+        let mut plan = Plan::default();
+        plan.replace(Vec2::ZERO, (0, 0), 0.0);
+        editor.plan = Some(plan);
+        editor.route = Some(test_route(true));
+        prune_plan(&mut editor, 0.95);
+        assert!(
+            editor.plan.as_ref().is_none_or(|plan| plan.is_empty()),
+            "the final waypoint must be pruned on arrival"
+        );
+        assert!(editor.route.as_ref().unwrap().distances.is_empty());
+    }
+
+    #[test]
     fn a_live_rebuild_starts_at_the_current_track_point() {
         let route = Route {
             track: path::Track::new(vec![Vec2::ZERO, Vec2::new(4.0, 0.0)]),
+            trail: Vec::new(),
             line: Vec::new(),
             distances: vec![4.0],
             controls: Vec::new(),
@@ -4473,6 +4603,7 @@ mod tests {
     fn test_route(valid: bool) -> Route {
         Route {
             track: path::Track::new(vec![Vec2::ZERO, Vec2::X]),
+            trail: Vec::new(),
             line: Vec::new(),
             distances: vec![1.0],
             controls: vec![path::AnchorControls {
@@ -4533,6 +4664,11 @@ mod tests {
         };
         assert!(!tap_allowed(1.9, &touch));
         assert!(tap_allowed(2.1, &touch));
+        let multi = TouchState {
+            multi: true,
+            ..Default::default()
+        };
+        assert!(!tap_allowed(3.0, &multi));
     }
 
     #[test]

@@ -149,6 +149,11 @@ pub struct Gesture {
     drag: Option<PathDrag>,
     last: Option<Vec2>,
     moved: f32,
+    /// The curve edit becomes active only after intentional movement.
+    active: bool,
+    /// Camera/gesture capture lasts until every pointer lifts, even if the
+    /// handle owner releases first.
+    capture: bool,
 }
 
 impl Gesture {
@@ -178,6 +183,8 @@ impl Gesture {
             self.press = None;
             self.moved = 0.0;
             self.last = Some(screen);
+            self.active = false;
+            self.capture = true;
             return Some(drag);
         }
 
@@ -203,6 +210,9 @@ impl Gesture {
         if owns_drag || owns_press {
             self.last = Some(screen);
             self.moved += delta.length();
+            if owns_drag && self.moved > TAP_MAX_MOVE {
+                self.active = true;
+            }
         }
     }
 
@@ -213,15 +223,16 @@ impl Gesture {
         let mut tap = None;
         if self.drag.is_some_and(|drag| drag.pointer == pointer) {
             self.drag = None;
-        } else if let Some(press) = self.press {
-            if press.pointer == pointer {
-                self.press = None;
-                if !self.multi
-                    && self.moved <= TAP_MAX_MOVE
-                    && time - press.time <= TAP_MAX_TIME
-                {
-                    tap = Some(press.screen);
-                }
+            self.active = false;
+        } else if let Some(press) = self.press
+            && press.pointer == pointer
+        {
+            self.press = None;
+            if !self.multi
+                && self.moved <= TAP_MAX_MOVE
+                && time - press.time <= TAP_MAX_TIME
+            {
+                tap = Some(press.screen);
             }
         }
 
@@ -236,6 +247,7 @@ impl Gesture {
         self.pressed.remove(&pointer);
         if self.drag.is_some_and(|drag| drag.pointer == pointer) {
             self.drag = None;
+            self.active = false;
         }
         if self.press.is_some_and(|press| press.pointer == pointer) {
             self.press = None;
@@ -245,12 +257,16 @@ impl Gesture {
         }
     }
 
+    /// True from a handle press until every pointer lifts. Camera gestures
+    /// stay suppressed for the whole capture, even after the owner releases.
     pub fn dragging(&self) -> bool {
-        self.drag.is_some()
+        self.capture || self.drag.is_some()
     }
 
+    /// The handle is edited only after the pointer moves past the tap limit;
+    /// a tap selects without changing an automatic tangent.
     pub fn drag_target(&self) -> Option<PathDrag> {
-        self.drag
+        self.active.then_some(self.drag).flatten()
     }
 
     pub fn screen(&self) -> Option<Vec2> {
@@ -262,6 +278,8 @@ impl Gesture {
         self.press = None;
         self.last = None;
         self.moved = 0.0;
+        self.active = false;
+        self.capture = false;
     }
 }
 
@@ -360,6 +378,34 @@ mod tests {
         assert_eq!(drag.handle, PathHandle::Waypoint(7));
         g.drag(p, Vec2::new(2.0, 0.0), Vec2::new(2.0, 0.0));
         assert_eq!(g.release(p, 1.1), None);
+        assert!(!g.dragging());
+    }
+
+    #[test]
+    fn a_handle_tap_does_not_activate_the_drag() {
+        let mut g = Gesture::default();
+        let p = PointerId::Touch(1);
+        g.press(p, Vec2::ZERO, 1.0, Some(PathHandle::Waypoint(7)));
+        g.drag(p, Vec2::new(2.0, 0.0), Vec2::new(2.0, 0.0));
+        assert!(
+            g.drag_target().is_none(),
+            "a tap must only select the waypoint"
+        );
+        g.drag(p, Vec2::new(30.0, 0.0), Vec2::new(28.0, 0.0));
+        assert!(g.drag_target().is_some(), "a real drag edits the handle");
+    }
+
+    #[test]
+    fn camera_capture_lasts_until_every_pointer_lifts() {
+        let mut g = Gesture::default();
+        let owner = PointerId::Touch(1);
+        let other = PointerId::Touch(2);
+        g.press(owner, Vec2::ZERO, 1.0, Some(PathHandle::Waypoint(7)));
+        g.press(other, Vec2::new(20.0, 0.0), 1.0, None);
+        g.release(owner, 1.1);
+        assert!(g.dragging(), "the other finger still owns the gesture");
+        assert!(g.drag_target().is_none());
+        g.release(other, 1.1);
         assert!(!g.dragging());
     }
 

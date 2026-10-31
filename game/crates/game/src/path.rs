@@ -412,6 +412,14 @@ impl Track {
         self.lengths.last().copied().unwrap_or(0.0)
     }
 
+    /// Arc length at a sample index, clamped to the ends.
+    pub fn distance_at(&self, index: usize) -> f32 {
+        self.lengths
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| self.total())
+    }
+
     /// Index of the sample closest to `point`, or 0 for an empty track.
     pub fn nearest_index(&self, point: Vec2) -> usize {
         self.points
@@ -608,25 +616,38 @@ pub fn plan_route(
     let (points, anchors) = simplify_anchored(points, &anchors);
     let mut curves = smooth(&points);
     for (waypoint, &index) in targets.iter().zip(anchors.iter()) {
-        if let Some(control) = waypoint.outgoing {
-            if let Some(next) = points.get(index + 1).copied() {
-                if let Some(curve) = curves.get_mut(index) {
-                    curve.p1 = clamp_control(points[index], next, control);
-                }
-            }
+        if let Some(control) = waypoint.outgoing
+            && let Some(next) = points.get(index + 1).copied()
+            && let Some(curve) = curves.get_mut(index)
+        {
+            curve.p1 = clamp_control(points[index], next, control);
         }
-        if let Some(control) = waypoint.incoming {
-            if let Some(previous) = index.checked_sub(1) {
-                if let Some(curve) = curves.get_mut(previous) {
-                    curve.p2 = clamp_control(points[previous], points[index], control);
-                }
-            }
+        if let Some(control) = waypoint.incoming
+            && let Some(previous) = index.checked_sub(1)
+            && let Some(curve) = curves.get_mut(previous)
+        {
+            curve.p2 = clamp_control(points[previous], points[index], control);
         }
     }
-    let track = Track::new(sample(&curves, 18));
-    let distances = targets
+    let sampled = sample(&curves, 18);
+    let track = Track::new(if sampled.is_empty() {
+        points.clone()
+    } else {
+        sampled
+    });
+    // Use each anchor's ordered sample, not the globally nearest point: an
+    // out-and-back route revisits the same ground and the nearest sample would
+    // be the earlier visit.
+    let distances = anchors
         .iter()
-        .map(|waypoint| track.nearest_distance(waypoint.pos))
+        .map(|&index| {
+            let sample_index = if index + 1 < points.len() {
+                index * 18
+            } else {
+                track.points().len().saturating_sub(1)
+            };
+            track.distance_at(sample_index)
+        })
         .collect();
     let controls = anchors
         .iter()
@@ -1125,6 +1146,73 @@ mod tests {
                 .iter()
                 .any(|p| p.distance(waypoints[1].pos) < 0.05)
         );
+    }
+
+    #[test]
+    fn an_out_and_back_route_keeps_increasing_waypoint_distances() {
+        let waypoints = [
+            Waypoint {
+                id: 1,
+                pos: model::hex_center(1, 0),
+                cell: (1, 0),
+                height: 0.0,
+                incoming: None,
+                outgoing: None,
+            },
+            Waypoint {
+                id: 2,
+                pos: model::hex_center(2, 0),
+                cell: (2, 0),
+                height: 0.0,
+                incoming: None,
+                outgoing: None,
+            },
+            Waypoint {
+                id: 3,
+                pos: model::hex_center(1, 0),
+                cell: (1, 0),
+                height: 0.0,
+                incoming: None,
+                outgoing: None,
+            },
+        ];
+        let plan = plan_route(
+            Vec2::ZERO,
+            (0, 0),
+            &waypoints,
+            &HashSet::new(),
+            &HashSet::new(),
+        )
+        .expect("route");
+        assert!(plan.distances[0] < plan.distances[1]);
+        assert!(
+            plan.distances[1] < plan.distances[2],
+            "the return leg must have its own distance: {:?}",
+            plan.distances
+        );
+    }
+
+    #[test]
+    fn a_zero_length_route_keeps_its_start_point() {
+        let start = model::hex_center(3, -2);
+        let waypoint = Waypoint {
+            id: 1,
+            pos: start,
+            cell: (3, -2),
+            height: 0.0,
+            incoming: None,
+            outgoing: None,
+        };
+        let plan = plan_route(
+            start,
+            (3, -2),
+            &[waypoint],
+            &HashSet::new(),
+            &HashSet::new(),
+        )
+        .expect("route");
+        assert_eq!(plan.track.total(), 0.0);
+        assert_eq!(plan.track.at(0.0).0, start);
     }
 
     #[test]
