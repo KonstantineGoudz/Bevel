@@ -101,6 +101,7 @@ impl Plugin for EditorPlugin {
                     setup_ui_scale,
                     touch_input,
                     sync_input_mode,
+                    sync_touch_path_row,
                     sync_knob,
                     sync_shape_label,
                     walk,
@@ -109,6 +110,15 @@ impl Plugin for EditorPlugin {
                     path_drag,
                     rebuild_nav,
                     refresh_route,
+                )
+                    .chain(),
+            )
+            // The second half is ordered after `refresh_route` rather than in
+            // the same tuple: Bevy's tuple system sets top out before this many
+            // systems.
+            .add_systems(
+                Update,
+                (
                     update_cursor,
                     interact,
                     sync_visuals,
@@ -119,7 +129,8 @@ impl Plugin for EditorPlugin {
                     update_touch_status,
                     draw,
                 )
-                    .chain(),
+                    .chain()
+                    .after(refresh_route),
             )
             .add_observer(on_palette_activate)
             .add_observer(on_touch_button);
@@ -455,6 +466,10 @@ enum TouchAction {
     Delete,
     Undo,
     Path,
+    Plan,
+    Add,
+    Walk,
+    Smooth,
     Place,
     PrevShape,
     NextShape,
@@ -464,6 +479,9 @@ enum TouchAction {
 
 #[derive(Component)]
 struct TouchKnob;
+
+#[derive(Component)]
+struct TouchPathRow;
 
 #[derive(Component)]
 struct ShapeLabel;
@@ -795,6 +813,7 @@ fn spawn_touch_ui(commands: &mut Commands) {
         touch_button(commands, TouchAction::Delete, "Del"),
         touch_button(commands, TouchAction::Undo, "Undo"),
         touch_button(commands, TouchAction::Path, "Path"),
+        touch_button(commands, TouchAction::Plan, "Plan"),
         touch_button(commands, TouchAction::Course, "Course"),
     ];
     commands.entity(tools).add_children(&tool_buttons);
@@ -836,6 +855,30 @@ fn spawn_touch_ui(commands: &mut Commands) {
         .entity(carousel)
         .add_children(&[prev, label, next, place]);
 
+    // Path editing row: Add in Path mode; Add/Walk/Smooth in Plan mode.
+    let path_row = commands
+        .spawn((
+            TouchPathRow,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(8),
+                right: px(8),
+                top: px(88),
+                height: px(34),
+                flex_direction: FlexDirection::Row,
+                column_gap: px(4),
+                display: Display::None,
+                ..default()
+            },
+        ))
+        .id();
+    let path_buttons = [
+        touch_button(commands, TouchAction::Add, "Add"),
+        touch_button(commands, TouchAction::Walk, "Walk"),
+        touch_button(commands, TouchAction::Smooth, "Smooth"),
+    ];
+    commands.entity(path_row).add_children(&path_buttons);
+
     // Compact status under the toolbar.
     let status = commands
         .spawn((
@@ -849,7 +892,7 @@ fn spawn_touch_ui(commands: &mut Commands) {
             Node {
                 position_type: PositionType::Absolute,
                 left: px(10),
-                top: px(88),
+                top: px(128),
                 ..default()
             },
         ))
@@ -958,7 +1001,7 @@ fn spawn_touch_ui(commands: &mut Commands) {
     // the same pointer stream as touch taps.
     commands
         .entity(root)
-        .add_children(&[tools, carousel, status, base, jump]);
+        .add_children(&[tools, carousel, path_row, status, base, jump]);
 }
 
 fn touch_button(commands: &mut Commands, action: TouchAction, text: &str) -> Entity {
@@ -1874,15 +1917,8 @@ fn on_palette_activate(
             }
         }
         PaletteAction::Walk => {
-            if editor.actor_tool == Some(ActorTool::Plan)
-                && walk_enabled(editor.plan.as_ref(), editor.route.as_ref(), editor.walk.is_some())
-                && rebuild_route(&mut editor, &nav, &spatial_query, &filter, false)
-            {
-                editor.walk = Some(Walk {
-                    distance: 0.0,
-                    stuck: 0.0,
-                });
-                editor.note = "walking";
+            if editor.actor_tool == Some(ActorTool::Plan) {
+                walk_from_plan(&mut editor, &nav, &spatial_query, &filter);
             }
         }
         PaletteAction::Smooth => {
@@ -1981,20 +2017,8 @@ fn interact(
         editor.note = "Click a component, then the grid";
     }
 
-    if keys.just_pressed(KeyCode::Enter)
-        && editor.actor_tool == Some(ActorTool::Plan)
-        && walk_enabled(
-            editor.plan.as_ref(),
-            editor.route.as_ref(),
-            editor.walk.is_some(),
-        )
-        && rebuild_route(&mut editor, &nav, &spatial_query, &surface_filter, false)
-    {
-        editor.walk = Some(Walk {
-            distance: 0.0,
-            stuck: 0.0,
-        });
-        editor.note = "walking";
+    if keys.just_pressed(KeyCode::Enter) && editor.actor_tool == Some(ActorTool::Plan) {
+        walk_from_plan(&mut editor, &nav, &spatial_query, &surface_filter);
     }
 
     if keys.just_pressed(KeyCode::KeyC) {
@@ -2752,6 +2776,31 @@ fn walk_enabled(plan: Option<&Plan>, route: Option<&Route>, walking: bool) -> bo
         && !walking
 }
 
+/// Rebuild from the cylinder's current position, then start walking.
+fn walk_from_plan(
+    editor: &mut Editor,
+    nav: &Nav,
+    spatial_query: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+) -> bool {
+    if !walk_enabled(
+        editor.plan.as_ref(),
+        editor.route.as_ref(),
+        editor.walk.is_some(),
+    ) {
+        return false;
+    }
+    if !rebuild_route(editor, nav, spatial_query, filter, false) {
+        return false;
+    }
+    editor.walk = Some(Walk {
+        distance: 0.0,
+        stuck: 0.0,
+    });
+    editor.note = "walking";
+    true
+}
+
 /// Drop every manual tangent. Returns how many handles were cleared.
 fn clear_tangents(plan: &mut Plan) -> usize {
     let mut cleared = 0;
@@ -3294,6 +3343,33 @@ fn sync_input_mode(touch: Res<TouchState>, mut layers: Query<(&InputLayer, &mut 
     }
 }
 
+fn sync_touch_path_row(
+    editor: Res<Editor>,
+    mut row: Single<&mut Node, With<TouchPathRow>>,
+    mut buttons: Query<(&TouchButton, &mut Node)>,
+) {
+    let plan = editor.actor_tool == Some(ActorTool::Plan);
+    let path = editor.actor_tool == Some(ActorTool::Path);
+    let show = plan || path;
+    row.display = if show {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    for (button, mut node) in &mut buttons {
+        let visible = match button.0 {
+            TouchAction::Add => show,
+            TouchAction::Walk | TouchAction::Smooth => plan,
+            _ => continue,
+        };
+        node.display = if visible {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+}
+
 fn sync_knob(touch: Res<TouchState>, mut knob: Single<&mut Node, With<TouchKnob>>) {
     if !touch.is_changed() {
         return;
@@ -3312,11 +3388,26 @@ fn sync_shape_label(editor: Res<Editor>, mut label: Single<&mut Text, With<Shape
 
 fn update_touch_buttons(
     editor: Res<Editor>,
+    touch: Res<TouchState>,
     mut buttons: Query<(&TouchButton, &mut BackgroundColor, &mut BorderColor)>,
 ) {
     for (button, mut bg, mut border) in &mut buttons {
         let on = match button.0 {
             TouchAction::Path => editor.actor_tool == Some(ActorTool::Path),
+            TouchAction::Plan => editor.actor_tool == Some(ActorTool::Plan),
+            TouchAction::Add => touch.append,
+            TouchAction::Walk => {
+                editor.actor_tool == Some(ActorTool::Plan)
+                    && walk_enabled(
+                        editor.plan.as_ref(),
+                        editor.route.as_ref(),
+                        editor.walk.is_some(),
+                    )
+            }
+            TouchAction::Smooth => {
+                editor.actor_tool == Some(ActorTool::Plan)
+                    && editor.plan.as_ref().is_some_and(|plan| !plan.is_empty())
+            }
             TouchAction::Place => editor.tool == Some(editor.mobile_shape),
             _ => false,
         };
@@ -3352,12 +3443,19 @@ fn update_touch_status(
             .map(|shape| shapes()[shape].name)
             .unwrap_or("select"),
     };
+    let plan = editor
+        .plan
+        .as_ref()
+        .map(|plan| format!("  {}wp", plan.waypoints.len()))
+        .unwrap_or_default();
     text.0 = format!(
-        "{}  y{:.2}  {}p  {}",
+        "{}  y{:.2}  {}p  {}{}{}",
         orbit.mode.label(),
         height,
         editor.pieces.len(),
-        tool
+        tool,
+        plan,
+        if touch.append { "  add" } else { "" }
     );
 }
 
@@ -3366,7 +3464,7 @@ fn update_touch_status(
 #[allow(dead_code)] // superseded by UI activation; kept for the hit-test test
 fn touch_action_at(pos: Vec2, css: Vec2) -> Option<TouchAction> {
     if (8.0..=42.0).contains(&pos.y) {
-        let width = (css.x - 20.0) / 6.0;
+        let width = (css.x - 20.0) / 7.0;
         let index = ((pos.x - 8.0) / (width + 4.0)).floor().max(0.0) as usize;
         return [
             TouchAction::View,
@@ -3374,9 +3472,10 @@ fn touch_action_at(pos: Vec2, css: Vec2) -> Option<TouchAction> {
             TouchAction::Delete,
             TouchAction::Undo,
             TouchAction::Path,
+            TouchAction::Plan,
             TouchAction::Course,
         ]
-        .get(index.min(5))
+        .get(index.min(6))
         .copied();
     }
     if (46.0..=84.0).contains(&pos.y) {
@@ -3388,6 +3487,17 @@ fn touch_action_at(pos: Vec2, css: Vec2) -> Option<TouchAction> {
             2 => Some(TouchAction::NextShape),
             _ => Some(TouchAction::Place),
         };
+    }
+    if (88.0..=122.0).contains(&pos.y) {
+        let third = (css.x - 20.0) / 3.0;
+        let index = ((pos.x - 8.0) / (third + 4.0)).floor().max(0.0) as usize;
+        return [
+            TouchAction::Add,
+            TouchAction::Walk,
+            TouchAction::Smooth,
+        ]
+        .get(index.min(2))
+        .copied();
     }
     let jump = Vec2::new(css.x - 62.0, css.y - 66.0);
     if pos.distance(jump) < 52.0 {
@@ -3401,11 +3511,25 @@ fn run_touch_action(
     editor: &mut Editor,
     orbit: &mut Orbit,
     touch: &mut TouchState,
+    nav: &Nav,
+    spatial_query: &SpatialQuery,
+    filter: &SpatialQueryFilter,
 ) {
     match action {
         TouchAction::View => cycle_view(orbit, editor),
         TouchAction::Rotate => rotate_piece(editor, model::ANCHOR_STEP),
-        TouchAction::Delete => delete_piece(editor),
+        TouchAction::Delete => {
+            let waypoint_selected = editor.actor_tool == Some(ActorTool::Plan)
+                && editor
+                    .plan
+                    .as_ref()
+                    .is_some_and(|plan| plan.selected.is_some());
+            if waypoint_selected {
+                delete_waypoint(editor, nav, spatial_query, filter);
+            } else {
+                delete_piece(editor);
+            }
+        }
         TouchAction::Undo => editor.undo(),
         TouchAction::Path => {
             editor.tool = None;
@@ -3418,6 +3542,37 @@ fn run_touch_action(
             };
             editor.selected = None;
             editor.drag = None;
+        }
+        TouchAction::Plan => {
+            let entering = editor.actor_tool != Some(ActorTool::Plan);
+            editor.actor_tool = if entering {
+                Some(ActorTool::Plan)
+            } else {
+                None
+            };
+            editor.tool = None;
+            editor.selected = None;
+            editor.drag = None;
+            editor.ghost = None;
+            if entering {
+                orbit.mode = ViewMode::Top;
+                orbit.pitch = 1.4;
+                orbit.distance = 13.0;
+                focus(orbit, editor.character);
+            }
+        }
+        TouchAction::Add => touch.append = !touch.append,
+        TouchAction::Walk => {
+            if editor.actor_tool == Some(ActorTool::Plan) {
+                walk_from_plan(editor, nav, spatial_query, filter);
+            }
+        }
+        TouchAction::Smooth => {
+            if editor.actor_tool == Some(ActorTool::Plan)
+                && smooth_plan(editor, nav, spatial_query, filter)
+            {
+                editor.note = "smoothed";
+            }
         }
         TouchAction::Place => {
             editor.tool = if editor.tool == Some(editor.mobile_shape) {
@@ -3631,10 +3786,18 @@ fn on_touch_button(
     mut editor: ResMut<Editor>,
     mut orbit: ResMut<Orbit>,
     mut touch: ResMut<TouchState>,
+    nav: Res<Nav>,
+    spatial_query: SpatialQuery,
+    player: Query<Entity, With<CharacterVisual>>,
 ) {
     let Ok(button) = buttons.get(event.entity) else {
         return;
     };
+    let filter = player
+        .iter()
+        .next()
+        .map(|entity| SpatialQueryFilter::from_excluded_entities([entity]))
+        .unwrap_or_default();
     let now = time.elapsed_secs_f64();
     // A touch often synthesizes a mouse click too, which would fire this
     // observer twice and toggle a tool straight back off.
@@ -3648,7 +3811,15 @@ fn on_touch_button(
     touch.suppress_until = now + 0.08;
     touch.tap = None;
     touch.pending_tap = None;
-    run_touch_action(button.0, &mut editor, &mut orbit, &mut touch);
+    run_touch_action(
+        button.0,
+        &mut editor,
+        &mut orbit,
+        &mut touch,
+        &nav,
+        &spatial_query,
+        &filter,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -4578,6 +4749,23 @@ mod tests {
         assert!((d - 5.0).abs() < 1e-4);
         let d = point_segment_distance(Vec2::new(-3.0, 0.0), Vec2::ZERO, Vec2::new(10.0, 0.0));
         assert!((d - 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn touch_buttons_include_plan_and_add() {
+        let css = Vec2::new(390.0, 844.0);
+        assert_eq!(
+            touch_action_at(Vec2::new(352.0, 25.0), css),
+            Some(TouchAction::Course)
+        );
+        assert_eq!(
+            touch_action_at(Vec2::new(300.0, 25.0), css),
+            Some(TouchAction::Plan)
+        );
+        assert_eq!(
+            touch_action_at(Vec2::new(40.0, 100.0), css),
+            Some(TouchAction::Add)
+        );
     }
 
     #[test]
