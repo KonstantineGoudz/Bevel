@@ -223,15 +223,15 @@ enum ActorTool {
     Plan,
 }
 
-#[derive(Clone, Copy)]
-struct Character {
-    pos: Vec2,
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct Character {
+    pub(crate) pos: Vec2,
     /// Height of the capsule's feet above the world floor.
-    feet: f32,
-    yaw: f32,
+    pub(crate) feet: f32,
+    pub(crate) yaw: f32,
     /// Vertical velocity from the physics step.
-    vy: f32,
-    grounded: bool,
+    pub(crate) vy: f32,
+    pub(crate) grounded: bool,
 }
 
 /// A routed path with arc length, so the walker moves at a constant speed.
@@ -369,13 +369,13 @@ struct Cursor {
     last_world: Option<Vec2>,
 }
 
-#[derive(Resource)]
-struct Orbit {
-    target: Vec3,
-    yaw: f32,
-    pitch: f32,
-    distance: f32,
-    mode: ViewMode,
+#[derive(Resource, Clone, PartialEq, Debug)]
+pub(crate) struct Orbit {
+    pub(crate) target: Vec3,
+    pub(crate) yaw: f32,
+    pub(crate) pitch: f32,
+    pub(crate) distance: f32,
+    pub(crate) mode: ViewMode,
 }
 
 impl Default for Orbit {
@@ -391,13 +391,30 @@ impl Default for Orbit {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ViewMode {
+pub(crate) enum ViewMode {
     Third,
     First,
     Top,
 }
 
 impl ViewMode {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "third" => Some(ViewMode::Third),
+            "first" => Some(ViewMode::First),
+            "top" => Some(ViewMode::Top),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            ViewMode::Third => "third",
+            ViewMode::First => "first",
+            ViewMode::Top => "top",
+        }
+    }
+
     fn next(self) -> Self {
         match self {
             ViewMode::Third => ViewMode::First,
@@ -407,11 +424,7 @@ impl ViewMode {
     }
 
     fn label(self) -> &'static str {
-        match self {
-            ViewMode::Third => "third",
-            ViewMode::First => "first",
-            ViewMode::Top => "top",
-        }
+        self.id()
     }
 }
 
