@@ -11,6 +11,9 @@ use crate::{
 
 pub const SNAPSHOT_VERSION: u32 = 1;
 pub const MAX_HISTORY: usize = 60;
+pub(crate) const INDEX_KEY: &str = "party-dungeon.index.v1";
+pub(crate) const SESSION_PREFIX: &str = "party-dungeon.session.";
+pub(crate) const SOFT_SAVE_INTERVAL: f64 = 1.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadError {
@@ -149,6 +152,181 @@ impl Snapshot {
             redo,
             next_id,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StorageError {
+    QuotaExceeded,
+    Unavailable,
+}
+
+pub(crate) trait Store {
+    fn get(&self, key: &str) -> Option<String>;
+    fn set(&mut self, key: &str, value: &str) -> Result<(), StorageError>;
+    fn remove(&mut self, key: &str);
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Meta {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) created_at: f64,
+    pub(crate) updated_at: f64,
+    pub(crate) piece_count: usize,
+}
+
+pub(crate) fn session_key(id: &str) -> String {
+    format!("{SESSION_PREFIX}{id}.v1")
+}
+
+pub(crate) fn encode_index(metas: &[Meta]) -> String {
+    serde_json::to_string(metas).expect("session metadata serializes to JSON")
+}
+
+pub(crate) fn parse_index(text: &str) -> Vec<Meta> {
+    serde_json::from_str::<Vec<serde_json::Value>>(text)
+        .map(|entries| {
+            entries
+                .into_iter()
+                .filter_map(|entry| serde_json::from_value(entry).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn read_index(store: &dyn Store) -> Vec<Meta> {
+    store
+        .get(INDEX_KEY)
+        .map_or_else(Vec::new, |json| parse_index(&json))
+}
+
+pub(crate) fn write_index(store: &mut dyn Store, metas: &[Meta]) -> Result<(), StorageError> {
+    store.set(INDEX_KEY, &encode_index(metas))
+}
+
+pub(crate) fn read_session(store: &dyn Store, id: &str) -> Result<Snapshot, LoadError> {
+    let json = store.get(&session_key(id)).ok_or(LoadError::NotFound)?;
+    Snapshot::from_json(&json)
+}
+
+pub(crate) fn write_session(
+    store: &mut dyn Store,
+    id: &str,
+    snapshot: &Snapshot,
+) -> Result<(), StorageError> {
+    store.set(&session_key(id), &snapshot.to_json())
+}
+
+pub(crate) fn save_session(
+    store: &mut dyn Store,
+    id: &str,
+    snapshot: &Snapshot,
+    now_ms: f64,
+) -> Result<(), StorageError> {
+    write_session(store, id, snapshot)?;
+    let mut metas = read_index(store);
+    if let Some(meta) = metas.iter_mut().find(|meta| meta.id == id) {
+        meta.updated_at = now_ms;
+        meta.piece_count = snapshot.pieces.len();
+    }
+    write_index(store, &metas)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) struct LocalStore {
+    storage: web_sys::Storage,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl LocalStore {
+    pub(crate) fn new() -> Result<Self, StorageError> {
+        let storage = web_sys::window()
+            .ok_or(StorageError::Unavailable)?
+            .local_storage()
+            .map_err(|_| StorageError::Unavailable)?
+            .ok_or(StorageError::Unavailable)?;
+        Ok(Self { storage })
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Store for LocalStore {
+    fn get(&self, key: &str) -> Option<String> {
+        self.storage.get_item(key).ok().flatten()
+    }
+
+    fn set(&mut self, key: &str, value: &str) -> Result<(), StorageError> {
+        use wasm_bindgen::JsCast;
+
+        self.storage.set_item(key, value).map_err(|error| {
+            let name = error
+                .dyn_ref::<web_sys::DomException>()
+                .map(web_sys::DomException::name);
+            match name.as_deref() {
+                Some("QuotaExceededError" | "NS_ERROR_DOM_QUOTA_REACHED") => {
+                    StorageError::QuotaExceeded
+                }
+                _ => StorageError::Unavailable,
+            }
+        })
+    }
+
+    fn remove(&mut self, key: &str) {
+        let _ = self.storage.remove_item(key);
+    }
+}
+
+#[cfg(test)]
+struct MemoryStore {
+    entries: std::collections::HashMap<String, String>,
+    quota: Option<usize>,
+}
+
+#[cfg(test)]
+impl MemoryStore {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            quota: None,
+        }
+    }
+
+    fn with_quota(quota: usize) -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            quota: Some(quota),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Store for MemoryStore {
+    fn get(&self, key: &str) -> Option<String> {
+        self.entries.get(key).cloned()
+    }
+
+    fn set(&mut self, key: &str, value: &str) -> Result<(), StorageError> {
+        if let Some(quota) = self.quota {
+            let size = self
+                .entries
+                .iter()
+                .filter(|(stored_key, _)| stored_key.as_str() != key)
+                .map(|(stored_key, stored_value)| stored_key.len() + stored_value.len())
+                .sum::<usize>()
+                + key.len()
+                + value.len();
+            if size > quota {
+                return Err(StorageError::QuotaExceeded);
+            }
+        }
+        self.entries.insert(key.to_owned(), value.to_owned());
+        Ok(())
+    }
+
+    fn remove(&mut self, key: &str) {
+        self.entries.remove(key);
     }
 }
 
@@ -407,5 +585,80 @@ mod tests {
         assert_eq!(loaded.undo.len(), 60);
         assert_eq!(loaded.undo[0][0].id, 11);
         assert_eq!(loaded.undo[59][0].id, 70);
+    }
+
+    #[test]
+    fn a_session_key_is_prefixed_and_versioned() {
+        assert_eq!(session_key("abc"), "party-dungeon.session.abc.v1");
+    }
+
+    #[test]
+    fn index_json_round_trips_and_skips_broken_entries() {
+        let metas = vec![Meta {
+            id: "a".into(),
+            name: "Alpha".into(),
+            created_at: 1.0,
+            updated_at: 2.0,
+            piece_count: 3,
+        }];
+        assert_eq!(parse_index(&encode_index(&metas)), metas);
+        let mixed = r#"[
+            {"id":"a","name":"Alpha","createdAt":1,"updatedAt":2,"pieceCount":3},
+            {"name":"no id"}
+        ]"#;
+        assert_eq!(parse_index(mixed).len(), 1);
+    }
+
+    #[test]
+    fn saving_a_session_updates_its_index_entry() {
+        let mut store = MemoryStore::new();
+        let meta = Meta {
+            id: "a".into(),
+            name: "Alpha".into(),
+            created_at: 1.0,
+            updated_at: 2.0,
+            piece_count: 0,
+        };
+        write_index(&mut store, &[meta]).unwrap();
+        let snapshot = Snapshot {
+            version: 1,
+            pieces: vec![saved(1, "block", 0.0, 0.0), saved(2, "block", 1.0, 0.0)],
+            ..Default::default()
+        };
+        save_session(&mut store, "a", &snapshot, 42.0).unwrap();
+        let metas = read_index(&store);
+        assert_eq!(metas[0].piece_count, 2);
+        assert_eq!(metas[0].updated_at, 42.0);
+        assert_eq!(read_session(&store, "a").unwrap(), snapshot);
+    }
+
+    #[test]
+    fn a_full_store_keeps_the_previous_snapshot() {
+        let mut store = MemoryStore::with_quota(400);
+        let old = Snapshot {
+            version: 1,
+            pieces: vec![saved(1, "block", 0.0, 0.0)],
+            ..Default::default()
+        };
+        write_session(&mut store, "a", &old).unwrap();
+        let big = Snapshot {
+            version: 1,
+            pieces: (0..20).map(|i| saved(i, "block", i as f32, 0.0)).collect(),
+            ..Default::default()
+        };
+        assert_eq!(
+            write_session(&mut store, "a", &big).unwrap_err(),
+            StorageError::QuotaExceeded
+        );
+        assert_eq!(read_session(&store, "a").unwrap(), old);
+    }
+
+    #[test]
+    fn a_missing_session_is_not_found() {
+        let store = MemoryStore::new();
+        assert_eq!(
+            read_session(&store, "nope").unwrap_err(),
+            LoadError::NotFound
+        );
     }
 }
