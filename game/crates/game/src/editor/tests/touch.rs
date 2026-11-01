@@ -104,11 +104,15 @@ fn touch_buttons_include_plan_and_add() {
         Some(TouchAction::Course)
     );
     assert_eq!(
-        touch_action_at(Vec2::new(300.0, 25.0), css),
+        touch_action_at(Vec2::new(270.0, 25.0), css),
         Some(TouchAction::Plan)
     );
     assert_eq!(
-        touch_action_at(Vec2::new(370.0, 25.0), css),
+        touch_action_at(Vec2::new(310.0, 25.0), css),
+        Some(TouchAction::Platform)
+    );
+    assert_eq!(
+        touch_action_at(Vec2::new(380.0, 25.0), css),
         Some(TouchAction::Play)
     );
     assert_eq!(

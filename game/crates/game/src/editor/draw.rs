@@ -9,6 +9,7 @@ use super::*;
 #[allow(clippy::collapsible_if)]
 pub(super) fn draw(
     editor: Res<Editor>,
+    movers: Res<Movers>,
     cursor: Res<Cursor>,
     orbit: Res<Orbit>,
     mut gizmos: Gizmos,
@@ -78,6 +79,7 @@ pub(super) fn draw(
                 pitch: 0.0,
                 roll: 0.0,
                 elevation: 0.0,
+                dynamic: false,
             };
             anchors(&mut gizmos, &piece, shape);
         }
@@ -135,6 +137,41 @@ pub(super) fn draw(
                     }
                 }
             }
+        }
+    }
+
+    // Moving-platform paths: amber for the selected piece, muted otherwise.
+    // Drawn in Build and in Play so the motion stays readable while riding.
+    for piece in &editor.pieces {
+        let Some(mover) = movers.map.get(&piece.id) else {
+            continue;
+        };
+        if mover.waypoints.len() < 2 && mover.track.is_none() {
+            continue;
+        }
+        let colour = if editor.selected == Some(piece.id) {
+            AMBER
+        } else {
+            MUTED
+        };
+        let y = piece.elevation + 0.06;
+        if let Some(track) = mover.track.as_ref() {
+            let line: Vec<Vec3> = track
+                .points()
+                .iter()
+                .map(|p| Vec3::new(p.x, y, p.y))
+                .collect();
+            if line.len() >= 2 {
+                gizmos.linestrip(line, colour);
+            }
+        }
+        for waypoint in &mover.waypoints {
+            let at = Vec3::new(waypoint.pos.x, y, waypoint.pos.y);
+            gizmos.circle(
+                Isometry3d::new(at, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+                0.12,
+                colour,
+            );
         }
     }
 

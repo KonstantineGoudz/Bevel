@@ -12,14 +12,15 @@ pub(super) fn level_json(editor: &Editor) -> String {
         .iter()
         .map(|p| {
             format!(
-                "{{\"shape\":\"{}\",\"x\":{:.3},\"z\":{:.3},\"y\":{:.3},\"rotDeg\":{:.1},\"pitchDeg\":{:.1},\"rollDeg\":{:.1}}}",
+                "{{\"shape\":\"{}\",\"x\":{:.3},\"z\":{:.3},\"y\":{:.3},\"rotDeg\":{:.1},\"pitchDeg\":{:.1},\"rollDeg\":{:.1},\"dynamic\":{}}}",
                 shapes()[p.shape].id,
                 p.pos.x,
                 p.pos.y,
                 p.elevation,
                 p.rot.to_degrees(),
                 p.pitch.to_degrees(),
-                p.roll.to_degrees()
+                p.roll.to_degrees(),
+                p.dynamic
             )
         })
         .collect();
@@ -186,6 +187,7 @@ pub(super) fn autosave_session(
     time: Res<Time>,
     mut editor: ResMut<Editor>,
     orbit: Res<Orbit>,
+    movers: Res<Movers>,
     mut last: ResMut<LastSaved>,
     mut clock: ResMut<SaveClock>,
     mut focus: MessageReader<WindowFocused>,
@@ -221,7 +223,7 @@ pub(super) fn autosave_session(
         return;
     }
 
-    match persist(&editor, &orbit) {
+    match persist(&editor, &orbit, &movers) {
         Ok(()) => record_save_success(&mut editor, &orbit, &mut last, &mut clock, now),
         Err(error) => {
             editor.note = save_failure_note(error);
@@ -230,35 +232,75 @@ pub(super) fn autosave_session(
     }
 }
 
-pub(super) fn persist(editor: &Editor, orbit: &Orbit) -> Result<(), session::StorageError> {
+pub(super) fn persist(
+    editor: &Editor,
+    orbit: &Orbit,
+    movers: &Movers,
+) -> Result<(), session::StorageError> {
     #[cfg(target_arch = "wasm32")]
     {
         let id = editor
             .session
             .as_deref()
             .ok_or(session::StorageError::Unavailable)?;
-        let snapshot = editor.capture(orbit);
+        let snapshot = editor.capture(orbit, movers);
         let mut store = session::LocalStore::new()?;
         session::save_session(&mut store, id, &snapshot, session::now_ms())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = (editor, orbit);
+        let _ = (editor, orbit, movers);
         Ok(())
+    }
+}
+
+/// S-key manual save, split out of `interact` so that system stays under
+/// Bevy's 16-parameter limit while still seeing platform paths.
+pub(super) fn save_shortcut(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut editor: ResMut<Editor>,
+    orbit: Res<Orbit>,
+    movers: Res<Movers>,
+    mut last: ResMut<LastSaved>,
+    mut clock: ResMut<SaveClock>,
+    mut clipboard: ResMut<Clipboard>,
+    time: Res<Time>,
+    focus: Res<InputFocus>,
+    menu: Res<AddMenu>,
+) {
+    // A focused text field (properties, Add-menu search) owns the keyboard:
+    // typing "s" there must not write level.json.
+    if focus.get().is_some() || menu.open {
+        return;
+    }
+    if keys.just_pressed(KeyCode::KeyS) && !command_down(&keys) {
+        if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
+            copy_level_json(&mut editor, &mut clipboard);
+        } else if editor.mode == Mode::Build {
+            save(
+                &mut editor,
+                &orbit,
+                &movers,
+                &mut last,
+                &mut clock,
+                time.elapsed_secs_f64(),
+            );
+        }
     }
 }
 
 pub(super) fn save(
     editor: &mut Editor,
     orbit: &Orbit,
+    movers: &Movers,
     last: &mut LastSaved,
     clock: &mut SaveClock,
     now: f64,
 ) {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = orbit;
+        let _ = (orbit, movers);
         let json = level_json(editor);
         let path = std::path::Path::new("level.json");
         match std::fs::write(path, &json) {
@@ -273,7 +315,7 @@ pub(super) fn save(
 
     #[cfg(target_arch = "wasm32")]
     {
-        match persist(editor, orbit) {
+        match persist(editor, orbit, movers) {
             Ok(()) => {
                 record_save_success(editor, orbit, last, clock, now);
                 editor.note = "saved";

@@ -23,7 +23,11 @@ pub(super) fn spawn_piece(
         let shape = &shapes()[piece.shape];
         if let Some(collider) = piece_collider(shape) {
             root.insert((
-                RigidBody::Static,
+                if piece.dynamic {
+                    RigidBody::Dynamic
+                } else {
+                    RigidBody::Static
+                },
                 collider,
                 Position(transform.translation.real()),
                 Rotation(transform.rotation),
@@ -58,6 +62,15 @@ pub(super) fn sync_visuals(
         (&mut Transform, Option<&mut Position>, Option<&mut Rotation>),
         Or<(With<PieceVisual>, With<CharacterVisual>)>,
     >,
+    mut bodies: Query<
+        (
+            &RigidBody,
+            Has<Sleeping>,
+            Option<&mut LinearVelocity>,
+            Option<&mut AngularVelocity>,
+        ),
+        With<PieceVisual>,
+    >,
     mut visibilities: Query<&mut Visibility, With<CharacterVisual>>,
 ) {
     let ghost_wanted = editor.tool.is_some() && editor.ghost.is_some();
@@ -77,6 +90,30 @@ pub(super) fn sync_visuals(
     for piece in &editor.pieces {
         match visuals.map.get(&piece.id) {
             Some(&entity) => {
+                let wanted = if piece.dynamic {
+                    RigidBody::Dynamic
+                } else {
+                    RigidBody::Static
+                };
+                if let Ok((body, sleeping, linear, angular)) = bodies.get_mut(entity)
+                    && *body != wanted
+                {
+                    commands.entity(entity).insert(wanted);
+                    if let Some(mut linear) = linear {
+                        *linear = LinearVelocity::default();
+                    }
+                    if let Some(mut angular) = angular {
+                        *angular = AngularVelocity::default();
+                    }
+                    if sleeping {
+                        commands.entity(entity).remove::<Sleeping>();
+                    }
+                }
+                if piece.dynamic {
+                    // Physics owns this transform. `sync_dynamic_pieces` copies
+                    // the simulated pose back into the editor state.
+                    continue;
+                }
                 let pos = Vec3::new(piece.pos.x, piece.elevation, piece.pos.y);
                 let rot = model::piece_quat(piece);
                 if let Ok((mut transform, position, rotation)) = transforms.get_mut(entity) {
@@ -106,6 +143,7 @@ pub(super) fn sync_visuals(
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         match visuals.map.get(&0) {
             Some(&entity) => {
@@ -168,5 +206,41 @@ pub(super) fn sync_visuals(
         }
     } else if let Some(entity) = visuals.character.take() {
         commands.entity(entity).despawn();
+    }
+}
+
+/// Copy simulated transforms back into the editor's piece data for dynamic
+/// bodies. Static pieces continue to flow the other way in `sync_visuals`.
+pub(super) fn sync_dynamic_pieces(
+    visuals: Res<Visuals>,
+    mut editor: ResMut<Editor>,
+    poses: Query<&Transform, With<PieceVisual>>,
+) {
+    let mut moved = false;
+    for piece in &mut editor.pieces {
+        if !piece.dynamic {
+            continue;
+        }
+        let Some(&entity) = visuals.map.get(&piece.id) else {
+            continue;
+        };
+        let Ok(transform) = poses.get(entity) else {
+            continue;
+        };
+        let pos = Vec2::new(transform.translation.x, transform.translation.z);
+        let rotation = transform.rotation;
+        let same_pos = (piece.pos - pos).length_squared() < 1e-10
+            && (piece.elevation - transform.translation.y).abs() < 1e-5;
+        let same_rot = model::piece_quat(piece).dot(rotation).abs() > 0.99999;
+        if same_pos && same_rot {
+            continue;
+        }
+        piece.pos = pos;
+        piece.elevation = transform.translation.y;
+        model::set_piece_quat(piece, rotation);
+        moved = true;
+    }
+    if moved {
+        editor.soft_dirty = true;
     }
 }

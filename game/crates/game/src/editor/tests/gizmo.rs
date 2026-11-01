@@ -35,6 +35,7 @@ fn a_wall_face_is_clickable_at_mid_height() {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         },
         Piece {
             id: 2,
@@ -44,6 +45,7 @@ fn a_wall_face_is_clickable_at_mid_height() {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         },
     ];
     let hit = pick(&pieces, ray_towards(Vec3::new(0.519, 1.4, -0.9)));
@@ -65,6 +67,7 @@ fn a_wall_is_clickable_near_its_top_too() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 0.0,
+        dynamic: false,
     }];
     let hit = pick(&pieces, ray_towards(Vec3::new(0.519, 2.6, -0.9)));
     assert_eq!(hit, Some(2), "the upper face of a wall should be clickable");
@@ -81,6 +84,7 @@ fn the_floor_is_clickable() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 0.0,
+        dynamic: false,
     }];
     assert_eq!(
         pick(&pieces, ray_towards(Vec3::new(0.2, 0.0, 0.2))),
@@ -99,6 +103,7 @@ fn the_gizmo_is_bigger_than_the_selected_pieces_bounding_box() {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let (reach, ring) = gizmo_frame(&piece, shape);
         let size = bounding_size(&piece, shape);
@@ -143,6 +148,7 @@ fn an_axis_drag_moves_by_the_pointer_delta_not_to_the_pointer() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 0.0,
+        dynamic: false,
     };
     // Grabbed far out on the handle, then moved a little. The piece must
     // follow the little movement, not leap out to the pointer.
@@ -167,6 +173,7 @@ fn the_vertical_handle_lifts_and_lowers_a_piece() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 0.5,
+        dynamic: false,
     };
     // Grabbed at the top of the vertical handle, not at the piece origin.
     let moved = dragged_piece(
@@ -191,6 +198,7 @@ fn grabbing_the_vertical_handle_without_dragging_keeps_the_height() {
         roll: 0.0,
         // Free-placed just above the ground, where a snap would move it.
         elevation: 0.1,
+        dynamic: false,
     };
     let mut editor = Editor::default();
     editor.pieces.push(start);
@@ -232,6 +240,7 @@ fn a_yaw_drag_keeps_the_grab_offset() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 0.0,
+        dynamic: false,
     };
     // Grabbed on the +X side of the ring and dragged a quarter turn to +Z.
     let moved = dragged_piece(
@@ -254,6 +263,7 @@ fn a_pitch_drag_tilts_around_the_world_x_axis() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 0.0,
+        dynamic: false,
     };
     let origin = gizmo_origin(&start, &shapes()[start.shape]);
     let angle = 0.6_f32;
@@ -284,6 +294,7 @@ fn a_roll_drag_tilts_around_the_world_z_axis() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 0.0,
+        dynamic: false,
     };
     let origin = gizmo_origin(&start, &shapes()[start.shape]);
     let angle = -0.45_f32;
@@ -314,6 +325,7 @@ fn a_plane_handle_moves_in_two_axes_at_once() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 0.0,
+        dynamic: false,
     };
     let moved = dragged_piece(
         start,
@@ -337,6 +349,7 @@ fn height_snapping_stacks_a_block_on_the_one_below() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 0.0,
+        dynamic: false,
     };
     let moving = Piece {
         id: 2,
@@ -346,6 +359,7 @@ fn height_snapping_stacks_a_block_on_the_one_below() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 0.0,
+        dynamic: false,
     };
     let top = shapes()[block].top();
     let snapped = snap_elevation(
@@ -371,6 +385,7 @@ fn height_snapping_leaves_free_heights_alone() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 0.0,
+        dynamic: false,
     };
     let shape = &shapes()[crate_index];
     let free = snap_elevation(piece, shape, &[], 0.62, 1.0, true, ELEVATION_SNAP);
@@ -390,6 +405,7 @@ fn height_snapping_releases_a_stacked_piece_immediately() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 0.0,
+        dynamic: false,
     };
     let moving = Piece {
         id: 2,
@@ -399,6 +415,7 @@ fn height_snapping_releases_a_stacked_piece_immediately() {
         pitch: 0.0,
         roll: 0.0,
         elevation: shapes()[block].top(),
+        dynamic: false,
     };
     let top = shapes()[block].top();
     let lifted = snap_elevation(
@@ -424,6 +441,7 @@ fn height_snapping_only_captures_surfaces_ahead_of_the_drag() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 0.05,
+        dynamic: false,
     };
     let shape = &shapes()[crate_index];
     // Lifting away from the ground is free: it must not be pulled back down.
@@ -445,6 +463,7 @@ fn the_gizmo_offers_a_vertical_and_three_plane_handles() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 0.75,
+        dynamic: false,
     };
     let shape = &shapes()[block];
     let origin = gizmo_origin(&piece, shape);
@@ -510,6 +529,7 @@ fn the_build_orbit_target_is_the_selected_piece_centre() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 1.0,
+        dynamic: false,
     });
     editor.selected = Some(7);
     let target = selection_center(&editor).expect("selected centre");

@@ -31,13 +31,14 @@ pub(super) fn load_session(
     boot: Option<Res<session::Boot>>,
     mut editor: ResMut<Editor>,
     mut orbit: ResMut<Orbit>,
+    mut movers: ResMut<Movers>,
 ) {
     let Some(boot) = boot else {
         return;
     };
     if let (Some(id), Some(loaded)) = (&boot.id, boot.loaded.clone()) {
         editor.session = Some(id.clone());
-        editor.apply_loaded(&mut orbit, loaded);
+        editor.apply_loaded(&mut orbit, &mut movers, loaded);
     }
 }
 
@@ -226,6 +227,7 @@ pub(super) fn setup(
         palette_compact_button(&mut commands, PaletteAction::Character, "Char"),
         palette_compact_button(&mut commands, PaletteAction::Path, "Path"),
         palette_compact_button(&mut commands, PaletteAction::Plan, "Plan"),
+        palette_compact_button(&mut commands, PaletteAction::Platform, "Motion"),
         palette_compact_button(&mut commands, PaletteAction::Course, "Course"),
         palette_compact_button(&mut commands, PaletteAction::CopyJson, "JSON"),
     ];
@@ -301,7 +303,7 @@ pub(super) fn setup(
     let hint_text = commands
         .spawn((
             Text::new(
-                "LMB place / select / drag  |  Y lifts, plane squares slide  |  rings pitch / yaw / roll  |  Ctrl+C / Ctrl+V copy & paste  |  Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo  |  Path: click route, Shift append  |  Enter walk  |  drag waypoints / curve handles  |  RMB orbit (selection in Build)  |  MMB pan  |  wheel zoom  |  V view  |  Tab mouse  |  P play / build  |  C character  |  G move / R rotate  |  X Y Z lock axis  |  Enter / LMB confirm  |  Esc / RMB cancel  |  Shift+R 30 deg  |  S save  |  Shift+S copy JSON",
+                "LMB place / select / drag  |  Y lifts, plane squares slide  |  rings pitch / yaw / roll  |  Ctrl+C / Ctrl+V copy & paste  |  Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo  |  Path: click route, Shift append  |  Enter walk  |  drag waypoints / curve handles  |  RMB orbit (selection in Build)  |  MMB pan  |  wheel zoom  |  V view  |  Tab mouse  |  P play / build  |  C character  |  Shift+A add menu  |  G move / R rotate  |  X Y Z lock axis  |  Enter / LMB confirm  |  Esc / RMB cancel  |  Shift+R 30 deg  |  S save  |  Shift+S copy JSON",
             ),
             TextFont { font_size: FontSize::Px(11.0), ..default() },
             TextColor(Color::srgb_u8(0x6b, 0x7d, 0x93)),
@@ -337,6 +339,9 @@ pub(super) fn setup(
     commands.entity(play_bar).add_children(&play_buttons);
 
     spawn_touch_ui(&mut commands);
+    spawn_properties_panel(&mut commands);
+    spawn_health_hud(&mut commands);
+    spawn_add_menu(&mut commands);
 }
 
 /// The phone layout: a toolbar, a shape carousel, a thumbstick and a jump
@@ -385,6 +390,7 @@ pub(super) fn spawn_touch_ui(commands: &mut Commands) {
         touch_button(commands, TouchAction::Redo, "Redo"),
         touch_button(commands, TouchAction::Path, "Path"),
         touch_button(commands, TouchAction::Plan, "Plan"),
+        touch_button(commands, TouchAction::Platform, "Motion"),
         touch_button(commands, TouchAction::Course, "Course"),
         touch_button(commands, TouchAction::Play, "Play"),
     ];

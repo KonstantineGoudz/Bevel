@@ -4,6 +4,7 @@ use bevy::math::Dir3;
 use bevy::window::WindowResolution;
 
 mod gizmo;
+mod panel;
 mod physics;
 mod route;
 mod save;
@@ -121,12 +122,14 @@ fn physics_app() -> App {
     app.init_resource::<Editor>();
     app.init_resource::<Orbit>();
     app.init_resource::<TouchState>();
+    app.init_resource::<AddMenu>();
     app.init_resource::<ButtonInput<KeyCode>>();
     app.world_mut().spawn((
         RigidBody::Static,
         Collider::cuboid(20.0, 0.2, 20.0),
         Position::from_xyz(0.0, -0.1, 0.0),
     ));
+    app.init_resource::<InputFocus>();
     app.world_mut().spawn(CharacterVisual);
     // Let the physics pipeline build its broad phase for the floor.
     app.update();
@@ -152,5 +155,6 @@ fn test_piece(id: u32) -> Piece {
         pitch: 0.0,
         roll: 0.0,
         elevation: 0.0,
+        dynamic: false,
     }
 }

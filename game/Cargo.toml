@@ -7,10 +7,20 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [profile.dev]
+# Fast iteration: workspace + deps at opt 1 (Bevy needs it to run
+# acceptably), limited debug info, parallel codegen. NOTE: this used to
+# force opt-level 3 on ALL dependencies, which made every clean build
+# compile all of Bevy fully optimized — the main reason builds were slow.
 opt-level = 1
+debug = 1
+codegen-units = 16
 
-[profile.dev.package."*"]
-opt-level = 3
+# Fast browser iteration: no LTO, no debug info. Use for day-to-day web
+# testing; use wasm-release only for the final shipped build.
+[profile.wasm-dev]
+inherits = "dev"
+opt-level = 1
+debug = false
 
 [profile.release]
 strip = true

@@ -1,0 +1,525 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>3D Model Viewer — Party Dungeon</title>
+    <meta
+      name="description"
+      content="Import and view .glb and .gltf 3D model files in the browser."
+    />
+    <style>
+      :root {
+        --bg: #0c0f14;
+        --panel: #141a22;
+        --line: #263140;
+        --ink: #e6edf5;
+        --muted: #8b9bb0;
+        --amber: #f0a63c;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        min-height: 100%;
+        display: flex;
+        flex-direction: column;
+        background:
+          radial-gradient(1100px 600px at 15% -10%, #17222e 0%, transparent 60%),
+          radial-gradient(900px 500px at 100% 0%, #1b1730 0%, transparent 55%),
+          var(--bg);
+        color: var(--ink);
+        font: 16px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        max-width: 1100px;
+        width: 100%;
+        margin: 0 auto;
+        padding: 20px 24px 0;
+      }
+      header .spacer { flex: 1; }
+      .kicker {
+        font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--amber);
+        width: 100%;
+      }
+      h1 {
+        margin: 6px 0 0;
+        font-size: clamp(26px, 4vw, 40px);
+        letter-spacing: -0.02em;
+        line-height: 1.1;
+        width: 100%;
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 14px;
+        margin: 4px 0 0;
+        width: 100%;
+      }
+      a.back {
+        color: var(--muted);
+        font-size: 13px;
+        text-decoration: none;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 8px 12px;
+      }
+      a.back:hover { color: var(--ink); border-color: #3b4a5e; background: #141a22; }
+      button {
+        font: 600 13px/1 ui-sans-serif, system-ui, sans-serif;
+        letter-spacing: 0.02em;
+        padding: 11px 16px;
+        border-radius: 10px;
+        cursor: pointer;
+        border: 1px solid transparent;
+        transition: transform 0.12s ease, background 0.15s ease, border-color 0.15s ease;
+      }
+      button:active { transform: translateY(1px); }
+      button:disabled { opacity: 0.45; cursor: default; transform: none; }
+      .primary { background: var(--amber); color: #1a1305; }
+      .primary:hover:not(:disabled) { background: #f7b455; }
+      .ghost { background: transparent; color: var(--ink); border-color: var(--line); }
+      .ghost:hover:not(:disabled) { border-color: #3b4a5e; background: #141a22; }
+      .ghost[aria-pressed="true"] { border-color: var(--amber); color: var(--amber); }
+      button:focus-visible, a:focus-visible {
+        outline: 2px solid var(--amber);
+        outline-offset: 3px;
+      }
+      main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        max-width: 1100px;
+        width: 100%;
+        margin: 0 auto;
+        padding: 16px 24px 24px;
+        gap: 12px;
+        min-height: 0;
+      }
+      #drop-hint {
+        color: var(--muted);
+        font-size: 13px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      #viewport-wrap {
+        position: relative;
+        flex: 1;
+        min-height: 52vh;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        overflow: hidden;
+        background: #07090d;
+      }
+      #viewport { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+      #drop-overlay {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        text-align: center;
+        padding: 24px;
+        background: #0c0f14f2;
+        border: 2px dashed #354154;
+        border-radius: 14px;
+      }
+      #drop-overlay[hidden] { display: none; }
+      #viewport-wrap.dragging #drop-overlay { border-color: var(--amber); }
+      #drop-overlay strong { font-size: 18px; }
+      #drop-overlay span { color: var(--muted); font-size: 13px; max-width: 44ch; }
+      #hud {
+        position: absolute;
+        left: 12px;
+        bottom: 12px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        max-width: calc(100% - 24px);
+        padding: 10px 12px;
+        background: #0c0f14d9;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--muted);
+      }
+      #hud b { color: var(--ink); font-weight: 650; }
+      #error {
+        min-height: 1.5em;
+        margin: 0;
+        font-size: 13px;
+        color: #ff9b8e;
+      }
+      #error:empty { display: none; }
+      .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+      footer {
+        max-width: 1100px;
+        width: 100%;
+        margin: 0 auto;
+        padding: 16px 24px 24px;
+        color: #4a5768;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        border-top: 1px solid #1a222c;
+      }
+      footer a { color: inherit; }
+      @media (max-width: 640px) {
+        header, main, footer { padding-left: 16px; padding-right: 16px; }
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <header>
+      <div class="kicker">Party Dungeon &middot; model viewer</div>
+      <h1>Import &amp; view 3D models</h1>
+      <p class="sub">Drop a <b>.glb</b> or <b>.gltf</b> file anywhere, or pick one from disk. Nothing is uploaded &mdash; files stay in your browser.</p>
+      <a class="back" href="./">&larr; Back to maps</a>
+      <div class="spacer"></div>
+    </header>
+    <main>
+      <div class="toolbar">
+        <button class="primary" id="choose" type="button">Choose .glb / .gltf</button>
+        <button class="ghost" id="spin" type="button" aria-pressed="true">Auto-rotate: on</button>
+        <button class="ghost" id="reset" type="button" disabled>Reset view</button>
+        <button class="ghost" id="anim" type="button" hidden>Pause animation</button>
+        <input
+          id="file"
+          type="file"
+          accept=".glb,.gltf,.bin,.png,.jpg,.jpeg,.webp,.ktx2"
+          multiple
+          hidden
+        />
+      </div>
+      <p id="drop-hint">Tip: for a <b>.gltf</b> with external textures, select the <b>.gltf plus its companion files</b> together so textures resolve.</p>
+      <div id="viewport-wrap">
+        <canvas id="viewport"></canvas>
+        <div id="drop-overlay">
+          <strong>Drop a .glb or .gltf here</strong>
+          <span>…or use “Choose .glb / .gltf”. Dragging a .gltf plus its .bin and images keeps textures intact.</span>
+        </div>
+        <div id="hud" hidden></div>
+      </div>
+      <p id="error" role="alert" aria-live="polite"></p>
+    </main>
+    <footer>
+      <span>local 3D preview &middot; three.js r160 &middot; <a href="./">maps</a> &middot; <a href="./game.html">editor build</a></span>
+    </footer>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+
+      const canvas = document.querySelector("#viewport");
+      const wrap = document.querySelector("#viewport-wrap");
+      const overlay = document.querySelector("#drop-overlay");
+      const hud = document.querySelector("#hud");
+      const errorBox = document.querySelector("#error");
+      const chooseBtn = document.querySelector("#choose");
+      const fileInput = document.querySelector("#file");
+      const spinBtn = document.querySelector("#spin");
+      const resetBtn = document.querySelector("#reset");
+      const animBtn = document.querySelector("#anim");
+
+      const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.0;
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x07090d);
+
+      const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 2000);
+      camera.position.set(3.2, 2.4, 4.2);
+
+      const controls = new OrbitControls(camera, canvas);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.08;
+      controls.autoRotate = true;
+      controls.autoRotateSpeed = 0.9;
+
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+      const hemi = new THREE.HemisphereLight(0xdfeaff, 0x1a1410, 0.7);
+      scene.add(hemi);
+      const key = new THREE.DirectionalLight(0xffffff, 1.6);
+      key.position.set(4, 7, 3);
+      scene.add(key);
+
+      const grid = new THREE.GridHelper(12, 24, 0x2c3a4d, 0x1a222c);
+      grid.position.y = 0;
+      scene.add(grid);
+
+      const loader = new GLTFLoader();
+      let current = null; // { root, urls: string[], home: {pos, target} }
+      let mixer = null;
+      let mixerClock = new THREE.Clock();
+      let animPlaying = true;
+      let objectUrlsByName = new Map();
+
+      function setError(message) {
+        errorBox.textContent = message || "";
+      }
+
+      function formatBytes(bytes) {
+        if (!Number.isFinite(bytes)) return "unknown size";
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+        return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+      }
+
+      function clearCurrent() {
+        if (current) {
+          scene.remove(current.root);
+          current.root.traverse((obj) => {
+            const mesh = obj;
+            if (mesh.isMesh) {
+              mesh.geometry?.dispose?.();
+              const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+              for (const m of mats) {
+                for (const value of Object.values(m || {})) {
+                  if (value && value.isTexture) value.dispose?.();
+                }
+                m?.dispose?.();
+              }
+            }
+          });
+          for (const url of current.urls) URL.revokeObjectURL(url);
+          current = null;
+        }
+        mixer = null;
+        animPlaying = true;
+        animBtn.hidden = true;
+        resetBtn.disabled = true;
+        objectUrlsByName = new Map();
+      }
+
+      function showHud({ name, size, meshes, materials, animations }) {
+        hud.hidden = false;
+        hud.innerHTML = "";
+        const items = [
+          ["file", name],
+          ["size", formatBytes(size)],
+          ["meshes", String(meshes)],
+          ["materials", String(materials)],
+          ["animations", String(animations)],
+        ];
+        for (const [k, v] of items) {
+          const span = document.createElement("span");
+          const label = document.createElement("span");
+          label.textContent = `${k}: `;
+          const bold = document.createElement("b");
+          bold.textContent = v;
+          span.append(label, bold);
+          hud.append(span);
+        }
+      }
+
+      function frameObject(root) {
+        const box = new THREE.Box3().setFromObject(root);
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
+        const radius = Math.max(size.x, size.y, size.z, 0.5);
+        const dist = radius * 2.1;
+        const dir = new THREE.Vector3(0.75, 0.55, 1).normalize();
+        camera.position.copy(center).addScaledVector(dir, dist);
+        camera.near = Math.max(0.01, dist / 1000);
+        camera.far = Math.max(200, dist * 50);
+        camera.updateProjectionMatrix();
+        controls.target.copy(center);
+        grid.position.y = box.min.y - 0.001;
+        controls.update();
+        return {
+          pos: camera.position.clone(),
+          target: controls.target.clone(),
+        };
+      }
+
+      function countStats(root) {
+        let meshes = 0;
+        const materials = new Set();
+        root.traverse((obj) => {
+          if (obj.isMesh) {
+            meshes += 1;
+            const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+            for (const m of mats) if (m) materials.add(m.uuid);
+          }
+        });
+        return { meshes, materials: materials.size };
+      }
+
+      async function loadFiles(fileList) {
+        const files = [...fileList];
+        if (files.length === 0) return;
+        setError("");
+
+        const models = files.filter((f) => /\.(glb|gltf)$/i.test(f.name));
+        if (models.length === 0) {
+          setError("No .glb or .gltf file found in that selection. Pick a model file to preview.");
+          return;
+        }
+        // Prefer the largest model file when several are selected.
+        models.sort((a, b) => b.size - a.size);
+        const main = models[0];
+
+        clearCurrent();
+        overlay.hidden = true;
+
+        const urls = [];
+        const byName = new Map();
+        for (const f of files) {
+          const url = URL.createObjectURL(f);
+          urls.push(url);
+          byName.set(f.name.toLowerCase(), url);
+          byName.set(f.name.split("/").pop().toLowerCase(), url);
+        }
+        objectUrlsByName = byName;
+        loader.manager.setURLModifier((url) => {
+          try {
+            const clean = decodeURIComponent(url.split("?")[0].split("#")[0]);
+            const base = clean.split("/").pop().toLowerCase();
+            if (byName.has(base)) return byName.get(base);
+            if (byName.has(clean.toLowerCase())) return byName.get(clean.toLowerCase());
+          } catch { /* fall through to the original URL */ }
+          return url;
+        });
+
+        const mainUrl = byName.get(main.name.toLowerCase());
+        try {
+          const gltf = await loader.loadAsync(mainUrl);
+          const root = gltf.scene || new THREE.Group();
+          scene.add(root);
+          const home = frameObject(root);
+          current = { root, urls, home };
+
+          const { meshes, materials } = countStats(root);
+          showHud({
+            name: main.name,
+            size: main.size,
+            meshes,
+            materials,
+            animations: gltf.animations.length,
+          });
+
+          if (gltf.animations.length > 0) {
+            mixer = new THREE.AnimationMixer(root);
+            for (const clip of gltf.animations) mixer.clipAction(clip).play();
+            mixerClock.start();
+            animBtn.hidden = false;
+            animBtn.textContent = "Pause animation";
+          }
+          resetBtn.disabled = false;
+        } catch (err) {
+          console.error(err);
+          for (const url of urls) URL.revokeObjectURL(url);
+          objectUrlsByName = new Map();
+          overlay.hidden = false;
+          hud.hidden = true;
+          setError(`Could not load “${main.name}”. Make sure it is a valid .glb/.gltf file${/\.gltf$/i.test(main.name) ? " and that its .bin/textures were selected alongside it" : ""}.`);
+        } finally {
+          loader.manager.setURLModifier((url) => url);
+        }
+      }
+
+      function resize() {
+        const rect = wrap.getBoundingClientRect();
+        const w = Math.max(1, Math.floor(rect.width));
+        const h = Math.max(1, Math.floor(rect.height));
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+      }
+      new ResizeObserver(resize).observe(wrap);
+      window.addEventListener("resize", resize);
+      resize();
+
+      renderer.setAnimationLoop(() => {
+        controls.update();
+        if (mixer && animPlaying) mixer.update(Math.min(mixerClock.getDelta(), 0.05));
+        else mixerClock.getDelta();
+        renderer.render(scene, camera);
+      });
+
+      chooseBtn.addEventListener("click", () => fileInput.click());
+      fileInput.addEventListener("change", () => {
+        if (fileInput.files?.length) loadFiles(fileInput.files);
+        fileInput.value = "";
+      });
+
+      spinBtn.addEventListener("click", () => {
+        controls.autoRotate = !controls.autoRotate;
+        spinBtn.textContent = `Auto-rotate: ${controls.autoRotate ? "on" : "off"}`;
+        spinBtn.setAttribute("aria-pressed", String(controls.autoRotate));
+      });
+
+      resetBtn.addEventListener("click", () => {
+        if (!current) return;
+        camera.position.copy(current.home.pos);
+        controls.target.copy(current.home.target);
+        controls.update();
+      });
+
+      animBtn.addEventListener("click", () => {
+        animPlaying = !animPlaying;
+        animBtn.textContent = animPlaying ? "Pause animation" : "Play animation";
+      });
+
+      // Drag & drop anywhere on the page.
+      let dragDepth = 0;
+      window.addEventListener("dragenter", (e) => {
+        if (![...(e.dataTransfer?.types || [])].includes("Files")) return;
+        e.preventDefault();
+        dragDepth += 1;
+        wrap.classList.add("dragging");
+      });
+      window.addEventListener("dragover", (e) => {
+        if ([...(e.dataTransfer?.types || [])].includes("Files")) e.preventDefault();
+      });
+      window.addEventListener("dragleave", (e) => {
+        if ([...(e.dataTransfer?.types || [])].includes("Files")) {
+          dragDepth = Math.max(0, dragDepth - 1);
+          if (dragDepth === 0) wrap.classList.remove("dragging");
+        }
+      });
+      window.addEventListener("drop", (e) => {
+        if (![...(e.dataTransfer?.types || [])].includes("Files")) return;
+        e.preventDefault();
+        dragDepth = 0;
+        wrap.classList.remove("dragging");
+        if (e.dataTransfer.files?.length) loadFiles(e.dataTransfer.files);
+      });
+
+      // `viewer.html?src=./demo.glb` deep-links a model from the same origin.
+      const preset = new URLSearchParams(window.location.search).get("src");
+      if (preset) {
+        try {
+          const res = await fetch(preset);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const blob = await res.blob();
+          const name = preset.split("/").pop().split("?")[0] || "model.glb";
+          await loadFiles([new File([blob], name, { type: blob.type })]);
+        } catch (err) {
+          console.warn("Could not load ?src= preset.", err);
+          setError("Could not load the linked model file. Try choosing it from disk instead.");
+        }
+      }
+    </script>
+  </body>
+</html>

@@ -48,9 +48,100 @@ pub(super) fn contact_gap(ray_distance: f32, normal_y: f32) -> f32 {
     ray_distance - PILL_RADIUS / normal_y.max(0.01)
 }
 
+/// How much of the character's inward speed a shoved body picks up. Below 1.0
+/// so a pushed crate trails the player instead of sticking to the capsule and
+/// jittering.
+pub(super) const PUSH_FACTOR: f32 = 0.85;
+/// Minimum inward speed before a shove counts, in m/s. Filters contact jitter
+/// when the capsule rests against a prop.
+pub(super) const PUSH_MIN_SPEED: f32 = 0.15;
+
+/// One recorded character-vs-prop contact. Collected inside the move-and-slide
+/// callback (which can only return a response, not touch other queries) and
+/// applied afterwards as an impulse.
+#[derive(Clone, Copy, Debug)]
+struct PushHit {
+    collider: Entity,
+    point: Vec3,
+    normal: Vec3,
+    character_velocity: Vec3,
+}
+
+/// Velocity-matching impulse that brings `body_vel` up to `PUSH_FACTOR` of the
+/// character's inward speed, without overshooting. Returns `None` when the
+/// character is separating or barely touching.
+pub(super) fn push_impulse(
+    normal: Vec3,
+    character_velocity: Vec3,
+    body_velocity: Vec3,
+    body_mass: f32,
+) -> Option<Vec3> {
+    if body_mass <= 0.0 || !body_mass.is_finite() {
+        return None;
+    }
+    // `normal` is the obstacle surface normal; the push direction is into the
+    // body. The double-negative form below matches Avian's kinematic example
+    // and pushes into the body whichever way the normal is oriented.
+    let touch_dir = -normal.normalize_or_zero();
+    if touch_dir == Vec3::ZERO {
+        return None;
+    }
+    let relative = character_velocity - body_velocity;
+    let inward = touch_dir.dot(relative);
+    if inward < PUSH_MIN_SPEED {
+        return None;
+    }
+    Some(touch_dir * (inward * PUSH_FACTOR * body_mass))
+}
+
+/// Resolve a hit collider to the rigid body that owns it. Piece colliders live
+/// on the body entity itself; child colliders (if any) point at it through
+/// `ColliderOf`.
+fn push_target(collider: Entity, collider_of: &Query<&ColliderOf>) -> Entity {
+    collider_of
+        .get(collider)
+        .map(|of| of.body)
+        .unwrap_or(collider)
+}
+
+/// Apply recorded shoves to dynamic bodies. Static geometry and the player
+/// are skipped; each hit only accelerates its body up to the character's
+/// inward speed so light props do not launch.
+fn apply_pushes(
+    hits: &[PushHit],
+    collider_of: &Query<&ColliderOf>,
+    rigid: &Query<&RigidBody>,
+    masses: &Query<&ComputedMass>,
+    bodies: &mut Query<Forces>,
+) {
+    for hit in hits {
+        let target = push_target(hit.collider, collider_of);
+        let Ok(body) = rigid.get(target) else {
+            continue;
+        };
+        if !body.is_dynamic() {
+            continue;
+        }
+        let Ok(mass) = masses.get(target) else {
+            continue;
+        };
+        let Ok(mut forces) = bodies.get_mut(target) else {
+            continue;
+        };
+        let body_vel = forces.linear_velocity();
+        let Some(impulse) =
+            push_impulse(hit.normal, hit.character_velocity, body_vel, mass.value())
+        else {
+            continue;
+        };
+        forces.apply_linear_impulse_at_point(impulse, hit.point.real());
+    }
+}
+
 /// Advance the character along the drawn route at a constant walking pace.
 /// The camera's orbit centre follows in third/top view; in first person the
 /// look direction follows the tangent.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn walk(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -60,7 +151,16 @@ pub(super) fn walk(
     kit: Res<Kit>,
     player: Query<Entity, With<CharacterVisual>>,
     move_and_slide: MoveAndSlide,
+    focus: Res<InputFocus>,
+    collider_of: Query<&ColliderOf>,
+    rigid: Query<&RigidBody>,
+    masses: Query<&ComputedMass>,
+    mut bodies: Query<Forces>,
+    menu: Res<AddMenu>,
 ) {
+    if focus.get().is_some() || menu.open {
+        return;
+    }
     let Some(mut current) = editor.walk else {
         return;
     };
@@ -111,6 +211,7 @@ pub(super) fn walk(
     for _ in 0..steps {
         vy -= GRAVITY * step_dt;
         let velocity = Vec3::new(direction.x * WALK_SPEED, vy, direction.y * WALK_SPEED);
+        let mut hits: Vec<PushHit> = Vec::new();
         let output = move_and_slide.move_and_slide(
             &kit.character_collider,
             center.real(),
@@ -119,12 +220,21 @@ pub(super) fn walk(
             std::time::Duration::from_secs_f32(step_dt),
             &MoveAndSlideConfig::default(),
             &filter,
-            |_| MoveAndSlideHitResponse::Accept,
+            |hit| {
+                hits.push(PushHit {
+                    collider: hit.entity,
+                    point: hit.point.f32(),
+                    normal: **hit.normal,
+                    character_velocity: *hit.velocity,
+                });
+                MoveAndSlideHitResponse::Accept
+            },
         );
         let next = output.position.f32();
         travelled += Vec2::new(next.x - center.x, next.z - center.z).length();
         center = next;
         vy = output.projected_velocity.y;
+        apply_pushes(&hits, &collider_of, &rigid, &masses, &mut bodies);
     }
 
     let moved = Vec2::new(center.x, center.z);
@@ -225,6 +335,7 @@ pub(super) fn walk(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn character_move(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -234,7 +345,16 @@ pub(super) fn character_move(
     kit: Res<Kit>,
     player: Query<Entity, With<CharacterVisual>>,
     move_and_slide: MoveAndSlide,
+    focus: Res<InputFocus>,
+    collider_of: Query<&ColliderOf>,
+    rigid: Query<&RigidBody>,
+    masses: Query<&ComputedMass>,
+    mut bodies: Query<Forces>,
+    menu: Res<AddMenu>,
 ) {
+    if focus.get().is_some() || menu.open {
+        return;
+    }
     if editor.walk.is_some() {
         return;
     }
@@ -311,6 +431,7 @@ pub(super) fn character_move(
             vy -= GRAVITY * step_dt;
         }
         let velocity = Vec3::new(direction.x * speed, vy, direction.y * speed);
+        let mut hits: Vec<PushHit> = Vec::new();
         let output = move_and_slide.move_and_slide(
             &kit.character_collider,
             center.real(),
@@ -319,10 +440,19 @@ pub(super) fn character_move(
             std::time::Duration::from_secs_f32(step_dt),
             &MoveAndSlideConfig::default(),
             &filter,
-            |_| MoveAndSlideHitResponse::Accept,
+            |hit| {
+                hits.push(PushHit {
+                    collider: hit.entity,
+                    point: hit.point.f32(),
+                    normal: **hit.normal,
+                    character_velocity: *hit.velocity,
+                });
+                MoveAndSlideHitResponse::Accept
+            },
         );
         center = output.position.f32();
         vy = output.projected_velocity.y;
+        apply_pushes(&hits, &collider_of, &rigid, &masses, &mut bodies);
     }
 
     // Follow a descending slope for a short step instead of free-falling until

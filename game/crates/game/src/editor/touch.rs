@@ -263,6 +263,7 @@ pub(super) fn update_touch_buttons(
             TouchAction::Play => false,
             TouchAction::Path => editor.actor_tool == Some(ActorTool::Path),
             TouchAction::Plan => editor.actor_tool == Some(ActorTool::Plan),
+            TouchAction::Platform => editor.actor_tool == Some(ActorTool::Platform),
             TouchAction::Add => touch.append,
             TouchAction::Walk => {
                 editor.actor_tool == Some(ActorTool::Plan)
@@ -306,6 +307,7 @@ pub(super) fn update_touch_status(
         Some(ActorTool::Path) => "path",
         Some(ActorTool::Plan) => "plan",
         Some(ActorTool::Place) => "char",
+        Some(ActorTool::Platform) => "motion",
         None => editor
             .tool
             .map(|shape| shapes()[shape].name)
@@ -333,7 +335,7 @@ pub(super) fn update_touch_status(
 #[allow(dead_code)] // superseded by UI activation; kept for the hit-test test
 pub(super) fn touch_action_at(pos: Vec2, css: Vec2) -> Option<TouchAction> {
     if (8.0..=42.0).contains(&pos.y) {
-        let width = (css.x - 20.0) / 9.0;
+        let width = (css.x - 20.0) / 10.0;
         let index = ((pos.x - 8.0) / (width + 4.0)).floor().max(0.0) as usize;
         return [
             TouchAction::View,
@@ -343,10 +345,11 @@ pub(super) fn touch_action_at(pos: Vec2, css: Vec2) -> Option<TouchAction> {
             TouchAction::Redo,
             TouchAction::Path,
             TouchAction::Plan,
+            TouchAction::Platform,
             TouchAction::Course,
             TouchAction::Play,
         ]
-        .get(index.min(8))
+        .get(index.min(9))
         .copied();
     }
     if (46.0..=84.0).contains(&pos.y) {
@@ -430,6 +433,22 @@ pub(super) fn run_touch_action(
                 orbit.pitch = 1.4;
                 orbit.distance = 13.0;
                 focus_character(orbit, editor.character);
+            }
+        }
+        TouchAction::Platform => {
+            let entering = editor.actor_tool != Some(ActorTool::Platform);
+            editor.actor_tool = if entering {
+                Some(ActorTool::Platform)
+            } else {
+                None
+            };
+            editor.tool = None;
+            if entering {
+                editor.note = if editor.selected.is_some() {
+                    "motion: tap grid to add path points"
+                } else {
+                    "select a piece first, then add motion"
+                };
             }
         }
         TouchAction::Add => touch.append = !touch.append,
@@ -532,17 +551,24 @@ pub(super) fn on_path_press(
     mut editor: ResMut<Editor>,
     mut gesture: ResMut<PathGesture>,
     mut touch: ResMut<TouchState>,
+    focus: Res<InputFocus>,
 ) {
     if event.button != PointerButton::Primary || capture.grabbed {
         return;
     }
-    if editor.keyboard_transform.is_some() {
+    if editor.keyboard_transform.is_some() || focus.get().is_some() {
         return;
     }
     if touches.iter().count() > 1 {
         touch.multi = true;
     }
     let pos = event.pointer.position;
+    if !touch.enabled
+        && editor.selected.is_some()
+        && over_properties_panel(pos, window.size(), true)
+    {
+        return;
+    }
     if touch.enabled {
         let size = window.size();
         let centre = stick_centre(size, touch.ui_scale);
@@ -630,10 +656,11 @@ pub(super) fn path_drag(
     nav: Res<Nav>,
     spatial_query: SpatialQuery,
     player: Query<Entity, With<CharacterVisual>>,
+    menu: Res<AddMenu>,
 ) {
     // Looking owns the mouse; a drag that was already in flight finishes when
     // the button is released.
-    if capture.grabbed {
+    if capture.grabbed || menu.open {
         return;
     }
     // Play never edits objects, even if a handle drag was in flight when the

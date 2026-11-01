@@ -98,6 +98,7 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         },
         // 270 deg makes the ramp rise along +x.
         Piece {
@@ -108,6 +109,7 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         },
         Piece {
             id: 3,
@@ -117,6 +119,7 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         },
         Piece {
             id: 4,
@@ -126,6 +129,7 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         },
     ];
 
@@ -136,6 +140,7 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
         yaw: -std::f32::consts::FRAC_PI_2,
         vy: 0.0,
         grounded: true,
+        health: crate::statuses::Health::default(),
     };
 
     (pieces, character)

@@ -37,6 +37,7 @@ fn a_successful_save_refreshes_the_saved_pose_and_clock() {
         yaw: 0.75,
         vy: 3.0,
         grounded: true,
+        health: crate::statuses::Health::default(),
     };
     let mut editor = Editor {
         character: Some(character),
@@ -96,6 +97,7 @@ fn saving_writes_each_pieces_height() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 1.25,
+        dynamic: false,
     });
     let json = level_json(&editor);
     assert!(json.contains("\"y\":1.250"), "{json}");
@@ -113,11 +115,13 @@ fn saving_writes_each_pieces_full_rotation() {
         pitch: (-15.0_f32).to_radians(),
         roll: 10.0_f32.to_radians(),
         elevation: 0.0,
+        dynamic: true,
     });
     let json = level_json(&editor);
     assert!(json.contains("\"rotDeg\":30.0"), "{json}");
     assert!(json.contains("\"pitchDeg\":-15.0"), "{json}");
     assert!(json.contains("\"rollDeg\":10.0"), "{json}");
+    assert!(json.contains("\"dynamic\":true"), "{json}");
 }
 
 #[test]
@@ -131,6 +135,7 @@ fn copying_keeps_the_selected_piece() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 1.5,
+        dynamic: false,
     };
     let mut editor = Editor::default();
     editor.pieces.push(piece);
@@ -152,6 +157,7 @@ fn pasting_makes_a_new_selected_copy_at_the_cursor() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 1.5,
+        dynamic: false,
     };
     let mut editor = Editor::default();
     editor.snap = false;
@@ -186,6 +192,7 @@ fn pasting_without_a_cursor_lands_beside_the_source() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 0.0,
+        dynamic: false,
     });
     editor.selected = Some(1);
     copy_piece(&mut editor);
@@ -215,13 +222,14 @@ fn copying_and_pasting_nothing_are_harmless() {
 fn applying_a_snapshot_without_a_camera_keeps_the_default_camera() {
     let mut editor = Editor::default();
     let mut orbit = Orbit::default();
+    let mut movers = Movers::default();
     let loaded = session::Snapshot {
         version: 1,
         ..Default::default()
     }
     .validate()
     .unwrap();
-    editor.apply_loaded(&mut orbit, loaded);
+    editor.apply_loaded(&mut orbit, &mut movers, loaded);
     assert_eq!(orbit.yaw, Orbit::default().yaw);
     assert_eq!(orbit.mode, ViewMode::Third);
 }

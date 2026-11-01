@@ -8,6 +8,7 @@ use bevy::prelude::Resource;
 use crate::{
     editor::{Character, Orbit, ViewMode},
     model::{self, Piece},
+    statuses::Health,
 };
 
 pub const SNAPSHOT_VERSION: u32 = 1;
@@ -52,6 +53,9 @@ pub struct Snapshot {
     pub undo: Vec<Vec<SavedPiece>>,
     #[serde(default, deserialize_with = "deserialize_history")]
     pub redo: Vec<Vec<SavedPiece>>,
+    /// Moving-platform paths, keyed by piece id. Missing on older saves.
+    #[serde(default)]
+    pub platforms: Vec<SavedPlatform>,
 }
 
 fn deserialize_optional<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -93,6 +97,9 @@ pub struct SavedPiece {
     /// Roll in degrees. Missing on older levels, which are upright.
     #[serde(default)]
     pub roll_deg: f32,
+    /// Physics-driven pieces fall and collide. Missing on older levels.
+    #[serde(default)]
+    pub dynamic: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -103,6 +110,12 @@ pub struct SavedCharacter {
     #[serde(default)]
     pub feet: f32,
     pub yaw_deg: f32,
+    /// Current health points. Missing on older saves, which load at full.
+    #[serde(default)]
+    pub hp: Option<f32>,
+    /// Maximum health points. Missing on older saves, which use the default.
+    #[serde(default)]
+    pub max_hp: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -117,6 +130,31 @@ pub struct SavedCamera {
     pub mode: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedPlatformPoint {
+    pub x: f32,
+    pub z: f32,
+    #[serde(default)]
+    pub incoming: Option<[f32; 2]>,
+    #[serde(default)]
+    pub outgoing: Option<[f32; 2]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedPlatform {
+    pub piece: u32,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub speed: Option<f32>,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub waypoints: Vec<SavedPlatformPoint>,
+}
+
 impl From<&Piece> for SavedPiece {
     fn from(piece: &Piece) -> Self {
         Self {
@@ -128,6 +166,7 @@ impl From<&Piece> for SavedPiece {
             rot_deg: piece.rot.to_degrees(),
             pitch_deg: piece.pitch.to_degrees(),
             roll_deg: piece.roll.to_degrees(),
+            dynamic: piece.dynamic,
         }
     }
 }
@@ -139,6 +178,8 @@ impl From<&Character> for SavedCharacter {
             z: character.pos.y,
             feet: character.feet,
             yaw_deg: character.yaw.to_degrees(),
+            hp: Some(character.health.current),
+            max_hp: Some(character.health.max),
         }
     }
 }
@@ -185,6 +226,27 @@ impl Snapshot {
         let redo = validate_history(self.redo, &mut highest_id);
 
         let character = self.character.and_then(|saved| {
+            let health = match (saved.hp, saved.max_hp) {
+                (Some(hp), Some(max)) => {
+                    if !hp.is_finite() || !max.is_finite() {
+                        return None;
+                    }
+                    Health::new(hp, max)
+                }
+                (Some(hp), None) => {
+                    if !hp.is_finite() {
+                        return None;
+                    }
+                    Health::new(hp, Health::default().max)
+                }
+                (None, Some(max)) => {
+                    if !max.is_finite() {
+                        return None;
+                    }
+                    Health::full(max)
+                }
+                (None, None) => Health::default(),
+            };
             [saved.x, saved.z, saved.feet, saved.yaw_deg]
                 .iter()
                 .all(|value| value.is_finite())
@@ -194,6 +256,7 @@ impl Snapshot {
                     yaw: saved.yaw_deg.to_radians(),
                     vy: 0.0,
                     grounded: false,
+                    health,
                 })
         });
 
@@ -225,6 +288,12 @@ impl Snapshot {
             .max(highest_id.saturating_add(1))
             .max(1);
 
+        let platforms = self
+            .platforms
+            .iter()
+            .filter_map(validate_platform)
+            .collect();
+
         Ok(Loaded {
             pieces,
             character,
@@ -232,6 +301,7 @@ impl Snapshot {
             undo,
             redo,
             next_id,
+            platforms,
         })
     }
 }
@@ -496,6 +566,29 @@ pub struct Loaded {
     pub undo: Vec<Vec<Piece>>,
     pub redo: Vec<Vec<Piece>>,
     pub next_id: u32,
+    pub platforms: Vec<SavedPlatform>,
+}
+
+fn validate_platform(saved: &SavedPlatform) -> Option<SavedPlatform> {
+    if saved.waypoints.is_empty() {
+        return None;
+    }
+    for point in &saved.waypoints {
+        if !point.x.is_finite() || !point.z.is_finite() {
+            return None;
+        }
+        for handle in [point.incoming, point.outgoing].into_iter().flatten() {
+            if !handle[0].is_finite() || !handle[1].is_finite() {
+                return None;
+            }
+        }
+    }
+    if let Some(speed) = saved.speed
+        && (!speed.is_finite() || speed <= 0.0)
+    {
+        return None;
+    }
+    Some(saved.clone())
 }
 
 fn validate_piece(saved: SavedPiece) -> Result<Piece, LoadError> {
@@ -522,6 +615,7 @@ fn validate_piece(saved: SavedPiece) -> Result<Piece, LoadError> {
         pitch: saved.pitch_deg.to_radians(),
         roll: saved.roll_deg.to_radians(),
         elevation: saved.elevation,
+        dynamic: saved.dynamic,
     })
 }
 
@@ -566,6 +660,7 @@ mod tests {
             x: 1.5,
             z: -2.0,
             elevation: 0.5,
+            dynamic: true,
             rot_deg: 30.0,
             pitch_deg: -15.0,
             roll_deg: 10.0,
@@ -583,6 +678,8 @@ mod tests {
                 z: 2.0,
                 feet: 0.25,
                 yaw_deg: 90.0,
+                hp: Some(80.0),
+                max_hp: Some(100.0),
             }),
             camera: Some(SavedCamera {
                 target_x: 0.0,
@@ -595,11 +692,13 @@ mod tests {
             }),
             undo: vec![vec![]],
             redo: vec![vec![piece()]],
+            platforms: vec![],
         };
         let json = snapshot.to_json();
         assert!(json.contains("\"rotDeg\":30.0"), "{json}");
         assert!(json.contains("\"pitchDeg\":-15.0"), "{json}");
         assert!(json.contains("\"rollDeg\":10.0"), "{json}");
+        assert!(json.contains("\"dynamic\":true"), "{json}");
         assert_eq!(Snapshot::from_json(&json).unwrap(), snapshot);
 
         let loaded = Snapshot::from_json(&json).unwrap().validate().unwrap();
@@ -607,6 +706,10 @@ mod tests {
         assert!((piece.rot - 30.0_f32.to_radians()).abs() < 1e-5);
         assert!((piece.pitch - (-15.0_f32).to_radians()).abs() < 1e-5);
         assert!((piece.roll - 10.0_f32.to_radians()).abs() < 1e-5);
+        assert!(piece.dynamic);
+        let character = loaded.character.unwrap();
+        assert!((character.health.current - 80.0).abs() < 1e-5);
+        assert!((character.health.max - 100.0).abs() < 1e-5);
     }
 
     #[test]
@@ -620,6 +723,7 @@ mod tests {
         assert!((piece.rot - 30.0_f32.to_radians()).abs() < 1e-5);
         assert_eq!(piece.pitch, 0.0);
         assert_eq!(piece.roll, 0.0);
+        assert!(!piece.dynamic);
     }
 
     #[test]
@@ -666,6 +770,33 @@ mod tests {
     }
 
     #[test]
+    fn an_old_character_without_health_loads_at_full() {
+        let snapshot =
+            Snapshot::from_json(r#"{"version":1,"character":{"x":1,"z":2,"feet":0,"yawDeg":45}}"#)
+                .unwrap();
+        let loaded = snapshot.validate().unwrap();
+        let character = loaded.character.expect("old character loads");
+        assert_eq!(character.health, Health::default());
+    }
+
+    #[test]
+    fn a_character_with_bad_health_is_dropped() {
+        let snapshot = Snapshot {
+            version: 1,
+            character: Some(SavedCharacter {
+                x: 0.0,
+                z: 0.0,
+                feet: 0.0,
+                yaw_deg: 0.0,
+                hp: Some(f32::NAN),
+                max_hp: Some(100.0),
+            }),
+            ..Default::default()
+        };
+        assert!(snapshot.validate().unwrap().character.is_none());
+    }
+
+    #[test]
     fn malformed_history_json_drops_only_the_bad_entry() {
         let snapshot = Snapshot::from_json(
             r#"{
@@ -692,6 +823,7 @@ mod tests {
             x,
             z,
             elevation: 0.0,
+            dynamic: false,
             rot_deg: 0.0,
             pitch_deg: 0.0,
             roll_deg: 0.0,
@@ -794,6 +926,8 @@ mod tests {
                 z: 0.0,
                 feet: 0.0,
                 yaw_deg: 0.0,
+                hp: None,
+                max_hp: None,
             }),
             ..Default::default()
         };

@@ -244,6 +244,9 @@ pub enum Style {
     Rubble,
 }
 
+/// Damage dealt on touch. Hard-coded to 10 for spikes; everything else is 0.
+pub const SPIKE_DAMAGE: f32 = 10.0;
+
 #[derive(Clone, Debug)]
 pub struct Shape {
     pub id: &'static str,
@@ -258,6 +261,8 @@ pub struct Shape {
     pub height: f32,
     /// Where its bottom sits; a floor's top is at zero, so its base is negative.
     pub base: f32,
+    /// Touch damage per hit. Zero means harmless.
+    pub damage: f32,
 }
 
 impl Shape {
@@ -266,13 +271,14 @@ impl Shape {
     }
 }
 
-pub const CATEGORIES: [&str; 7] = [
+pub const CATEGORIES: [&str; 8] = [
     "Surface",
     "Barrier",
     "Traversal",
     "Threshold",
     "Fixture",
     "Resource",
+    "Hazard",
     "Marker",
 ];
 
@@ -300,7 +306,27 @@ fn shape(
         anchors,
         height,
         base,
+        damage: 0.0,
     }
+}
+
+fn hazard_shape(
+    id: &'static str,
+    name: &'static str,
+    mode: SnapMode,
+    color: u32,
+    geom: Geometry,
+    style: Style,
+    height: f32,
+    base: f32,
+    anchors: Vec<Anchor>,
+    damage: f32,
+) -> Shape {
+    let mut shape = shape(
+        id, name, "Hazard", mode, color, geom, style, height, base, anchors,
+    );
+    shape.damage = damage;
+    shape
 }
 
 static SHAPES: LazyLock<Vec<Shape>> = LazyLock::new(|| {
@@ -581,6 +607,19 @@ static SHAPES: LazyLock<Vec<Shape>> = LazyLock::new(|| {
             0.01,
             ring_anchors(1, 0.5, -std::f32::consts::FRAC_PI_2),
         ),
+        // Hazards. Touch damage is hard-coded to 10 for now.
+        hazard_shape(
+            "spikes",
+            "Spikes",
+            SnapMode::Center,
+            0xc0392b,
+            Geometry::Circle { r: 0.45 },
+            Style::Plain,
+            0.5,
+            0.0,
+            ring_anchors(4, 0.5, 0.0),
+            SPIKE_DAMAGE,
+        ),
     ]
 });
 
@@ -676,6 +715,8 @@ pub struct Piece {
     /// on the ground and a block's base on the ground; raising it lifts the
     /// whole piece, so blocks stack and props float.
     pub elevation: f32,
+    /// True when Avian drives this piece with gravity and collisions.
+    pub dynamic: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -860,7 +901,14 @@ pub fn snap_piece(
 }
 
 pub fn normalize_angle(a: f32) -> f32 {
-    a.rem_euclid(std::f32::consts::TAU)
+    let a = a.rem_euclid(std::f32::consts::TAU);
+    // A physics-derived quaternion often lands a hair below a full turn.
+    // Keep saved and displayed rotations clean instead of showing 359.999°.
+    if a > std::f32::consts::TAU - 1e-4 {
+        0.0
+    } else {
+        a
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -917,6 +965,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let ghost = Piece {
             id: 2,
@@ -926,6 +975,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
 
         let snap = anchor_snap(&ghost, wall, &[a], SNAP_THRESHOLD).expect("anchor snap");
@@ -945,6 +995,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         // Rotate the ghost by 60° and place its left anchor exactly on a's right anchor.
         let off = Vec2::from_angle(std::f32::consts::PI / 3.0) * Vec2::new(-edge_len() / 2.0, 0.0);
@@ -956,6 +1007,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         assert!(anchor_snap(&ghost, wall, &[a], SNAP_THRESHOLD).is_none());
     }
@@ -971,6 +1023,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let ghost = Piece {
             id: 2,
@@ -980,6 +1033,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let snap = anchor_snap(&ghost, crate_shape, &[a], SNAP_THRESHOLD).expect("crate snap");
         near(snap.pos.x, 1.2, 0.01);
@@ -999,6 +1053,7 @@ mod tests {
                 pitch: 0.0,
                 roll: 0.0,
                 elevation: 0.0,
+                dynamic: false,
             },
             wall,
         );
@@ -1015,6 +1070,7 @@ mod tests {
                 pitch: 0.0,
                 roll: 0.0,
                 elevation: 0.0,
+                dynamic: false,
             },
             crate_shape,
         );
@@ -1033,6 +1089,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         assert!(hit_test(crate_shape, &p, Vec2::ZERO, 0.0));
         assert!(!hit_test(crate_shape, &p, Vec2::new(2.0, 0.0), HIT_PAD));
@@ -1042,11 +1099,11 @@ mod tests {
 
     #[test]
     fn catalogue_has_every_piece() {
-        assert_eq!(shapes().len(), 22);
+        assert_eq!(shapes().len(), 23);
         let mut ids: Vec<_> = shapes().iter().map(|s| s.id).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 22);
+        assert_eq!(ids.len(), 23);
         for cat in CATEGORIES {
             assert!(shapes().iter().any(|s| s.category == cat), "missing {cat}");
         }
@@ -1066,6 +1123,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let a = world_anchors(&p, crate_shape);
         near(a[0].pos.x, 0.2, 0.01);
@@ -1120,6 +1178,7 @@ mod tests {
                 pitch,
                 roll,
                 elevation: 0.0,
+                dynamic: false,
             };
             let before = piece_quat(&piece);
             set_piece_quat(&mut piece, before);
@@ -1141,6 +1200,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let expected = bevy::math::Quat::from_rotation_y(-0.7);
         assert!(piece_quat(&piece).dot(expected).abs() > 0.99999);

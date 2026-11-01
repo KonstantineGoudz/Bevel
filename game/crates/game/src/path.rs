@@ -728,6 +728,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         }
     }
 
@@ -767,6 +768,7 @@ mod tests {
                 pitch: 0.0,
                 roll: 0.0,
                 elevation: 0.0,
+                dynamic: false,
             };
             let (edges, _) = blocked(&[piece]);
             assert!(edges.is_empty(), "{id} should not block");
@@ -795,6 +797,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let (_, hexes) = blocked(&[piece]);
         assert!(hexes.contains(&(1, 0)));
@@ -819,6 +822,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let (edges, hexes) = blocked(&[pillar]);
         assert!(!can_step(here, model::hex_center(1, 0), &edges, &hexes));
@@ -834,6 +838,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let (edges, hexes) = blocked(&[block]);
         assert!(hexes.is_empty(), "a block top is a walkable cell");
@@ -851,6 +856,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let (_, hexes) = blocked(&[ramp]);
         assert!(hexes.is_empty());
@@ -866,6 +872,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let ramp = Piece {
             id: 2,
@@ -875,6 +882,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
 
         // Alone, the block cannot be entered from its sides.
@@ -896,6 +904,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let (edges, _) = blocked(&[ramp]);
 
@@ -927,6 +936,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let (edges, hexes) = blocked(&[ramp]);
 
@@ -950,6 +960,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let block = Piece {
             id: 2,
@@ -959,6 +970,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let (edges, hexes) = blocked(&[ramp, block]);
 
@@ -995,6 +1007,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let first = Piece {
             id: 2,
@@ -1004,6 +1017,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let second = Piece {
             id: 3,
@@ -1013,6 +1027,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
 
         let (edges, hexes) = blocked(&[ramp, first, second]);
@@ -1051,6 +1066,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         // The square corner pokes into the next hex.
         let corner = model::hex_center(2, 1) + Vec2::new(0.9, -0.9);
@@ -1075,6 +1091,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let home = Piece {
             id: 3,
@@ -1084,6 +1101,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let pieces = [ramp, home, block];
         let (edges, hexes) = blocked(&pieces);
@@ -1190,6 +1208,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let first = Piece {
             id: 2,
@@ -1199,6 +1218,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let second = Piece {
             id: 3,
@@ -1208,6 +1228,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let (edges, blocked) = blocked(&[ramp, first, second]);
 
@@ -1494,6 +1515,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 1.0,
+            dynamic: false,
         };
         let ramp = Piece {
             id: 2,
@@ -1503,6 +1525,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let (edges, hexes) = blocked(&[block, ramp]);
         assert_eq!(
@@ -1522,6 +1545,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 1.0,
+            dynamic: false,
         };
         let ramp = Piece {
             id: 2,
@@ -1531,6 +1555,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 1.0,
+            dynamic: false,
         };
         let (edges, hexes) = blocked(&[block, ramp]);
         assert!(
@@ -1549,6 +1574,7 @@ mod tests {
             pitch: 0.0,
             roll: 0.0,
             elevation: 1.0,
+            dynamic: false,
         };
         assert_eq!(
             cell_under(&[block], model::hex_center(1, 0), 1.9),
@@ -1569,6 +1595,7 @@ mod tests {
             pitch: 0.0,
             roll: roll.to_radians(),
             elevation: 0.0,
+            dynamic: false,
         };
         let pieces = vec![
             piece(1, "block", -2.078, -0.198, 0.0, 89.8),

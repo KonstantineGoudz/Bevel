@@ -18,6 +18,7 @@ fn camera_and_character_changes_are_noticed() {
         yaw: 0.0,
         vy: 0.0,
         grounded: true,
+        health: crate::statuses::Health::default(),
     };
     assert!(soft_changed(&seen, &Orbit::default(), Some(character)));
 }
@@ -131,6 +132,7 @@ fn third_person_can_jump_without_a_route() {
             yaw: 0.0,
             vy: 0.0,
             grounded: true,
+            health: crate::statuses::Health::default(),
         });
         editor.walk = None;
     }
@@ -159,6 +161,7 @@ fn an_airborne_character_lands_without_a_route() {
             yaw: 0.0,
             vy: 0.0,
             grounded: false,
+            health: crate::statuses::Health::default(),
         });
         editor.walk = None;
     }
@@ -199,6 +202,7 @@ fn can_jump_while_climbing_a_ramp() {
             yaw: -std::f32::consts::FRAC_PI_2,
             vy: 0.0,
             grounded: true,
+            health: crate::statuses::Health::default(),
         });
         editor.walk = None;
     }
@@ -253,6 +257,7 @@ fn can_jump_while_descending_a_ramp() {
             yaw: std::f32::consts::FRAC_PI_2,
             vy: 0.0,
             grounded: true,
+            health: crate::statuses::Health::default(),
         });
         editor.walk = None;
     }
@@ -298,6 +303,7 @@ fn clicking_empty_ground_selects_nothing() {
         pitch: 0.0,
         roll: 0.0,
         elevation: 0.0,
+        dynamic: false,
     }];
     assert_eq!(pick(&pieces, ray_towards(Vec3::new(5.0, 0.0, 5.0))), None);
 }
@@ -313,6 +319,7 @@ fn a_session_captures_and_restores_pieces_camera_character_and_history() {
         yaw: 0.5,
         vy: 3.0,
         grounded: false,
+        health: crate::statuses::Health::default(),
     });
     editor.undo = vec![vec![test_piece(1)]];
     editor.redo = vec![vec![test_piece(5)]];
@@ -325,13 +332,19 @@ fn a_session_captures_and_restores_pieces_camera_character_and_history() {
         mode: ViewMode::Top,
     };
 
-    let snapshot = editor.capture(&orbit);
+    let movers = Movers::default();
+    let snapshot = editor.capture(&orbit, &movers);
     assert_eq!(snapshot.next_id, Some(6));
     assert_eq!(snapshot.pieces.len(), 2);
 
     let mut restored = Editor::default();
     let mut restored_orbit = Orbit::default();
-    restored.apply_loaded(&mut restored_orbit, snapshot.validate().unwrap());
+    let mut restored_movers = Movers::default();
+    restored.apply_loaded(
+        &mut restored_orbit,
+        &mut restored_movers,
+        snapshot.validate().unwrap(),
+    );
 
     assert_eq!(restored.pieces, vec![test_piece(2), test_piece(4)]);
     assert_eq!(restored.next_id, 6);
@@ -346,4 +359,133 @@ fn a_session_captures_and_restores_pieces_camera_character_and_history() {
     assert_eq!(restored_orbit.target, Vec3::new(1.0, 2.0, 3.0));
     assert_eq!(restored_orbit.mode, ViewMode::Top);
     assert_eq!(restored_orbit.distance, 11.0);
+}
+
+#[test]
+fn push_impulse_matches_body_to_inward_speed() {
+    // Head-on shove: body at rest, character walking into it at 2.8 m/s.
+    let impulse =
+        push_impulse(Vec3::X, Vec3::new(-2.8, 0.0, 0.0), Vec3::ZERO, 2.0).expect("should push");
+    // touch_dir = -normal = -X; inward = 2.8; impulse = -X * 2.8 * 0.85 * 2.
+    assert!(impulse.x < -4.0 && impulse.x > -5.5, "{impulse:?}");
+    assert!(impulse.y.abs() < 1e-5 && impulse.z.abs() < 1e-5);
+
+    // Separating or barely touching: no impulse, so resting contact jitters.
+    assert!(push_impulse(Vec3::X, Vec3::ZERO, Vec3::ZERO, 2.0).is_none());
+    assert!(push_impulse(Vec3::X, Vec3::new(1.0, 0.0, 0.0), Vec3::ZERO, 2.0).is_none());
+    assert!(push_impulse(Vec3::X, Vec3::new(-0.05, 0.0, 0.0), Vec3::ZERO, 2.0).is_none());
+
+    // Degenerate inputs never push.
+    assert!(push_impulse(Vec3::ZERO, Vec3::new(-2.0, 0.0, 0.0), Vec3::ZERO, 2.0).is_none());
+    assert!(push_impulse(Vec3::X, Vec3::new(-2.0, 0.0, 0.0), Vec3::ZERO, 0.0).is_none());
+
+    // A body already moving with the character needs no shove.
+    assert!(
+        push_impulse(
+            Vec3::X,
+            Vec3::new(-2.0, 0.0, 0.0),
+            Vec3::new(-2.0, 0.0, 0.0),
+            2.0
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn walking_into_a_dynamic_crate_shoves_it() {
+    let mut app = physics_app();
+    let prop = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            Collider::cuboid(0.85, 0.85, 0.85),
+            Position::from_xyz(1.2, 0.425, 0.0),
+        ))
+        .id();
+    // Build the collider tree and computed mass before the first shove.
+    app.update();
+    app.update();
+
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: Vec2::ZERO,
+            feet: 0.0,
+            yaw: 0.0,
+            vy: 0.0,
+            grounded: true,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+    // Forward along +x.
+    app.world_mut().resource_mut::<Orbit>().yaw = -std::f32::consts::FRAC_PI_2;
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyW);
+
+    for _ in 0..40 {
+        tick_character(&mut app);
+    }
+
+    let velocity = app
+        .world()
+        .get::<LinearVelocity>(prop)
+        .expect("dynamic prop keeps its velocity")
+        .0;
+    assert!(
+        velocity.x > 0.3,
+        "the crate should gain forward speed, got {velocity:?}"
+    );
+}
+
+#[test]
+fn walking_into_a_static_wall_shoves_nothing() {
+    let mut app = physics_app();
+    let wall = app
+        .world_mut()
+        .spawn((
+            RigidBody::Static,
+            Collider::cuboid(0.2, 2.8, 1.2),
+            Position::from_xyz(1.2, 1.4, 0.0),
+        ))
+        .id();
+    app.update();
+    app.update();
+
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: Vec2::ZERO,
+            feet: 0.0,
+            yaw: 0.0,
+            vy: 0.0,
+            grounded: true,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+    app.world_mut().resource_mut::<Orbit>().yaw = -std::f32::consts::FRAC_PI_2;
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyW);
+
+    for _ in 0..40 {
+        tick_character(&mut app);
+    }
+
+    // A static wall must not pick up speed; it still blocks the capsule.
+    if let Some(velocity) = app.world().get::<LinearVelocity>(wall) {
+        assert!(
+            velocity.0.length() < 1e-4,
+            "static wall should not move, got {:?}",
+            velocity.0
+        );
+    }
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        character.pos.x < 0.9,
+        "the wall should still block, pos={:?}",
+        character.pos
+    );
 }

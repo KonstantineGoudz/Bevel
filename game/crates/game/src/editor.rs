@@ -14,6 +14,7 @@ use avian3d::prelude::*;
 use bevy::clipboard::Clipboard;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::input::touch::Touches;
+use bevy::input_focus::InputFocus;
 use bevy::picking::Pickable;
 use bevy::picking::events::{
     PointerCancel, PointerDrag, PointerDragEnd, PointerMove, PointerPress, PointerRelease,
@@ -32,6 +33,7 @@ use crate::model::{
 use crate::path;
 use crate::path_edit::{self, PathDrag, PathHandle, Plan, TangentSide};
 use crate::session;
+use crate::statuses::Health;
 
 const PANEL_BG: Color = Color::srgb_u8(0x10, 0x16, 0x1e);
 const BUTTON_BG: Color = Color::srgb_u8(0x14, 0x1c, 0x26);
@@ -111,6 +113,10 @@ impl Plugin for EditorPlugin {
             .init_resource::<PathGesture>()
             .init_resource::<UiScaleApplied>()
             .init_resource::<Nav>()
+            .init_resource::<PropertyEditState>()
+            .init_resource::<DamageClock>()
+            .init_resource::<Movers>()
+            .init_resource::<AddMenu>()
             .add_systems(Startup, (load_session, setup).chain())
             .add_systems(
                 Update,
@@ -123,7 +129,12 @@ impl Plugin for EditorPlugin {
                     sync_knob,
                     sync_shape_label,
                     walk,
+                    flush_platform_requests,
+                    prune_movers,
+                    move_movers,
                     character_move,
+                    hazard_damage,
+                    respawn_on_death,
                     manage_capture,
                     camera_control,
                     path_drag,
@@ -139,21 +150,35 @@ impl Plugin for EditorPlugin {
                 Update,
                 (
                     update_cursor,
+                    sync_dynamic_pieces,
+                    update_add_menu,
+                    save_shortcut,
                     interact,
+                    apply_property_edits,
                     sync_visuals,
+                )
+                    .chain()
+                    .after(refresh_route),
+            )
+            .add_systems(
+                Update,
+                (
+                    sync_properties_panel,
                     update_palette,
                     sync_path_actions,
                     update_touch_buttons,
                     update_status,
                     update_touch_status,
+                    update_health_hud,
                     draw,
                     autosave_session,
                 )
                     .chain()
-                    .after(refresh_route),
+                    .after(sync_visuals),
             )
             .add_observer(on_palette_activate)
-            .add_observer(on_touch_button);
+            .add_observer(on_touch_button)
+            .add_observer(on_add_menu_item);
     }
 }
 
@@ -197,6 +222,8 @@ struct Editor {
     last_palette: Option<(PaletteAction, f64)>,
     /// Navigation revision the current route was planned against.
     seen_nav: u64,
+    /// One pending platform waypoint from the Motion tool, drained by movers.
+    platform_request: Option<(u32, Vec2)>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -243,16 +270,19 @@ impl Default for Editor {
             mobile_shape: 0,
             last_palette: None,
             seen_nav: 0,
+            platform_request: None,
         }
     }
 }
 
-/// The palette can arm a building block, the character, or the path tool.
+/// The palette can arm a building block, the character, or one of the path
+/// tools (character route, plan, or platform motion).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ActorTool {
     Place,
     Path,
     Plan,
+    Platform,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -264,6 +294,7 @@ pub(crate) struct Character {
     /// Vertical velocity from the physics step.
     pub(crate) vy: f32,
     pub(crate) grounded: bool,
+    pub(crate) health: Health,
 }
 
 /// A routed path with arc length, so the walker moves at a constant speed.
@@ -426,8 +457,12 @@ struct PathGesture(path_edit::Gesture);
 #[derive(Resource, Default)]
 struct Cursor {
     screen: Option<Vec2>,
+    /// Logical size of the window, for UI hit tests.
+    screen_size: Vec2,
     world: Option<Vec2>,
     ray: Option<Ray3d>,
+    /// True while a text input owns keyboard focus.
+    text_focus: bool,
     /// A tap completed this frame (touch builds/clicks).
     tap: bool,
     /// Last ground point the pointer was over; stays put between taps so the
@@ -580,7 +615,7 @@ impl Mode {
 
 impl Editor {
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-    fn capture(&self, orbit: &Orbit) -> session::Snapshot {
+    fn capture(&self, orbit: &Orbit, movers: &Movers) -> session::Snapshot {
         session::Snapshot {
             version: session::SNAPSHOT_VERSION,
             next_id: Some(self.next_id),
@@ -597,10 +632,20 @@ impl Editor {
                 .iter()
                 .map(|pieces| pieces.iter().map(session::SavedPiece::from).collect())
                 .collect(),
+            platforms: movers
+                .map
+                .iter()
+                .map(|(id, mover)| movers::to_saved(*id, mover))
+                .collect(),
         }
     }
 
-    fn apply_loaded(&mut self, orbit: &mut Orbit, loaded: session::Loaded) {
+    fn apply_loaded(
+        &mut self,
+        orbit: &mut Orbit,
+        movers: &mut Movers,
+        loaded: session::Loaded,
+    ) {
         self.pieces = loaded.pieces;
         self.character = loaded.character;
         self.undo = loaded.undo;
@@ -609,6 +654,7 @@ impl Editor {
         if let Some(camera) = loaded.camera {
             *orbit = camera;
         }
+        movers::apply_saved(movers, &self.pieces, &loaded.platforms);
 
         self.selected = None;
         self.ghost = None;
@@ -620,6 +666,7 @@ impl Editor {
         self.walk = None;
         self.tool = None;
         self.actor_tool = None;
+        self.platform_request = None;
         self.note = "map loaded";
     }
 
@@ -711,6 +758,7 @@ enum PaletteAction {
     Character,
     Path,
     Plan,
+    Platform,
     Walk,
     Smooth,
     Course,
@@ -759,6 +807,7 @@ enum TouchAction {
     Redo,
     Path,
     Plan,
+    Platform,
     Add,
     Walk,
     Smooth,
@@ -804,13 +853,18 @@ struct Kit {
 }
 
 mod camera;
+mod add_menu;
 mod colliders;
 mod draw;
 mod editing;
 mod gizmo;
+mod hazards;
+mod hud;
 mod input;
+mod movers;
 mod overlay;
 mod picking;
+mod properties;
 mod route;
 mod save;
 mod setup;
@@ -820,13 +874,18 @@ mod visuals;
 mod walking;
 
 use camera::*;
+use add_menu::*;
 use colliders::*;
 use draw::*;
 use editing::*;
 use gizmo::*;
+use hazards::*;
+use hud::*;
 use input::*;
+use movers::*;
 use overlay::*;
 use picking::*;
+use properties::*;
 use route::*;
 use save::*;
 use setup::*;

@@ -91,6 +91,22 @@ pub(super) fn on_palette_activate(
                 focus_character(&mut orbit, editor.character);
             }
         }
+        PaletteAction::Platform => {
+            let entering = editor.actor_tool != Some(ActorTool::Platform);
+            editor.actor_tool = if entering {
+                Some(ActorTool::Platform)
+            } else {
+                None
+            };
+            editor.tool = None;
+            if entering {
+                editor.note = if editor.selected.is_some() {
+                    "motion: click to add path points"
+                } else {
+                    "select a piece first, then add motion"
+                };
+            }
+        }
         PaletteAction::Walk => {
             if editor.actor_tool == Some(ActorTool::Plan) {
                 walk_from_plan(&mut editor, &nav, &spatial_query, &filter);
@@ -250,14 +266,13 @@ pub(super) fn interact(
     touch: Res<TouchState>,
     gesture: Res<PathGesture>,
     nav: Res<Nav>,
+    menu: Res<AddMenu>,
     camera: Single<(&Camera, &Transform)>,
     spatial_query: SpatialQuery,
     player: Query<Entity, With<CharacterVisual>>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
-    mut last: ResMut<LastSaved>,
-    mut clock: ResMut<SaveClock>,
     mut clipboard: ResMut<Clipboard>,
 ) {
     let (camera, camera_transform) = *camera;
@@ -267,6 +282,18 @@ pub(super) fn interact(
         .next()
         .map(|entity| SpatialQueryFilter::from_excluded_entities([entity]))
         .unwrap_or_default();
+
+    // A focused property field owns the keyboard. The text widget handles its
+    // own edits and shortcuts.
+    if cursor.text_focus {
+        return;
+    }
+
+    // The Add menu is modal: choosing (or dismissing) it must never also
+    // place, select or drag a piece on the same click.
+    if menu.open {
+        return;
+    }
 
     // Blender-style G/R owns the keyboard and pointer until confirm or cancel.
     let allow_transform =
@@ -366,20 +393,8 @@ pub(super) fn interact(
         editor.redo();
     }
 
-    if keys.just_pressed(KeyCode::KeyS) && !command {
-        if shift {
-            // A quick debug escape hatch for a level worth reproducing.
-            copy_level_json(&mut editor, &mut clipboard);
-        } else if !playing {
-            save(
-                &mut editor,
-                &orbit,
-                &mut last,
-                &mut clock,
-                time.elapsed_secs_f64(),
-            );
-        }
-    }
+    // Manual S-key saving lives in `save_shortcut` (same chain) so `interact`
+    // stays under Bevy's system-parameter limit while saves still see movers.
 
     // Captured first-person look owns the mouse: clicks must not place,
     // select, drag or route until Tab releases the pointer.
@@ -391,6 +406,12 @@ pub(super) fn interact(
     // here. The palette is hidden in touch mode and in Play, so the whole
     // screen is canvas there.
     if !playing && !touch.enabled && screen.x <= PANEL_WIDTH {
+        return;
+    }
+    if !playing
+        && !touch.enabled
+        && over_properties_panel(screen, cursor.screen_size, editor.selected.is_some())
+    {
         return;
     }
 
@@ -453,6 +474,7 @@ pub(super) fn interact(
             pitch: 0.0,
             roll: 0.0,
             elevation: 0.0,
+            dynamic: false,
         };
         let snap = model::snap_piece(
             &raw,
@@ -480,6 +502,7 @@ pub(super) fn interact(
                 pitch: 0.0,
                 roll: 0.0,
                 elevation: 0.0,
+                dynamic: false,
             });
             editor.selected = Some(id);
             editor.note = match snap.kind {
@@ -500,6 +523,7 @@ pub(super) fn interact(
                 yaw: orbit.yaw,
                 vy: 0.0,
                 grounded: true,
+                health: crate::statuses::Health::default(),
             };
             editor.character = Some(character);
             editor.route = None;
@@ -561,6 +585,21 @@ pub(super) fn interact(
             );
             editor.selected = None;
             editor.drag = None;
+        }
+        return;
+    }
+
+    if editor.actor_tool == Some(ActorTool::Platform) {
+        if clicked {
+            let Some(id) = editor.selected else {
+                editor.note = "select a piece first, then add motion";
+                return;
+            };
+            if editor.pieces.iter().any(|p| p.id == id) {
+                editor.platform_request = Some((id, world));
+            } else {
+                editor.note = "select a piece first, then add motion";
+            }
         }
         return;
     }

@@ -45,6 +45,7 @@ pub(super) fn manage_capture(
     window: Single<&Window, With<PrimaryWindow>>,
     mut cursor_options: Single<&mut CursorOptions, With<PrimaryWindow>>,
     mut focus: MessageReader<WindowFocused>,
+    input_focus: Res<InputFocus>,
     time: Res<Time>,
 ) {
     let was_grabbed = capture.grabbed;
@@ -56,7 +57,9 @@ pub(super) fn manage_capture(
         view: orbit.mode,
         first_person,
         over_viewport: over_viewport(&editor, &touch, window.cursor_position()),
-        tab: keys.just_pressed(KeyCode::Tab) && editor.keyboard_transform.is_none(),
+        tab: keys.just_pressed(KeyCode::Tab)
+            && editor.keyboard_transform.is_none()
+            && input_focus.get().is_none(),
         focus_lost,
     };
     let mut grabbed = next_capture(capture.grabbed, capture.last_mode, capture.last_view, input);
@@ -112,10 +115,17 @@ pub(super) fn camera_control(
     mut motion: MessageReader<MouseMotion>,
     mut wheel: MessageReader<MouseWheel>,
     window: Single<&Window, With<PrimaryWindow>>,
+    input_focus: Res<InputFocus>,
+    menu: Res<AddMenu>,
 ) {
-    // The modal transform owns the mouse. Drain the deltas so the camera does
-    // not jump when the transform ends.
-    if editor.keyboard_transform.is_some() {
+    // The modal transform, a focused property field, or a pointer over the
+    // property panel owns the mouse. Drain the deltas so the camera does not
+    // jump when editing ends.
+    let over_properties = editor.selected.is_some()
+        && window
+            .cursor_position()
+            .is_some_and(|p| over_properties_panel(p, window.size(), editor.selected.is_some()));
+    if editor.keyboard_transform.is_some() || input_focus.get().is_some() || over_properties {
         motion.read().for_each(drop);
         wheel.read().for_each(drop);
         return;
@@ -141,11 +151,15 @@ pub(super) fn camera_control(
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let command = command_down(&keys);
 
-    if keys.just_pressed(KeyCode::KeyV) && !command {
-        cycle_view(&mut orbit, &editor);
-    }
-    if keys.just_pressed(KeyCode::KeyF) {
-        focus(&mut orbit, &editor);
+    // The Add menu owns single-letter shortcuts while open: typing "v" or "f"
+    // in the search must not cycle the view or refocus it.
+    if !menu.open {
+        if keys.just_pressed(KeyCode::KeyV) && !command {
+            cycle_view(&mut orbit, &editor);
+        }
+        if keys.just_pressed(KeyCode::KeyF) {
+            focus(&mut orbit, &editor);
+        }
     }
 
     if orbit.mode == ViewMode::First && editor.character.is_some() {
@@ -326,10 +340,13 @@ pub(super) fn update_cursor(
     touch: Res<TouchState>,
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<(&Camera, &Transform)>,
+    focus: Res<InputFocus>,
 ) {
     let (camera, transform) = *camera;
     let global = GlobalTransform::from(*transform);
     cursor.screen = touch.tap.or_else(|| window.cursor_position());
+    cursor.screen_size = window.size();
+    cursor.text_focus = focus.get().is_some();
     cursor.tap = touch.tap.is_some();
     cursor.ray = cursor
         .screen

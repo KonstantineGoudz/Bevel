@@ -17,6 +17,7 @@ pub(super) fn update_palette(
             PaletteAction::Character => editor.actor_tool == Some(ActorTool::Place),
             PaletteAction::Path => editor.actor_tool == Some(ActorTool::Path),
             PaletteAction::Plan => editor.actor_tool == Some(ActorTool::Plan),
+            PaletteAction::Platform => editor.actor_tool == Some(ActorTool::Platform),
             PaletteAction::Walk => {
                 editor.actor_tool == Some(ActorTool::Plan)
                     && walk_enabled(
@@ -80,6 +81,7 @@ pub(super) fn update_status(
         Some(ActorTool::Place) => "character",
         Some(ActorTool::Path) => "path",
         Some(ActorTool::Plan) => "plan",
+        Some(ActorTool::Platform) => "motion",
         None => tool,
     };
 

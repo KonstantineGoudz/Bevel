@@ -8,8 +8,10 @@ mod mesh;
 mod model;
 mod path;
 mod path_edit;
+mod platforms;
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 mod session;
+pub mod statuses;
 
 /// Entry point for every target. `bevy_main` generates the Android glue.
 #[bevy_main]
