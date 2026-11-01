@@ -712,6 +712,7 @@ enum TouchAction {
     Rotate,
     Delete,
     Undo,
+    Redo,
     Path,
     Plan,
     Add,
@@ -1054,7 +1055,7 @@ fn setup(
     let hint_text = commands
         .spawn((
             Text::new(
-                "LMB place / select / drag  |  Y lifts, corner squares slide a plane  |  Ctrl+C / Ctrl+V copy & paste  |  Path: click route, Shift append  |  Enter walk  |  drag waypoints / curve handles  |  RMB orbit (selection in Build)  |  MMB pan  |  wheel zoom  |  V view  |  Tab mouse  |  P play / build  |  C character  |  R rotate  |  S save",
+                "LMB place / select / drag  |  Y lifts, corner squares slide a plane  |  Ctrl+C / Ctrl+V copy & paste  |  Ctrl+Z undo, Ctrl+Shift+Z redo  |  Path: click route, Shift append  |  Enter walk  |  drag waypoints / curve handles  |  RMB orbit (selection in Build)  |  MMB pan  |  wheel zoom  |  V view  |  Tab mouse  |  P play / build  |  C character  |  R rotate  |  S save",
             ),
             TextFont { font_size: FontSize::Px(11.0), ..default() },
             TextColor(Color::srgb_u8(0x6b, 0x7d, 0x93)),
@@ -1134,6 +1135,7 @@ fn spawn_touch_ui(commands: &mut Commands) {
         touch_button(commands, TouchAction::Rotate, "Rot"),
         touch_button(commands, TouchAction::Delete, "Del"),
         touch_button(commands, TouchAction::Undo, "Undo"),
+        touch_button(commands, TouchAction::Redo, "Redo"),
         touch_button(commands, TouchAction::Path, "Path"),
         touch_button(commands, TouchAction::Plan, "Plan"),
         touch_button(commands, TouchAction::Course, "Course"),
@@ -2604,6 +2606,15 @@ fn command_down(keys: &ButtonInput<KeyCode>) -> bool {
         || keys.pressed(KeyCode::SuperRight)
 }
 
+/// Cmd/Ctrl+Shift+Z or Cmd/Ctrl+Y.
+fn redo_requested(keys: &ButtonInput<KeyCode>) -> bool {
+    if !command_down(keys) {
+        return false;
+    }
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    (shift && keys.just_pressed(KeyCode::KeyZ)) || keys.just_pressed(KeyCode::KeyY)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn interact(
     mut editor: ResMut<Editor>,
@@ -2699,11 +2710,15 @@ fn interact(
         }
     }
 
-    if !playing
-        && keys.just_pressed(KeyCode::KeyZ)
-        && (keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight))
-    {
-        editor.undo();
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    if !playing && command && keys.just_pressed(KeyCode::KeyZ) {
+        if shift {
+            editor.redo();
+        } else {
+            editor.undo();
+        }
+    } else if !playing && redo_requested(&keys) {
+        editor.redo();
     }
 
     if !playing && keys.just_pressed(KeyCode::KeyS) && !command {
@@ -4223,19 +4238,20 @@ fn update_touch_status(
 #[allow(dead_code)] // superseded by UI activation; kept for the hit-test test
 fn touch_action_at(pos: Vec2, css: Vec2) -> Option<TouchAction> {
     if (8.0..=42.0).contains(&pos.y) {
-        let width = (css.x - 20.0) / 8.0;
+        let width = (css.x - 20.0) / 9.0;
         let index = ((pos.x - 8.0) / (width + 4.0)).floor().max(0.0) as usize;
         return [
             TouchAction::View,
             TouchAction::Rotate,
             TouchAction::Delete,
             TouchAction::Undo,
+            TouchAction::Redo,
             TouchAction::Path,
             TouchAction::Plan,
             TouchAction::Course,
             TouchAction::Play,
         ]
-        .get(index.min(7))
+        .get(index.min(8))
         .copied();
     }
     if (46.0..=84.0).contains(&pos.y) {
@@ -4288,6 +4304,7 @@ fn run_touch_action(
             }
         }
         TouchAction::Undo => editor.undo(),
+        TouchAction::Redo => editor.redo(),
         TouchAction::Path => {
             editor.tool = None;
             // Toggle, like the palette button, so a second tap leaves path
@@ -5799,6 +5816,30 @@ mod tests {
         assert!(!touch_is_authoring(TouchAction::Jump));
         assert!(touch_is_authoring(TouchAction::Path));
         assert!(touch_is_authoring(TouchAction::Place));
+    }
+
+    #[test]
+    fn redo_shortcuts_need_command_shift_z_or_command_y() {
+        let mut keys = ButtonInput::default();
+        keys.press(KeyCode::ControlLeft);
+        keys.press(KeyCode::KeyY);
+        assert!(redo_requested(&keys));
+
+        let mut keys = ButtonInput::default();
+        keys.press(KeyCode::ControlLeft);
+        keys.press(KeyCode::ShiftLeft);
+        keys.press(KeyCode::KeyZ);
+        assert!(redo_requested(&keys));
+
+        let mut keys = ButtonInput::default();
+        keys.press(KeyCode::ControlLeft);
+        keys.press(KeyCode::KeyZ);
+        assert!(!redo_requested(&keys));
+    }
+
+    #[test]
+    fn the_redo_touch_button_authors_the_level() {
+        assert!(touch_is_authoring(TouchAction::Redo));
     }
 
     #[test]
