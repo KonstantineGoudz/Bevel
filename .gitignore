@@ -23,3 +23,6 @@ game/web/pkg/
 # Editors
 .idea/
 .vscode/
+
+# Superpowers scratch
+.superpowers/
