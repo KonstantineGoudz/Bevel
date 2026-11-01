@@ -76,6 +76,44 @@ pub struct SavedCamera {
     pub mode: String,
 }
 
+impl From<&Piece> for SavedPiece {
+    fn from(piece: &Piece) -> Self {
+        Self {
+            id: piece.id,
+            shape: model::shapes()[piece.shape].id.to_owned(),
+            x: piece.pos.x,
+            z: piece.pos.y,
+            elevation: piece.elevation,
+            rot_deg: piece.rot.to_degrees(),
+        }
+    }
+}
+
+impl From<&Character> for SavedCharacter {
+    fn from(character: &Character) -> Self {
+        Self {
+            x: character.pos.x,
+            z: character.pos.y,
+            feet: character.feet,
+            yaw_deg: character.yaw.to_degrees(),
+        }
+    }
+}
+
+impl From<&Orbit> for SavedCamera {
+    fn from(orbit: &Orbit) -> Self {
+        Self {
+            target_x: orbit.target.x,
+            target_y: orbit.target.y,
+            target_z: orbit.target.z,
+            yaw: orbit.yaw,
+            pitch: orbit.pitch,
+            distance: orbit.distance,
+            mode: orbit.mode.id().to_owned(),
+        }
+    }
+}
+
 impl Snapshot {
     pub fn from_json(json: &str) -> Result<Snapshot, LoadError> {
         serde_json::from_str(json).map_err(|error| LoadError::Parse(error.to_string()))

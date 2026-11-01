@@ -159,6 +159,7 @@ impl Plugin for EditorPlugin {
 
 #[derive(Resource)]
 struct Editor {
+    session: Option<String>,
     pieces: Vec<Piece>,
     tool: Option<usize>,
     actor_tool: Option<ActorTool>,
@@ -196,6 +197,7 @@ struct Editor {
 impl Default for Editor {
     fn default() -> Self {
         Self {
+            session: None,
             pieces: Vec::new(),
             tool: None,
             actor_tool: None,
@@ -521,6 +523,48 @@ impl Mode {
 }
 
 impl Editor {
+    fn capture(&self, orbit: &Orbit) -> session::Snapshot {
+        session::Snapshot {
+            version: session::SNAPSHOT_VERSION,
+            next_id: Some(self.next_id),
+            pieces: self.pieces.iter().map(session::SavedPiece::from).collect(),
+            character: self.character.as_ref().map(session::SavedCharacter::from),
+            camera: Some(session::SavedCamera::from(orbit)),
+            undo: self
+                .undo
+                .iter()
+                .map(|pieces| pieces.iter().map(session::SavedPiece::from).collect())
+                .collect(),
+            redo: self
+                .redo
+                .iter()
+                .map(|pieces| pieces.iter().map(session::SavedPiece::from).collect())
+                .collect(),
+        }
+    }
+
+    fn apply_loaded(&mut self, orbit: &mut Orbit, loaded: session::Loaded) {
+        self.pieces = loaded.pieces;
+        self.character = loaded.character;
+        self.undo = loaded.undo;
+        self.redo = loaded.redo;
+        self.next_id = loaded.next_id;
+        if let Some(camera) = loaded.camera {
+            *orbit = camera;
+        }
+
+        self.selected = None;
+        self.ghost = None;
+        self.drag = None;
+        self.gizmo_drag = None;
+        self.plan = None;
+        self.route = None;
+        self.walk = None;
+        self.tool = None;
+        self.actor_tool = None;
+        self.note = "map loaded";
+    }
+
     /// Replace the level with the little traversal course.
     fn load_course(&mut self) {
         let (mut pieces, character) = course();
@@ -6798,6 +6842,67 @@ mod tests {
             rot: 0.0,
             elevation: 0.0,
         }
+    }
+
+    #[test]
+    fn a_session_captures_and_restores_pieces_camera_character_and_history() {
+        let mut editor = Editor::default();
+        editor.session = Some("map-1".into());
+        editor.pieces = vec![test_piece(2), test_piece(4)];
+        editor.character = Some(Character {
+            pos: Vec2::new(1.5, -2.5),
+            feet: 0.25,
+            yaw: 0.5,
+            vy: 3.0,
+            grounded: false,
+        });
+        editor.undo = vec![vec![test_piece(1)]];
+        editor.redo = vec![vec![test_piece(5)]];
+        editor.next_id = 6;
+        let orbit = Orbit {
+            target: Vec3::new(1.0, 2.0, 3.0),
+            yaw: 0.4,
+            pitch: 0.6,
+            distance: 11.0,
+            mode: ViewMode::Top,
+        };
+
+        let snapshot = editor.capture(&orbit);
+        assert_eq!(snapshot.next_id, Some(6));
+        assert_eq!(snapshot.pieces.len(), 2);
+
+        let mut restored = Editor::default();
+        let mut restored_orbit = Orbit::default();
+        restored.apply_loaded(&mut restored_orbit, snapshot.validate().unwrap());
+
+        assert_eq!(restored.pieces, vec![test_piece(2), test_piece(4)]);
+        assert_eq!(restored.next_id, 6);
+        assert_eq!(restored.undo, vec![vec![test_piece(1)]]);
+        assert_eq!(restored.redo, vec![vec![test_piece(5)]]);
+        let character = restored.character.unwrap();
+        assert_eq!(character.pos, Vec2::new(1.5, -2.5));
+        assert_eq!(character.feet, 0.25);
+        assert!((character.yaw - 0.5).abs() < 1e-5);
+        assert_eq!(character.vy, 0.0);
+        assert!(!character.grounded);
+        assert_eq!(restored_orbit.target, Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(restored_orbit.mode, ViewMode::Top);
+        assert_eq!(restored_orbit.distance, 11.0);
+    }
+
+    #[test]
+    fn applying_a_snapshot_without_a_camera_keeps_the_default_camera() {
+        let mut editor = Editor::default();
+        let mut orbit = Orbit::default();
+        let loaded = session::Snapshot {
+            version: 1,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        editor.apply_loaded(&mut orbit, loaded);
+        assert_eq!(orbit.yaw, Orbit::default().yaw);
+        assert_eq!(orbit.mode, ViewMode::Third);
     }
 
     #[test]
