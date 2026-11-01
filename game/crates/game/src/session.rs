@@ -213,7 +213,6 @@ pub(crate) enum StorageError {
 pub(crate) trait Store {
     fn get(&self, key: &str) -> Option<String>;
     fn set(&mut self, key: &str, value: &str) -> Result<(), StorageError>;
-    fn remove(&mut self, key: &str);
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -286,7 +285,10 @@ fn load_error_message(error: LoadError) -> String {
             format!("The saved map contains an unknown shape: {shape}.")
         }
         LoadError::NonFinite(_) => "The saved map contains invalid geometry.".to_owned(),
-        LoadError::Parse(details) => format!("The saved map could not be read: {details}"),
+        LoadError::Parse(details) => {
+            bevy::log::warn!("Could not read saved map: {details}");
+            "The saved map could not be read.".to_owned()
+        }
         LoadError::NotFound => "The saved map state is missing from browser storage.".to_owned(),
     }
 }
@@ -396,10 +398,6 @@ impl Store for LocalStore {
             }
         })
     }
-
-    fn remove(&mut self, key: &str) {
-        let _ = self.storage.remove_item(key);
-    }
 }
 
 #[cfg(test)]
@@ -447,10 +445,6 @@ impl Store for MemoryStore {
         }
         self.entries.insert(key.to_owned(), value.to_owned());
         Ok(())
-    }
-
-    fn remove(&mut self, key: &str) {
-        self.entries.remove(key);
     }
 }
 

@@ -427,6 +427,7 @@ pub(crate) enum ViewMode {
 }
 
 impl ViewMode {
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "third" => Some(ViewMode::Third),
@@ -541,6 +542,7 @@ impl Mode {
 }
 
 impl Editor {
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     fn capture(&self, orbit: &Orbit) -> session::Snapshot {
         session::Snapshot {
             version: session::SNAPSHOT_VERSION,
@@ -1055,7 +1057,7 @@ fn setup(
     let hint_text = commands
         .spawn((
             Text::new(
-                "LMB place / select / drag  |  Y lifts, corner squares slide a plane  |  Ctrl+C / Ctrl+V copy & paste  |  Ctrl+Z undo, Ctrl+Shift+Z redo  |  Path: click route, Shift append  |  Enter walk  |  drag waypoints / curve handles  |  RMB orbit (selection in Build)  |  MMB pan  |  wheel zoom  |  V view  |  Tab mouse  |  P play / build  |  C character  |  R rotate  |  S save",
+                "LMB place / select / drag  |  Y lifts, corner squares slide a plane  |  Ctrl+C / Ctrl+V copy & paste  |  Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo  |  Path: click route, Shift append  |  Enter walk  |  drag waypoints / curve handles  |  RMB orbit (selection in Build)  |  MMB pan  |  wheel zoom  |  V view  |  Tab mouse  |  P play / build  |  C character  |  R rotate  |  S save",
             ),
             TextFont { font_size: FontSize::Px(11.0), ..default() },
             TextColor(Color::srgb_u8(0x6b, 0x7d, 0x93)),
@@ -5370,6 +5372,7 @@ fn anchors(gizmos: &mut Gizmos, piece: &Piece, shape: &model::Shape) {
 // Save
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn level_json(editor: &Editor) -> String {
     let pieces: Vec<String> = editor
         .pieces
