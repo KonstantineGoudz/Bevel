@@ -9,7 +9,7 @@ name = "party_dungeon"
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-bevy = { version = "=0.20.0", features = ["android-game-activity"] }
+bevy = { version = "=0.20.0", features = ["android-game-activity", "system_clipboard"] }
 avian3d = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -17,4 +17,4 @@ serde_json = "1"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Document", "Element", "Window", "Storage", "Location", "DomException"] }
+web-sys = { version = "0.3", features = ["Document", "DomException", "Element", "HtmlDocument", "HtmlElement", "HtmlTextAreaElement", "Location", "Navigator", "Node", "Storage", "Window"] }

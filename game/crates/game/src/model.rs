@@ -668,6 +668,10 @@ pub struct Piece {
     pub pos: Vec2,
     /// Yaw in radians, counter-clockwise seen from above.
     pub rot: f32,
+    /// Pitch in radians around the piece's local X axis, after yaw.
+    pub pitch: f32,
+    /// Roll in radians around the piece's local Z axis, after pitch.
+    pub roll: f32,
     /// Height above the natural placement, in metres. Zero puts a floor's top
     /// on the ground and a block's base on the ground; raising it lifts the
     /// whole piece, so blocks stack and props float.
@@ -681,10 +685,24 @@ pub struct WorldAnchor {
     pub kind: AnchorKind,
 }
 
-/// World-space yaw as a quaternion: the mesh is rotated by `-rot` about +Y so
-/// that the model's `(x, y)` plane lands on the world's `(x, z)` plane.
-pub fn yaw_quat(rot: f32) -> bevy::math::Quat {
-    bevy::math::Quat::from_rotation_y(-rot)
+/// Full piece orientation: yaw about world +Y, then pitch about the piece's
+/// local X, then roll about its local Z.
+pub fn piece_quat(piece: &Piece) -> bevy::math::Quat {
+    bevy::math::Quat::from_euler(
+        bevy::math::EulerRot::YXZ,
+        -piece.rot,
+        piece.pitch,
+        piece.roll,
+    )
+}
+
+/// Store a full orientation back into the piece's Euler fields. The gizmo
+/// works in world-axis quaternion space, so every rotation drag lands here.
+pub fn set_piece_quat(piece: &mut Piece, rotation: bevy::math::Quat) {
+    let (yaw, pitch, roll) = rotation.to_euler(bevy::math::EulerRot::YXZ);
+    piece.rot = normalize_angle(-yaw);
+    piece.pitch = normalize_angle(pitch);
+    piece.roll = normalize_angle(roll);
 }
 
 pub fn world_anchors(piece: &Piece, shape: &Shape) -> Vec<WorldAnchor> {
@@ -896,6 +914,8 @@ mod tests {
             shape: shape_index("wall").unwrap(),
             pos: Vec2::ZERO,
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let ghost = Piece {
@@ -903,6 +923,8 @@ mod tests {
             shape: shape_index("wall").unwrap(),
             pos: Vec2::new(edge_len() - 0.05, 0.02),
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
 
@@ -920,6 +942,8 @@ mod tests {
             shape: shape_index("wall").unwrap(),
             pos: Vec2::ZERO,
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         // Rotate the ghost by 60° and place its left anchor exactly on a's right anchor.
@@ -929,6 +953,8 @@ mod tests {
             shape: shape_index("wall").unwrap(),
             pos: Vec2::new(edge_len() / 2.0, 0.0) - off,
             rot: std::f32::consts::PI / 3.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         assert!(anchor_snap(&ghost, wall, &[a], SNAP_THRESHOLD).is_none());
@@ -942,6 +968,8 @@ mod tests {
             shape: shape_index("crate").unwrap(),
             pos: Vec2::ZERO,
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let ghost = Piece {
@@ -949,6 +977,8 @@ mod tests {
             shape: shape_index("crate").unwrap(),
             pos: Vec2::new(1.25, 0.02),
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let snap = anchor_snap(&ghost, crate_shape, &[a], SNAP_THRESHOLD).expect("crate snap");
@@ -966,6 +996,8 @@ mod tests {
                 shape: 0,
                 pos: Vec2::new(d + 0.15, 0.05),
                 rot: 1.2,
+                pitch: 0.0,
+                roll: 0.0,
                 elevation: 0.0,
             },
             wall,
@@ -980,6 +1012,8 @@ mod tests {
                 shape: 0,
                 pos: Vec2::new(0.06, -0.08),
                 rot: 0.5,
+                pitch: 0.0,
+                roll: 0.0,
                 elevation: 0.0,
             },
             crate_shape,
@@ -996,6 +1030,8 @@ mod tests {
             shape: shape_index("crate").unwrap(),
             pos: Vec2::ZERO,
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         assert!(hit_test(crate_shape, &p, Vec2::ZERO, 0.0));
@@ -1027,6 +1063,8 @@ mod tests {
             shape: shape_index("crate").unwrap(),
             pos: Vec2::new(0.2, 0.4),
             rot: std::f32::consts::FRAC_PI_2,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let a = world_anchors(&p, crate_shape);
@@ -1063,5 +1101,48 @@ mod tests {
             panic!("wall is not a bar")
         };
         near(len, edge_len(), 1e-4);
+    }
+
+    #[test]
+    fn piece_orientation_round_trips_through_euler_fields() {
+        let shape = shape_index("block").unwrap();
+        for (rot, pitch, roll) in [
+            (0.3, 0.4, 0.5),
+            (1.2, -0.7, 2.6),
+            (-2.0, 0.9, -1.1),
+            (0.0, std::f32::consts::FRAC_PI_2, 0.0),
+        ] {
+            let mut piece = Piece {
+                id: 1,
+                shape,
+                pos: Vec2::ZERO,
+                rot,
+                pitch,
+                roll,
+                elevation: 0.0,
+            };
+            let before = piece_quat(&piece);
+            set_piece_quat(&mut piece, before);
+            let after = piece_quat(&piece);
+            assert!(
+                before.dot(after).abs() > 0.99999,
+                "orientation drifted: {before:?} vs {after:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_piece_without_pitch_or_roll_is_still_a_yaw_rotation() {
+        let piece = Piece {
+            id: 1,
+            shape: shape_index("block").unwrap(),
+            pos: Vec2::ZERO,
+            rot: 0.7,
+            pitch: 0.0,
+            roll: 0.0,
+            elevation: 0.0,
+        };
+        let expected = bevy::math::Quat::from_rotation_y(-0.7);
+        assert!(piece_quat(&piece).dot(expected).abs() > 0.99999);
     }
 }

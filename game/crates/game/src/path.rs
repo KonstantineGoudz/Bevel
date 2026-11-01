@@ -43,6 +43,40 @@ fn is_end(dot: f32) -> bool {
     dot.abs() > 0.75
 }
 
+/// The nav cell a piece belongs to.
+///
+/// A freely placed ramp can have its centre round into the same cell as the
+/// block it climbs, because the two pieces just touch edge to edge. Treat the
+/// ramp as occupying the cell at its low end instead, so it stays one cell
+/// downhill from the block and its side walls do not cut the block top off
+/// from the pieces beside it.
+fn piece_cell(piece: &Piece, shape: &model::Shape, pieces: &[Piece]) -> Hex {
+    let here = model::pixel_to_hex(piece.pos);
+    let model::Geometry::Wedge { d, h, .. } = shape.geom else {
+        return here;
+    };
+    let shares_block = pieces.iter().any(|other| {
+        if other.id == piece.id {
+            return false;
+        }
+        let Some(other_shape) = shapes().get(other.shape) else {
+            return false;
+        };
+        other_shape.id == "block"
+            && model::pixel_to_hex(other.pos) == here
+            && (other.elevation + other_shape.top() - (piece.elevation + h)).abs() < 0.15
+    });
+    if !shares_block {
+        return here;
+    }
+    let low = model::pixel_to_hex(piece.pos - rise(piece) * (d * 0.5));
+    if low != here && around(here).any(|(to, _)| to == low) {
+        low
+    } else {
+        here
+    }
+}
+
 /// Ramps whose high end faces `block_hex` at about `block_top`.
 fn ramps_onto(block_hex: Hex, block_top: f32, pieces: &[Piece]) -> Vec<Hex> {
     let mut onto = Vec::new();
@@ -56,7 +90,7 @@ fn ramps_onto(block_hex: Hex, block_top: f32, pieces: &[Piece]) -> Vec<Hex> {
         if (piece.elevation + h - block_top).abs() > 0.15 {
             continue;
         }
-        let here = model::pixel_to_hex(piece.pos);
+        let here = piece_cell(piece, shape, pieces);
         let axis = rise(piece);
         if around(here).any(|(to, direction)| to == block_hex && direction.dot(axis) > 0.75) {
             onto.push(here);
@@ -121,7 +155,7 @@ pub fn cell_under(pieces: &[Piece], at: Vec2, height: f32) -> Option<Hex> {
             .as_ref()
             .is_none_or(|(best_difference, _)| difference < *best_difference)
         {
-            best = Some((difference, model::pixel_to_hex(piece.pos)));
+            best = Some((difference, piece_cell(piece, shape, pieces)));
         }
     }
     best.map(|(_, hex)| hex)
@@ -167,7 +201,7 @@ pub fn blocked(pieces: &[Piece]) -> (HashSet<Edge>, HashSet<Hex>) {
         let Some(shape) = shapes().get(piece.shape) else {
             continue;
         };
-        let here = model::pixel_to_hex(piece.pos);
+        let here = piece_cell(piece, shape, pieces);
         match &shape.geom {
             model::Geometry::Bar { .. } => {
                 if passable(shape.style) {
@@ -691,6 +725,8 @@ mod tests {
             shape: shape_index("wall").unwrap(),
             pos: mid,
             rot: model::normalize_angle(angle),
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         }
     }
@@ -728,6 +764,8 @@ mod tests {
                 shape,
                 pos: model::hex_center(0, 0) + Vec2::new(model::edge_len() * 0.866, 0.0),
                 rot: std::f32::consts::FRAC_PI_2,
+                pitch: 0.0,
+                roll: 0.0,
                 elevation: 0.0,
             };
             let (edges, _) = blocked(&[piece]);
@@ -754,6 +792,8 @@ mod tests {
             shape: shape_index("pillar").unwrap(),
             pos: model::hex_center(1, 0),
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let (_, hexes) = blocked(&[piece]);
@@ -776,6 +816,8 @@ mod tests {
             shape: shape_index("pillar").unwrap(),
             pos: model::hex_center(1, 0),
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let (edges, hexes) = blocked(&[pillar]);
@@ -789,6 +831,8 @@ mod tests {
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(1, 0),
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let (edges, hexes) = blocked(&[block]);
@@ -804,6 +848,8 @@ mod tests {
             shape: shape_index("ramp").unwrap(),
             pos: model::hex_center(1, 0),
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let (_, hexes) = blocked(&[ramp]);
@@ -817,6 +863,8 @@ mod tests {
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(2, 0),
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let ramp = Piece {
@@ -824,6 +872,8 @@ mod tests {
             shape: shape_index("ramp").unwrap(),
             pos: model::hex_center(1, 0),
             rot: std::f32::consts::PI * 1.5,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
 
@@ -843,6 +893,8 @@ mod tests {
             shape: shape_index("ramp").unwrap(),
             pos: model::hex_center(1, 0),
             rot: std::f32::consts::PI * 1.5,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let (edges, _) = blocked(&[ramp]);
@@ -872,6 +924,8 @@ mod tests {
             shape: shape_index("ramp").unwrap(),
             pos: model::hex_center(1, 0),
             rot: std::f32::consts::PI * 1.5,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let (edges, hexes) = blocked(&[ramp]);
@@ -893,6 +947,8 @@ mod tests {
             shape: shape_index("ramp").unwrap(),
             pos: model::hex_center(1, 0),
             rot: std::f32::consts::PI * 1.5,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let block = Piece {
@@ -900,6 +956,8 @@ mod tests {
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(2, 0),
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let (edges, hexes) = blocked(&[ramp, block]);
@@ -934,6 +992,8 @@ mod tests {
             shape: shape_index("ramp").unwrap(),
             pos: model::hex_center(1, 0),
             rot: std::f32::consts::PI * 1.5,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let first = Piece {
@@ -941,6 +1001,8 @@ mod tests {
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(2, 0),
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let second = Piece {
@@ -948,6 +1010,8 @@ mod tests {
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(2, 1),
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
 
@@ -984,6 +1048,8 @@ mod tests {
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(2, 1),
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         // The square corner pokes into the next hex.
@@ -1006,6 +1072,8 @@ mod tests {
             shape: shape_index("ramp").unwrap(),
             pos: model::hex_center(1, 0),
             rot: std::f32::consts::PI * 1.5,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let home = Piece {
@@ -1013,6 +1081,8 @@ mod tests {
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(2, 0),
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let pieces = [ramp, home, block];
@@ -1117,6 +1187,8 @@ mod tests {
             shape: shape_index("ramp").unwrap(),
             pos: model::hex_center(1, 0),
             rot: std::f32::consts::PI * 1.5,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let first = Piece {
@@ -1124,6 +1196,8 @@ mod tests {
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(2, 0),
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let second = Piece {
@@ -1131,6 +1205,8 @@ mod tests {
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(2, 1),
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let (edges, blocked) = blocked(&[ramp, first, second]);
@@ -1415,6 +1491,8 @@ mod tests {
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(2, 0),
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 1.0,
         };
         let ramp = Piece {
@@ -1422,6 +1500,8 @@ mod tests {
             shape: shape_index("ramp").unwrap(),
             pos: model::hex_center(1, 0),
             rot: std::f32::consts::PI * 1.5,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 0.0,
         };
         let (edges, hexes) = blocked(&[block, ramp]);
@@ -1439,6 +1519,8 @@ mod tests {
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(2, 0),
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 1.0,
         };
         let ramp = Piece {
@@ -1446,6 +1528,8 @@ mod tests {
             shape: shape_index("ramp").unwrap(),
             pos: model::hex_center(1, 0),
             rot: std::f32::consts::PI * 1.5,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 1.0,
         };
         let (edges, hexes) = blocked(&[block, ramp]);
@@ -1462,11 +1546,52 @@ mod tests {
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(1, 0),
             rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
             elevation: 1.0,
         };
         assert_eq!(
             cell_under(&[block], model::hex_center(1, 0), 1.9),
             Some((1, 0))
         );
+    }
+
+    #[test]
+    fn an_off_grid_ramp_opens_every_block_top() {
+        // This is the map from the editor: the ramp touches the top block
+        // edge-to-edge, so both round into the same hex. The ramp's low-end
+        // cell keeps it one step downhill and lets the row of blocks connect.
+        let piece = |id: u32, shape: &str, x: f32, z: f32, rot: f32, roll: f32| Piece {
+            id,
+            shape: shape_index(shape).unwrap(),
+            pos: Vec2::new(x, z),
+            rot: rot.to_radians(),
+            pitch: 0.0,
+            roll: roll.to_radians(),
+            elevation: 0.0,
+        };
+        let pieces = vec![
+            piece(1, "block", -2.078, -0.198, 0.0, 89.8),
+            piece(2, "block", -2.078, -2.0, 0.0, 0.0),
+            piece(3, "block", -2.078, 1.606, 0.0, 0.0),
+            piece(4, "ramp", -0.171, 1.606, 90.0, 0.0),
+        ];
+        let ramp = &pieces[3];
+        assert_eq!(
+            piece_cell(ramp, &shapes()[ramp.shape], &pieces),
+            (0, 1),
+            "the ramp stands in the cell at its low end, not in the block's cell"
+        );
+
+        let (edges, hexes) = blocked(&pieces);
+        let start = model::pixel_to_hex(Vec2::new(2.653, 0.511));
+        for block in &pieces[..3] {
+            let cell = cell_under(&pieces, block.pos, 0.9).expect("block top");
+            assert!(
+                find_path(start, cell, &edges, &hexes).is_some(),
+                "no route to the top of block {} at {cell:?}",
+                block.id
+            );
+        }
     }
 }

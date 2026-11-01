@@ -85,7 +85,14 @@ pub struct SavedPiece {
     pub x: f32,
     pub z: f32,
     pub elevation: f32,
+    /// Yaw in degrees. Kept under its original name so older levels load.
     pub rot_deg: f32,
+    /// Pitch in degrees. Missing on older levels, which are upright.
+    #[serde(default)]
+    pub pitch_deg: f32,
+    /// Roll in degrees. Missing on older levels, which are upright.
+    #[serde(default)]
+    pub roll_deg: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -119,6 +126,8 @@ impl From<&Piece> for SavedPiece {
             z: piece.pos.y,
             elevation: piece.elevation,
             rot_deg: piece.rot.to_degrees(),
+            pitch_deg: piece.pitch.to_degrees(),
+            roll_deg: piece.roll.to_degrees(),
         }
     }
 }
@@ -497,6 +506,8 @@ fn validate_piece(saved: SavedPiece) -> Result<Piece, LoadError> {
         (saved.z, "piece z"),
         (saved.elevation, "piece elevation"),
         (saved.rot_deg, "piece rotation"),
+        (saved.pitch_deg, "piece pitch"),
+        (saved.roll_deg, "piece roll"),
     ] {
         if !value.is_finite() {
             return Err(LoadError::NonFinite(name));
@@ -508,6 +519,8 @@ fn validate_piece(saved: SavedPiece) -> Result<Piece, LoadError> {
         shape,
         pos: Vec2::new(saved.x, saved.z),
         rot: saved.rot_deg.to_radians(),
+        pitch: saved.pitch_deg.to_radians(),
+        roll: saved.roll_deg.to_radians(),
         elevation: saved.elevation,
     })
 }
@@ -554,6 +567,8 @@ mod tests {
             z: -2.0,
             elevation: 0.5,
             rot_deg: 30.0,
+            pitch_deg: -15.0,
+            roll_deg: 10.0,
         }
     }
 
@@ -583,7 +598,28 @@ mod tests {
         };
         let json = snapshot.to_json();
         assert!(json.contains("\"rotDeg\":30.0"), "{json}");
+        assert!(json.contains("\"pitchDeg\":-15.0"), "{json}");
+        assert!(json.contains("\"rollDeg\":10.0"), "{json}");
         assert_eq!(Snapshot::from_json(&json).unwrap(), snapshot);
+
+        let loaded = Snapshot::from_json(&json).unwrap().validate().unwrap();
+        let piece = loaded.pieces[0];
+        assert!((piece.rot - 30.0_f32.to_radians()).abs() < 1e-5);
+        assert!((piece.pitch - (-15.0_f32).to_radians()).abs() < 1e-5);
+        assert!((piece.roll - 10.0_f32.to_radians()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn an_old_piece_without_pitch_or_roll_loads_upright() {
+        let snapshot = Snapshot::from_json(
+            r#"{"version":1,"pieces":[{"id":1,"shape":"block","x":0,"z":0,"elevation":0,"rotDeg":30}]}"#,
+        )
+        .unwrap();
+        let loaded = snapshot.validate().unwrap();
+        let piece = loaded.pieces[0];
+        assert!((piece.rot - 30.0_f32.to_radians()).abs() < 1e-5);
+        assert_eq!(piece.pitch, 0.0);
+        assert_eq!(piece.roll, 0.0);
     }
 
     #[test]
@@ -657,6 +693,8 @@ mod tests {
             z,
             elevation: 0.0,
             rot_deg: 0.0,
+            pitch_deg: 0.0,
+            roll_deg: 0.0,
         }
     }
 
@@ -711,6 +749,18 @@ mod tests {
         assert_eq!(
             snapshot.validate().unwrap_err(),
             LoadError::NonFinite("piece x")
+        );
+
+        let mut piece = saved(1, "block", 0.0, 0.0);
+        piece.pitch_deg = f32::INFINITY;
+        let snapshot = Snapshot {
+            version: 1,
+            pieces: vec![piece],
+            ..Default::default()
+        };
+        assert_eq!(
+            snapshot.validate().unwrap_err(),
+            LoadError::NonFinite("piece pitch")
         );
     }
 
