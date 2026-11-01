@@ -304,7 +304,7 @@
         }
 
         return entries
-          .filter((entry) => {
+          .filter((entry, index) => {
             if (
               !entry ||
               typeof entry.id !== "string" ||
@@ -314,6 +314,7 @@
               !Number.isFinite(entry.createdAt) ||
               !Number.isFinite(entry.updatedAt)
             ) {
+              console.warn(`Ignoring invalid saved map metadata at index ${index}:`, entry);
               return false;
             }
             if (localStorage.getItem(sessionKey(entry.id)) === null) {
