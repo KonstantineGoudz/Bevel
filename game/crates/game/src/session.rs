@@ -16,6 +16,16 @@ pub(crate) const INDEX_KEY: &str = "party-dungeon.index.v1";
 pub(crate) const SESSION_PREFIX: &str = "party-dungeon.session.";
 pub(crate) const SOFT_SAVE_INTERVAL: f64 = 1.0;
 
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn now_ms() -> f64 {
+    js_sys::Date::now()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn now_ms() -> f64 {
+    0.0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadError {
     MissingVersion,

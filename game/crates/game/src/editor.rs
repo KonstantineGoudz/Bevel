@@ -97,6 +97,8 @@ impl Plugin for EditorPlugin {
         app.init_resource::<Editor>()
             .init_resource::<Cursor>()
             .init_resource::<Orbit>()
+            .init_resource::<LastSaved>()
+            .init_resource::<SaveClock>()
             .init_resource::<PointerCapture>()
             .init_resource::<Visuals>()
             // One UI unit per logical pixel unless a phone display scales it
@@ -144,6 +146,7 @@ impl Plugin for EditorPlugin {
                     update_status,
                     update_touch_status,
                     draw,
+                    autosave_session,
                 )
                     .chain()
                     .after(refresh_route),
@@ -192,6 +195,21 @@ struct Editor {
     last_palette: Option<(PaletteAction, f64)>,
     /// Navigation revision the current route was planned against.
     seen_nav: u64,
+}
+
+#[derive(Clone, PartialEq)]
+struct Seen {
+    orbit: Orbit,
+    character: Option<Character>,
+}
+
+#[derive(Resource, Default)]
+struct LastSaved(Option<Seen>);
+
+#[derive(Resource, Default)]
+struct SaveClock {
+    last_save: f64,
+    retry_at: f64,
 }
 
 impl Default for Editor {
@@ -2688,11 +2706,8 @@ fn interact(
         editor.undo();
     }
 
-    if !playing
-        && keys.just_pressed(KeyCode::KeyS)
-        && !(keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight))
-    {
-        save(&editor);
+    if !playing && keys.just_pressed(KeyCode::KeyS) && !command {
+        save(&mut editor, &orbit);
     }
 
     // Captured first-person look owns the mouse: clicks must not place,
@@ -5371,23 +5386,130 @@ fn level_json(editor: &Editor) -> String {
     )
 }
 
-fn save(editor: &Editor) {
-    let json = level_json(editor);
+fn save_due(hard: bool, soft: bool, last_save: f64, now: f64, retry_at: f64) -> bool {
+    now >= retry_at && (hard || (soft && now - last_save >= session::SOFT_SAVE_INTERVAL))
+}
+
+fn soft_changed(seen: &Seen, orbit: &Orbit, character: Option<Character>) -> bool {
+    &seen.orbit != orbit
+        || match (seen.character, character) {
+            (Some(seen), Some(current)) => {
+                seen.pos != current.pos || seen.feet != current.feet || seen.yaw != current.yaw
+            }
+            (None, None) => false,
+            _ => true,
+        }
+}
+
+fn save_failure_note(error: session::StorageError) -> &'static str {
+    match error {
+        session::StorageError::QuotaExceeded => "save failed: storage is full",
+        session::StorageError::Unavailable => "save failed: storage unavailable",
+    }
+}
+
+fn autosave_session(
+    time: Res<Time>,
+    mut editor: ResMut<Editor>,
+    orbit: Res<Orbit>,
+    mut last: ResMut<LastSaved>,
+    mut clock: ResMut<SaveClock>,
+    mut focus: MessageReader<WindowFocused>,
+) {
+    if editor.session.is_none() {
+        return;
+    }
+
+    if focus.read().any(|event| !event.focused) {
+        editor.hard_dirty = true;
+    }
+
+    let now = time.elapsed_secs_f64();
+    let character = editor.character;
+    let Some(seen) = last.0.as_ref() else {
+        last.0 = Some(Seen {
+            orbit: orbit.clone(),
+            character,
+        });
+        return;
+    };
+
+    if soft_changed(seen, &orbit, character) {
+        editor.soft_dirty = true;
+    }
+    if !save_due(
+        editor.hard_dirty,
+        editor.soft_dirty,
+        clock.last_save,
+        now,
+        clock.retry_at,
+    ) {
+        return;
+    }
+
+    match persist(&editor, &orbit) {
+        Ok(()) => {
+            editor.hard_dirty = false;
+            editor.soft_dirty = false;
+            clock.last_save = now;
+            last.0 = Some(Seen {
+                orbit: orbit.clone(),
+                character,
+            });
+        }
+        Err(error) => {
+            editor.note = save_failure_note(error);
+            clock.retry_at = now + 2.0;
+        }
+    }
+}
+
+fn persist(editor: &Editor, orbit: &Orbit) -> Result<(), session::StorageError> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let id = editor
+            .session
+            .as_deref()
+            .ok_or(session::StorageError::Unavailable)?;
+        let snapshot = editor.capture(orbit);
+        let mut store = session::LocalStore::new()?;
+        session::save_session(&mut store, id, &snapshot, session::now_ms())
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     {
+        let _ = (editor, orbit);
+        Ok(())
+    }
+}
+
+fn save(editor: &mut Editor, orbit: &Orbit) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = orbit;
+        let json = level_json(editor);
         let path = std::path::Path::new("level.json");
         match std::fs::write(path, &json) {
-            Ok(()) => info!("saved {} pieces to level.json", editor.pieces.len()),
+            Ok(()) => {
+                info!("saved {} pieces to level.json", editor.pieces.len());
+                editor.hard_dirty = false;
+                editor.soft_dirty = false;
+                editor.note = "saved level.json";
+            }
             Err(err) => warn!("could not save level.json: {err}"),
         }
     }
 
     #[cfg(target_arch = "wasm32")]
     {
-        // No filesystem in the browser; the console is the sink for now.
-        bevy::log::info!("{}", json);
-        let _ = &json;
+        match persist(editor, orbit) {
+            Ok(()) => {
+                editor.hard_dirty = false;
+                editor.soft_dirty = false;
+                editor.note = "saved";
+            }
+            Err(error) => editor.note = save_failure_note(error),
+        }
     }
 }
 
@@ -5396,6 +5518,36 @@ mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
     use bevy::math::Dir3;
+
+    #[test]
+    fn hard_dirty_saves_immediately_and_soft_dirty_waits() {
+        assert!(save_due(true, false, 10.0, 10.0, 0.0));
+        assert!(!save_due(false, true, 10.0, 10.3, 0.0));
+        assert!(save_due(false, true, 10.0, 11.0, 0.0));
+        assert!(!save_due(false, true, 10.0, 20.0, 25.0));
+    }
+
+    #[test]
+    fn camera_and_character_changes_are_noticed() {
+        let seen = Seen {
+            orbit: Orbit::default(),
+            character: None,
+        };
+        assert!(!soft_changed(&seen, &Orbit::default(), None));
+        let moved = Orbit {
+            yaw: 1.0,
+            ..Orbit::default()
+        };
+        assert!(soft_changed(&seen, &moved, None));
+        let character = Character {
+            pos: Vec2::ZERO,
+            feet: 0.0,
+            yaw: 0.0,
+            vy: 0.0,
+            grounded: true,
+        };
+        assert!(soft_changed(&seen, &Orbit::default(), Some(character)));
+    }
 
     /// The default camera eye, looking wherever `target` is.
     fn ray_towards(target: Vec3) -> Ray3d {
