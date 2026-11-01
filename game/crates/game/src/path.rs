@@ -47,9 +47,13 @@ fn is_end(dot: f32) -> bool {
 fn ramps_onto(block_hex: Hex, block_top: f32, pieces: &[Piece]) -> Vec<Hex> {
     let mut onto = Vec::new();
     for piece in pieces {
-        let Some(shape) = shapes().get(piece.shape) else { continue };
-        let model::Geometry::Wedge { h, .. } = shape.geom else { continue };
-        if (h - block_top).abs() > 0.15 {
+        let Some(shape) = shapes().get(piece.shape) else {
+            continue;
+        };
+        let model::Geometry::Wedge { h, .. } = shape.geom else {
+            continue;
+        };
+        if (piece.elevation + h - block_top).abs() > 0.15 {
             continue;
         }
         let here = model::pixel_to_hex(piece.pos);
@@ -67,7 +71,7 @@ fn block_at(hex: Hex, top: f32, pieces: &[Piece]) -> bool {
         shapes().get(piece.shape).is_some_and(|shape| {
             shape.id == "block"
                 && model::pixel_to_hex(piece.pos) == hex
-                && (shape.top() - top).abs() < 0.15
+                && (piece.elevation + shape.top() - top).abs() < 0.15
         })
     })
 }
@@ -81,7 +85,7 @@ fn entries_onto(hex: Hex, top: f32, pieces: &[Piece]) -> Vec<Hex> {
         let Some(shape) = shapes().get(piece.shape) else {
             continue;
         };
-        if shape.id != "block" || (shape.top() - top).abs() > 0.15 {
+        if shape.id != "block" || (piece.elevation + shape.top() - top).abs() > 0.15 {
             continue;
         }
         let here = model::pixel_to_hex(piece.pos);
@@ -133,16 +137,16 @@ fn walkable_surface(shape: &model::Shape, piece: &Piece, at: Vec2) -> Option<f32
     let local = model::to_local(piece, at);
 
     match &shape.geom {
-        model::Geometry::Rect { w, h } if shape.id == "block" => (
-            local.x.abs() <= w * 0.5 + EDGE_SLACK && local.y.abs() <= h * 0.5 + EDGE_SLACK
-        )
-            .then(|| shape.top()),
+        model::Geometry::Rect { w, h } if shape.id == "block" => {
+            (local.x.abs() <= w * 0.5 + EDGE_SLACK && local.y.abs() <= h * 0.5 + EDGE_SLACK)
+                .then(|| piece.elevation + shape.top())
+        }
         model::Geometry::Wedge { w, d, h } => {
             if local.x.abs() > w * 0.5 + EDGE_SLACK || local.y.abs() > d * 0.5 + EDGE_SLACK {
                 return None;
             }
             let t = ((local.y + d * 0.5) / d).clamp(0.0, 1.0);
-            Some(shape.base + t * h)
+            Some(piece.elevation + shape.base + t * h)
         }
         _ => None,
     }
@@ -193,7 +197,7 @@ pub fn blocked(pieces: &[Piece]) -> (HashSet<Edge>, HashSet<Hex>) {
                     if !is_end(dot) {
                         edges.insert((here, to));
                         edges.insert((to, here));
-                    } else if dot > 0.0 && !block_at(to, shape.top(), pieces) {
+                    } else if dot > 0.0 && !block_at(to, piece.elevation + shape.top(), pieces) {
                         edges.insert((to, here));
                     }
                 }
@@ -205,7 +209,7 @@ pub fn blocked(pieces: &[Piece]) -> (HashSet<Edge>, HashSet<Hex>) {
                 // drop, which is why only entries are barred. Keeping the
                 // cell out of `hexes` also lets a route start on a block
                 // that has no way up.
-                let onto = entries_onto(here, shape.top(), pieces);
+                let onto = entries_onto(here, piece.elevation + shape.top(), pieces);
                 for (to, _) in around(here) {
                     if !onto.contains(&to) {
                         edges.insert((to, here));
@@ -425,7 +429,10 @@ impl Track {
         self.points
             .iter()
             .enumerate()
-            .min_by(|(_, a), (_, b)| a.distance_squared(point).total_cmp(&b.distance_squared(point)))
+            .min_by(|(_, a), (_, b)| {
+                a.distance_squared(point)
+                    .total_cmp(&b.distance_squared(point))
+            })
             .map(|(index, _)| index)
             .unwrap_or(0)
     }
@@ -684,6 +691,7 @@ mod tests {
             shape: shape_index("wall").unwrap(),
             pos: mid,
             rot: model::normalize_angle(angle),
+            elevation: 0.0,
         }
     }
 
@@ -720,6 +728,7 @@ mod tests {
                 shape,
                 pos: model::hex_center(0, 0) + Vec2::new(model::edge_len() * 0.866, 0.0),
                 rot: std::f32::consts::FRAC_PI_2,
+                elevation: 0.0,
             };
             let (edges, _) = blocked(&[piece]);
             assert!(edges.is_empty(), "{id} should not block");
@@ -745,6 +754,7 @@ mod tests {
             shape: shape_index("pillar").unwrap(),
             pos: model::hex_center(1, 0),
             rot: 0.0,
+            elevation: 0.0,
         };
         let (_, hexes) = blocked(&[piece]);
         assert!(hexes.contains(&(1, 0)));
@@ -766,6 +776,7 @@ mod tests {
             shape: shape_index("pillar").unwrap(),
             pos: model::hex_center(1, 0),
             rot: 0.0,
+            elevation: 0.0,
         };
         let (edges, hexes) = blocked(&[pillar]);
         assert!(!can_step(here, model::hex_center(1, 0), &edges, &hexes));
@@ -778,6 +789,7 @@ mod tests {
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(1, 0),
             rot: 0.0,
+            elevation: 0.0,
         };
         let (edges, hexes) = blocked(&[block]);
         assert!(hexes.is_empty(), "a block top is a walkable cell");
@@ -792,6 +804,7 @@ mod tests {
             shape: shape_index("ramp").unwrap(),
             pos: model::hex_center(1, 0),
             rot: 0.0,
+            elevation: 0.0,
         };
         let (_, hexes) = blocked(&[ramp]);
         assert!(hexes.is_empty());
@@ -804,12 +817,14 @@ mod tests {
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(2, 0),
             rot: 0.0,
+            elevation: 0.0,
         };
         let ramp = Piece {
             id: 2,
             shape: shape_index("ramp").unwrap(),
             pos: model::hex_center(1, 0),
             rot: std::f32::consts::PI * 1.5,
+            elevation: 0.0,
         };
 
         // Alone, the block cannot be entered from its sides.
@@ -828,6 +843,7 @@ mod tests {
             shape: shape_index("ramp").unwrap(),
             pos: model::hex_center(1, 0),
             rot: std::f32::consts::PI * 1.5,
+            elevation: 0.0,
         };
         let (edges, _) = blocked(&[ramp]);
 
@@ -856,6 +872,7 @@ mod tests {
             shape: shape_index("ramp").unwrap(),
             pos: model::hex_center(1, 0),
             rot: std::f32::consts::PI * 1.5,
+            elevation: 0.0,
         };
         let (edges, hexes) = blocked(&[ramp]);
 
@@ -876,12 +893,14 @@ mod tests {
             shape: shape_index("ramp").unwrap(),
             pos: model::hex_center(1, 0),
             rot: std::f32::consts::PI * 1.5,
+            elevation: 0.0,
         };
         let block = Piece {
             id: 2,
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(2, 0),
             rot: 0.0,
+            elevation: 0.0,
         };
         let (edges, hexes) = blocked(&[ramp, block]);
 
@@ -894,7 +913,10 @@ mod tests {
             } else {
                 assert!(edges.contains(&(side, (2, 0))), "side entry from {side:?}");
             }
-            assert!(!edges.contains(&((2, 0), side)), "drop off towards {side:?}");
+            assert!(
+                !edges.contains(&((2, 0), side)),
+                "drop off towards {side:?}"
+            );
         }
 
         let route = find_path((1, 1), (2, 0), &edges, &hexes).expect("via the ramp");
@@ -912,18 +934,21 @@ mod tests {
             shape: shape_index("ramp").unwrap(),
             pos: model::hex_center(1, 0),
             rot: std::f32::consts::PI * 1.5,
+            elevation: 0.0,
         };
         let first = Piece {
             id: 2,
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(2, 0),
             rot: 0.0,
+            elevation: 0.0,
         };
         let second = Piece {
             id: 3,
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(2, 1),
             rot: 0.0,
+            elevation: 0.0,
         };
 
         let (edges, hexes) = blocked(&[ramp, first, second]);
@@ -959,6 +984,7 @@ mod tests {
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(2, 1),
             rot: 0.0,
+            elevation: 0.0,
         };
         // The square corner pokes into the next hex.
         let corner = model::hex_center(2, 1) + Vec2::new(0.9, -0.9);
@@ -980,12 +1006,14 @@ mod tests {
             shape: shape_index("ramp").unwrap(),
             pos: model::hex_center(1, 0),
             rot: std::f32::consts::PI * 1.5,
+            elevation: 0.0,
         };
         let home = Piece {
             id: 3,
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(2, 0),
             rot: 0.0,
+            elevation: 0.0,
         };
         let pieces = [ramp, home, block];
         let (edges, hexes) = blocked(&pieces);
@@ -1089,18 +1117,21 @@ mod tests {
             shape: shape_index("ramp").unwrap(),
             pos: model::hex_center(1, 0),
             rot: std::f32::consts::PI * 1.5,
+            elevation: 0.0,
         };
         let first = Piece {
             id: 2,
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(2, 0),
             rot: 0.0,
+            elevation: 0.0,
         };
         let second = Piece {
             id: 3,
             shape: shape_index("block").unwrap(),
             pos: model::hex_center(2, 1),
             rot: 0.0,
+            elevation: 0.0,
         };
         let (edges, blocked) = blocked(&[ramp, first, second]);
 
@@ -1239,11 +1270,7 @@ mod tests {
 
     #[test]
     fn nearest_index_finds_the_closest_sample() {
-        let track = Track::new(vec![
-            Vec2::ZERO,
-            Vec2::new(2.0, 0.0),
-            Vec2::new(2.0, 2.0),
-        ]);
+        let track = Track::new(vec![Vec2::ZERO, Vec2::new(2.0, 0.0), Vec2::new(2.0, 2.0)]);
         assert_eq!(track.nearest_index(Vec2::new(1.9, 0.1)), 1);
         assert_eq!(track.nearest_index(Vec2::new(2.1, 1.8)), 2);
     }
@@ -1341,18 +1368,13 @@ mod tests {
         .expect("route");
         let control = plan.controls[0].incoming.expect("incoming");
         assert!(
-            control.distance(waypoint.pos)
-                <= 2.0 * (waypoint.pos - Vec2::ZERO).length() + 1e-3
+            control.distance(waypoint.pos) <= 2.0 * (waypoint.pos - Vec2::ZERO).length() + 1e-3
         );
     }
 
     #[test]
     fn a_collinear_waypoint_is_not_simplified_away() {
-        let points = vec![
-            Vec2::ZERO,
-            Vec2::new(2.0, 0.0),
-            Vec2::new(4.0, 0.0),
-        ];
+        let points = vec![Vec2::ZERO, Vec2::new(2.0, 0.0), Vec2::new(4.0, 0.0)];
         let (kept, anchors) = simplify_anchored(points.clone(), &[1]);
         assert_eq!(kept, points, "the anchored point must stay in the polyline");
         assert_eq!(anchors, vec![1]);
@@ -1384,5 +1406,67 @@ mod tests {
         )
         .expect("route");
         assert_eq!(plan.controls.len(), 2);
+    }
+
+    #[test]
+    fn a_raised_block_is_not_reached_by_a_lower_ramp() {
+        let block = Piece {
+            id: 1,
+            shape: shape_index("block").unwrap(),
+            pos: model::hex_center(2, 0),
+            rot: 0.0,
+            elevation: 1.0,
+        };
+        let ramp = Piece {
+            id: 2,
+            shape: shape_index("ramp").unwrap(),
+            pos: model::hex_center(1, 0),
+            rot: std::f32::consts::PI * 1.5,
+            elevation: 0.0,
+        };
+        let (edges, hexes) = blocked(&[block, ramp]);
+        assert_eq!(
+            find_path((0, 0), (2, 0), &edges, &hexes),
+            None,
+            "the ramp tops out below the raised block"
+        );
+    }
+
+    #[test]
+    fn a_raised_ramp_reaches_a_raised_block() {
+        let block = Piece {
+            id: 1,
+            shape: shape_index("block").unwrap(),
+            pos: model::hex_center(2, 0),
+            rot: 0.0,
+            elevation: 1.0,
+        };
+        let ramp = Piece {
+            id: 2,
+            shape: shape_index("ramp").unwrap(),
+            pos: model::hex_center(1, 0),
+            rot: std::f32::consts::PI * 1.5,
+            elevation: 1.0,
+        };
+        let (edges, hexes) = blocked(&[block, ramp]);
+        assert!(
+            find_path((0, 0), (2, 0), &edges, &hexes).is_some(),
+            "ramp and block rise together"
+        );
+    }
+
+    #[test]
+    fn cell_under_finds_a_raised_blocks_top() {
+        let block = Piece {
+            id: 1,
+            shape: shape_index("block").unwrap(),
+            pos: model::hex_center(1, 0),
+            rot: 0.0,
+            elevation: 1.0,
+        };
+        assert_eq!(
+            cell_under(&[block], model::hex_center(1, 0), 1.9),
+            Some((1, 0))
+        );
     }
 }

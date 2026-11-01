@@ -668,6 +668,10 @@ pub struct Piece {
     pub pos: Vec2,
     /// Yaw in radians, counter-clockwise seen from above.
     pub rot: f32,
+    /// Height above the natural placement, in metres. Zero puts a floor's top
+    /// on the ground and a block's base on the ground; raising it lifts the
+    /// whole piece, so blocks stack and props float.
+    pub elevation: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -892,12 +896,14 @@ mod tests {
             shape: shape_index("wall").unwrap(),
             pos: Vec2::ZERO,
             rot: 0.0,
+            elevation: 0.0,
         };
         let ghost = Piece {
             id: 2,
             shape: shape_index("wall").unwrap(),
             pos: Vec2::new(edge_len() - 0.05, 0.02),
             rot: 0.0,
+            elevation: 0.0,
         };
 
         let snap = anchor_snap(&ghost, wall, &[a], SNAP_THRESHOLD).expect("anchor snap");
@@ -914,6 +920,7 @@ mod tests {
             shape: shape_index("wall").unwrap(),
             pos: Vec2::ZERO,
             rot: 0.0,
+            elevation: 0.0,
         };
         // Rotate the ghost by 60° and place its left anchor exactly on a's right anchor.
         let off = Vec2::from_angle(std::f32::consts::PI / 3.0) * Vec2::new(-edge_len() / 2.0, 0.0);
@@ -922,6 +929,7 @@ mod tests {
             shape: shape_index("wall").unwrap(),
             pos: Vec2::new(edge_len() / 2.0, 0.0) - off,
             rot: std::f32::consts::PI / 3.0,
+            elevation: 0.0,
         };
         assert!(anchor_snap(&ghost, wall, &[a], SNAP_THRESHOLD).is_none());
     }
@@ -934,12 +942,14 @@ mod tests {
             shape: shape_index("crate").unwrap(),
             pos: Vec2::ZERO,
             rot: 0.0,
+            elevation: 0.0,
         };
         let ghost = Piece {
             id: 2,
             shape: shape_index("crate").unwrap(),
             pos: Vec2::new(1.25, 0.02),
             rot: 0.0,
+            elevation: 0.0,
         };
         let snap = anchor_snap(&ghost, crate_shape, &[a], SNAP_THRESHOLD).expect("crate snap");
         near(snap.pos.x, 1.2, 0.01);
@@ -956,6 +966,7 @@ mod tests {
                 shape: 0,
                 pos: Vec2::new(d + 0.15, 0.05),
                 rot: 1.2,
+                elevation: 0.0,
             },
             wall,
         );
@@ -969,6 +980,7 @@ mod tests {
                 shape: 0,
                 pos: Vec2::new(0.06, -0.08),
                 rot: 0.5,
+                elevation: 0.0,
             },
             crate_shape,
         );
@@ -984,6 +996,7 @@ mod tests {
             shape: shape_index("crate").unwrap(),
             pos: Vec2::ZERO,
             rot: 0.0,
+            elevation: 0.0,
         };
         assert!(hit_test(crate_shape, &p, Vec2::ZERO, 0.0));
         assert!(!hit_test(crate_shape, &p, Vec2::new(2.0, 0.0), HIT_PAD));
@@ -1014,6 +1027,7 @@ mod tests {
             shape: shape_index("crate").unwrap(),
             pos: Vec2::new(0.2, 0.4),
             rot: std::f32::consts::FRAC_PI_2,
+            elevation: 0.0,
         };
         let a = world_anchors(&p, crate_shape);
         near(a[0].pos.x, 0.2, 0.01);

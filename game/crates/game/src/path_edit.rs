@@ -94,9 +94,7 @@ impl Plan {
     }
 
     pub fn get_mut(&mut self, id: u32) -> Option<&mut path::Waypoint> {
-        self.waypoints
-            .iter_mut()
-            .find(|waypoint| waypoint.id == id)
+        self.waypoints.iter_mut().find(|waypoint| waypoint.id == id)
     }
 
     /// Drop leading waypoints the walker has already reached. Returns how many
@@ -204,9 +202,7 @@ impl Gesture {
     /// Update the active drag or tap candidate with a pointer movement.
     pub fn drag(&mut self, pointer: PointerId, screen: Vec2, delta: Vec2) {
         let owns_drag = self.drag.is_some_and(|drag| drag.pointer == pointer);
-        let owns_press = self
-            .press
-            .is_some_and(|press| press.pointer == pointer);
+        let owns_press = self.press.is_some_and(|press| press.pointer == pointer);
         if owns_drag || owns_press {
             self.last = Some(screen);
             self.moved += delta.length();
@@ -228,10 +224,7 @@ impl Gesture {
             && press.pointer == pointer
         {
             self.press = None;
-            if !self.multi
-                && self.moved <= TAP_MAX_MOVE
-                && time - press.time <= TAP_MAX_TIME
-            {
+            if !self.multi && self.moved <= TAP_MAX_MOVE && time - press.time <= TAP_MAX_TIME {
                 tap = Some(press.screen);
             }
         }

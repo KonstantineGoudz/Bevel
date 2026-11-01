@@ -4749,6 +4749,7 @@ dependencies = [
  "avian3d",
  "bevy",
  "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]

@@ -104,6 +104,31 @@ Rules:
   editing are Top-only. In First view path clicks do nothing, so Add is
   disabled/hidden there.
 
+### Build and Play modes
+
+`P` (or the on-screen Play / Exit Play buttons) switches between authoring and
+playing. Build is the default and keeps every rule above.
+
+- **Build** owns object editing: the shape gallery, placing, selecting pieces,
+  gizmos, rotate, delete, undo and the character/path/plan tools. The full
+  palette and hint bar are shown. A bare click in Build selects or clears the
+  selection; it never moves the capsule. Routing here goes through the Path or
+  Plan tool.
+- **Play** hands the capsule to the player. The palette, gallery, hint bar and
+  touch toolbar are hidden; the on-screen controls are a floating **Exit Play**
+  button plus **View** (and the thumbstick/jump on touch). Entering Play clears
+  the armed object tool, selection and any in-flight object drag; the level,
+  plan, route and any live walk survive.
+- Route editing stays live in Play: a click on the ground or a walkable surface
+  (floor, block or ramp) adds a waypoint and the capsule walks to it
+  (Shift/Add appends in top view), and in top view the waypoint and Bezier
+  curve handles can be dragged. Play never selects: clicking a block or ramp
+  routes onto it rather than picking it. Touch taps are read from the raw touch
+  stream, so they work over empty ground (no pickable entity is needed). Gizmo
+  hits, selecting/dragging, rotate/delete/undo/save/course do nothing.
+- Movement (WASD/stick/jump), camera orbit, zoom and view cycling remain live in
+  both modes. `Escape` returns to Build.
+
 ## Waypoints
 
 A waypoint is the surface point the user clicked, resolved to a nav cell with
