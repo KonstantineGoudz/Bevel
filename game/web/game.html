@@ -33,15 +33,28 @@
   <body>
     <canvas id="bevy"></canvas>
     <pre id="error"></pre>
+    <a id="back" href="./" hidden>Back to maps</a>
     <script type="module">
       import init from "./pkg/party_dungeon.js";
 
-      init().catch((err) => {
+      const showError = (message) => {
         const box = document.getElementById("error");
         box.style.display = "block";
-        box.textContent = `Failed to start the wasm build:\n\n${err}`;
-        console.error(err);
-      });
+        box.textContent = message;
+        document.getElementById("back").removeAttribute("hidden");
+      };
+
+      const id = new URLSearchParams(window.location.search).get("session");
+      if (!id) {
+        showError("Choose a map from the maps page before opening the editor.");
+      } else if (localStorage.getItem(`party-dungeon.session.${id}.v1`) === null) {
+        showError("This map is not available in browser storage.");
+      } else {
+        init().catch((err) => {
+          showError(`Failed to start the wasm build:\n\n${err}`);
+          console.error(err);
+        });
+      }
     </script>
   </body>
 </html>

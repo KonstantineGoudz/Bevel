@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use bevy::math::{Vec2, Vec3};
+use bevy::prelude::Resource;
 
 use crate::{
     editor::{Character, Orbit, ViewMode},
@@ -219,6 +220,81 @@ pub(crate) fn session_key(id: &str) -> String {
     format!("{SESSION_PREFIX}{id}.v1")
 }
 
+pub fn parse_session_id(query: &str) -> Option<String> {
+    query
+        .strip_prefix('?')
+        .unwrap_or(query)
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("session="))
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
+#[derive(Debug, Default, Resource, Clone)]
+pub struct Boot {
+    pub id: Option<String>,
+    pub loaded: Option<Loaded>,
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn boot() -> Result<Boot, String> {
+    let window =
+        web_sys::window().ok_or_else(|| "Could not access the browser window.".to_owned())?;
+    let search = window
+        .location()
+        .search()
+        .map_err(|_| "Could not read the browser URL.".to_owned())?;
+    let id = parse_session_id(&search)
+        .ok_or_else(|| "Choose a map from the maps page before opening the editor.".to_owned())?;
+    let store = LocalStore::new()
+        .map_err(|_| "Browser storage is unavailable; the map cannot be opened.".to_owned())?;
+    if !read_index(&store).iter().any(|meta| meta.id == id) {
+        return Err("This map is not in your saved maps list.".to_owned());
+    }
+    let loaded = read_session(&store, &id)
+        .and_then(Snapshot::validate)
+        .map_err(load_error_message)?;
+
+    Ok(Boot {
+        id: Some(id),
+        loaded: Some(loaded),
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn boot() -> Result<Boot, String> {
+    Ok(Boot::default())
+}
+
+fn load_error_message(error: LoadError) -> String {
+    match error {
+        LoadError::MissingVersion => "The saved map is missing its version.".to_owned(),
+        LoadError::UnsupportedVersion(version) => {
+            format!("The saved map uses unsupported version {version}.")
+        }
+        LoadError::UnknownShape(shape) => {
+            format!("The saved map contains an unknown shape: {shape}.")
+        }
+        LoadError::NonFinite(_) => "The saved map contains invalid geometry.".to_owned(),
+        LoadError::Parse(details) => format!("The saved map could not be read: {details}"),
+        LoadError::NotFound => "The saved map state is missing from browser storage.".to_owned(),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn show_error(message: &str) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    if let Some(error) = document.get_element_by_id("error") {
+        error.set_text_content(Some(message));
+        let _ = error.set_attribute("style", "display:block");
+    }
+    if let Some(back) = document.get_element_by_id("back") {
+        let _ = back.remove_attribute("hidden");
+    }
+}
+
 pub(crate) fn encode_index(metas: &[Meta]) -> String {
     serde_json::to_string(metas).expect("session metadata serializes to JSON")
 }
@@ -422,6 +498,18 @@ fn validate_history(history: Vec<Vec<SavedPiece>>, highest_id: &mut u32) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_session_id_is_read_from_the_query_string() {
+        assert_eq!(parse_session_id("?session=abc-123"), Some("abc-123".into()));
+        assert_eq!(
+            parse_session_id("?x=1&session=abc-123&y=2"),
+            Some("abc-123".into())
+        );
+        assert_eq!(parse_session_id("?session="), None);
+        assert_eq!(parse_session_id(""), None);
+        assert_eq!(parse_session_id("?Session=abc"), None);
+    }
 
     fn piece() -> SavedPiece {
         SavedPiece {

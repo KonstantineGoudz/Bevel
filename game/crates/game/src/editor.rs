@@ -108,7 +108,7 @@ impl Plugin for EditorPlugin {
             .init_resource::<PathGesture>()
             .init_resource::<UiScaleApplied>()
             .init_resource::<Nav>()
-            .add_systems(Startup, setup)
+            .add_systems(Startup, (load_session, setup).chain())
             .add_systems(
                 Update,
                 (
@@ -763,12 +763,26 @@ fn setup_ui_scale(
     }
 }
 
+fn load_session(
+    boot: Option<Res<session::Boot>>,
+    mut editor: ResMut<Editor>,
+    mut orbit: ResMut<Orbit>,
+) {
+    let Some(boot) = boot else {
+        return;
+    };
+    if let (Some(id), Some(loaded)) = (&boot.id, boot.loaded.clone()) {
+        editor.session = Some(id.clone());
+        editor.apply_loaded(&mut orbit, loaded);
+    }
+}
+
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    orbit: Res<Orbit>,
 ) {
-    let orbit = Orbit::default();
     let eye = orbit.target
         + Vec3::new(
             orbit.pitch.cos() * orbit.yaw.sin(),

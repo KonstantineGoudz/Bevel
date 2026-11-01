@@ -13,7 +13,19 @@ mod session;
 /// Entry point for every target. `bevy_main` generates the Android glue.
 #[bevy_main]
 pub fn main() {
+    let boot = match session::boot() {
+        Ok(boot) => boot,
+        Err(error) => {
+            #[cfg(target_arch = "wasm32")]
+            session::show_error(&error);
+            #[cfg(not(target_arch = "wasm32"))]
+            eprintln!("{error}");
+            return;
+        }
+    };
+
     App::new()
+        .insert_resource(boot)
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Party Dungeon — editor".into(),
