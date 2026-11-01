@@ -30,6 +30,7 @@ use crate::model::{
 };
 use crate::path;
 use crate::path_edit::{self, PathDrag, PathHandle, Plan, TangentSide};
+use crate::session;
 
 const PANEL_BG: Color = Color::srgb_u8(0x10, 0x16, 0x1e);
 const BUTTON_BG: Color = Color::srgb_u8(0x14, 0x1c, 0x26);
@@ -177,6 +178,11 @@ struct Editor {
     drag: Option<Drag>,
     gizmo_drag: Option<GizmoDrag>,
     undo: Vec<Vec<Piece>>,
+    redo: Vec<Vec<Piece>>,
+    /// Set by any change to the level itself, including undo and redo.
+    hard_dirty: bool,
+    /// Set by changes that are not level edits.
+    soft_dirty: bool,
     note: &'static str,
     /// Shape picked by the mobile carousel.
     mobile_shape: usize,
@@ -207,6 +213,9 @@ impl Default for Editor {
             drag: None,
             gizmo_drag: None,
             undo: Vec::new(),
+            redo: Vec::new(),
+            hard_dirty: false,
+            soft_dirty: false,
             note: "Click a component, then the grid",
             mobile_shape: 0,
             last_palette: None,
@@ -534,20 +543,39 @@ impl Editor {
         self.actor_tool = None;
         self.plan = None;
         self.undo.clear();
+        self.redo.clear();
+        self.hard_dirty = true;
         self.note = "course: walk straight, up the ramp, over the block, drop";
     }
 
     fn commit(&mut self) {
         self.undo.push(self.pieces.clone());
-        if self.undo.len() > 60 {
+        if self.undo.len() > session::MAX_HISTORY {
             self.undo.remove(0);
         }
+        self.redo.clear();
+        self.hard_dirty = true;
     }
 
     fn undo(&mut self) {
         if let Some(prev) = self.undo.pop() {
-            self.pieces = prev;
+            self.redo.push(std::mem::replace(&mut self.pieces, prev));
+            if self.redo.len() > session::MAX_HISTORY {
+                self.redo.remove(0);
+            }
             self.selected = None;
+            self.hard_dirty = true;
+        }
+    }
+
+    fn redo(&mut self) {
+        if let Some(next) = self.redo.pop() {
+            self.undo.push(std::mem::replace(&mut self.pieces, next));
+            if self.undo.len() > session::MAX_HISTORY {
+                self.undo.remove(0);
+            }
+            self.selected = None;
+            self.hard_dirty = true;
         }
     }
 }
@@ -6760,5 +6788,82 @@ mod tests {
         paste_piece(&mut editor, Some(Vec2::ZERO));
         assert!(editor.pieces.is_empty());
         assert_eq!(editor.selected, None);
+    }
+
+    fn test_piece(id: u32) -> Piece {
+        Piece {
+            id,
+            shape: model::shape_index("block").unwrap(),
+            pos: Vec2::ZERO,
+            rot: 0.0,
+            elevation: 0.0,
+        }
+    }
+
+    #[test]
+    fn undo_then_redo_restores_the_newer_state() {
+        let mut editor = Editor::default();
+        editor.commit();
+        editor.pieces.push(test_piece(1));
+        editor.commit();
+        editor.pieces.push(test_piece(2));
+        editor.undo();
+        assert_eq!(editor.pieces.len(), 1);
+        assert_eq!(editor.redo.len(), 1);
+        editor.redo();
+        assert_eq!(editor.pieces.len(), 2);
+        assert!(editor.redo.is_empty());
+    }
+
+    #[test]
+    fn a_new_edit_clears_redo() {
+        let mut editor = Editor::default();
+        editor.commit();
+        editor.pieces.push(test_piece(1));
+        editor.commit();
+        editor.pieces.push(test_piece(2));
+        editor.undo();
+        assert_eq!(editor.redo.len(), 1);
+        editor.commit();
+        editor.pieces.push(test_piece(3));
+        assert!(editor.redo.is_empty());
+    }
+
+    #[test]
+    fn both_history_stacks_are_capped_at_sixty() {
+        let mut editor = Editor::default();
+        for id in 1..=70 {
+            editor.commit();
+            editor.pieces.push(test_piece(id));
+        }
+        assert_eq!(editor.undo.len(), 60);
+        assert_eq!(editor.undo[0].len(), 10);
+        assert_eq!(editor.undo[59].len(), 69);
+        for _ in 0..70 {
+            editor.undo();
+        }
+        assert_eq!(editor.redo.len(), 60);
+    }
+
+    #[test]
+    fn edits_and_history_moves_mark_the_session_dirty() {
+        let mut editor = Editor::default();
+        editor.commit();
+        editor.pieces.push(test_piece(1));
+        assert!(editor.hard_dirty);
+        editor.hard_dirty = false;
+        editor.undo();
+        assert!(editor.hard_dirty);
+        editor.hard_dirty = false;
+        editor.redo();
+        assert!(editor.hard_dirty);
+    }
+
+    #[test]
+    fn the_course_reset_clears_redo() {
+        let mut editor = Editor::default();
+        editor.redo.push(vec![test_piece(1)]);
+        editor.load_course();
+        assert!(editor.redo.is_empty());
     }
 }
