@@ -2632,6 +2632,8 @@ fn interact(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
+    mut last: ResMut<LastSaved>,
+    mut clock: ResMut<SaveClock>,
 ) {
     let (camera, camera_transform) = *camera;
     let camera_global = GlobalTransform::from(*camera_transform);
@@ -2724,7 +2726,13 @@ fn interact(
     }
 
     if !playing && keys.just_pressed(KeyCode::KeyS) && !command {
-        save(&mut editor, &orbit);
+        save(
+            &mut editor,
+            &orbit,
+            &mut last,
+            &mut clock,
+            time.elapsed_secs_f64(),
+        );
     }
 
     // Captured first-person look owns the mouse: clicks must not place,
@@ -5425,7 +5433,33 @@ fn save_failure_note(error: session::StorageError) -> &'static str {
     match error {
         session::StorageError::QuotaExceeded => "save failed: storage is full",
         session::StorageError::Unavailable => "save failed: storage unavailable",
+        session::StorageError::IndexMissing => "save failed: saved map list is invalid",
     }
+}
+
+fn record_save_success(
+    editor: &mut Editor,
+    orbit: &Orbit,
+    last: &mut LastSaved,
+    clock: &mut SaveClock,
+    now: f64,
+) {
+    editor.hard_dirty = false;
+    editor.soft_dirty = false;
+    if matches!(
+        editor.note,
+        "save failed: storage is full"
+            | "save failed: storage unavailable"
+            | "save failed: saved map list is invalid"
+    ) {
+        editor.note = "saved";
+    }
+    clock.last_save = now;
+    clock.retry_at = 0.0;
+    last.0 = Some(Seen {
+        orbit: orbit.clone(),
+        character: editor.character,
+    });
 }
 
 fn autosave_session(
@@ -5468,15 +5502,7 @@ fn autosave_session(
     }
 
     match persist(&editor, &orbit) {
-        Ok(()) => {
-            editor.hard_dirty = false;
-            editor.soft_dirty = false;
-            clock.last_save = now;
-            last.0 = Some(Seen {
-                orbit: orbit.clone(),
-                character,
-            });
-        }
+        Ok(()) => record_save_success(&mut editor, &orbit, &mut last, &mut clock, now),
         Err(error) => {
             editor.note = save_failure_note(error);
             clock.retry_at = now + 2.0;
@@ -5503,7 +5529,7 @@ fn persist(editor: &Editor, orbit: &Orbit) -> Result<(), session::StorageError> 
     }
 }
 
-fn save(editor: &mut Editor, orbit: &Orbit) {
+fn save(editor: &mut Editor, orbit: &Orbit, last: &mut LastSaved, clock: &mut SaveClock, now: f64) {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let _ = orbit;
@@ -5512,8 +5538,7 @@ fn save(editor: &mut Editor, orbit: &Orbit) {
         match std::fs::write(path, &json) {
             Ok(()) => {
                 info!("saved {} pieces to level.json", editor.pieces.len());
-                editor.hard_dirty = false;
-                editor.soft_dirty = false;
+                record_save_success(editor, orbit, last, clock, now);
                 editor.note = "saved level.json";
             }
             Err(err) => warn!("could not save level.json: {err}"),
@@ -5524,8 +5549,7 @@ fn save(editor: &mut Editor, orbit: &Orbit) {
     {
         match persist(editor, orbit) {
             Ok(()) => {
-                editor.hard_dirty = false;
-                editor.soft_dirty = false;
+                record_save_success(editor, orbit, last, clock, now);
                 editor.note = "saved";
             }
             Err(error) => editor.note = save_failure_note(error),
@@ -5545,6 +5569,63 @@ mod tests {
         assert!(!save_due(false, true, 10.0, 10.3, 0.0));
         assert!(save_due(false, true, 10.0, 11.0, 0.0));
         assert!(!save_due(false, true, 10.0, 20.0, 25.0));
+    }
+
+    #[test]
+    fn a_successful_save_clears_only_save_failure_notes() {
+        let mut editor = Editor::default();
+        let orbit = Orbit::default();
+        let mut last = LastSaved::default();
+        let mut clock = SaveClock::default();
+        for note in [
+            "save failed: storage is full",
+            "save failed: storage unavailable",
+            "save failed: saved map list is invalid",
+        ] {
+            editor.note = note;
+            record_save_success(&mut editor, &orbit, &mut last, &mut clock, 12.0);
+            assert_eq!(editor.note, "saved");
+        }
+
+        editor.note = "map loaded";
+        record_save_success(&mut editor, &orbit, &mut last, &mut clock, 13.0);
+        assert_eq!(editor.note, "map loaded");
+    }
+
+    #[test]
+    fn a_successful_save_refreshes_the_saved_pose_and_clock() {
+        let character = Character {
+            pos: Vec2::new(1.0, 2.0),
+            feet: 0.5,
+            yaw: 0.75,
+            vy: 3.0,
+            grounded: true,
+        };
+        let mut editor = Editor {
+            character: Some(character),
+            hard_dirty: true,
+            soft_dirty: true,
+            ..Default::default()
+        };
+        let orbit = Orbit {
+            yaw: 1.0,
+            ..Orbit::default()
+        };
+        let mut last = LastSaved::default();
+        let mut clock = SaveClock {
+            last_save: 2.0,
+            retry_at: 99.0,
+        };
+
+        record_save_success(&mut editor, &orbit, &mut last, &mut clock, 12.0);
+
+        assert!(!editor.hard_dirty);
+        assert!(!editor.soft_dirty);
+        assert_eq!(clock.last_save, 12.0);
+        assert_eq!(clock.retry_at, 0.0);
+        let seen = last.0.unwrap();
+        assert_eq!(seen.orbit, orbit);
+        assert_eq!(seen.character, Some(character));
     }
 
     #[test]

@@ -266,6 +266,8 @@
       const SESSION_PREFIX = "party-dungeon.session.";
       const SESSION_SUFFIX = ".v1";
 
+      class InvalidIndexError extends Error {}
+
       const mapList = document.querySelector("#map-list");
       const emptyState = document.querySelector("#empty-state");
       const listError = document.querySelector("#list-error");
@@ -287,19 +289,26 @@
         return `${SESSION_PREFIX}${id}${SESSION_SUFFIX}`;
       }
 
-      function readIndex() {
+      function readRawIndex() {
         const raw = localStorage.getItem(INDEX_KEY);
         if (raw === null) return [];
-
         let entries;
         try {
           entries = JSON.parse(raw);
         } catch (error) {
-          console.warn("Could not parse the saved map index.", error);
-          return [];
+          throw new InvalidIndexError("Could not parse the saved map index.", { cause: error });
         }
-        if (!Array.isArray(entries)) {
-          console.warn("The saved map index is not an array.");
+        if (!Array.isArray(entries)) throw new InvalidIndexError("The saved map index is not an array.");
+        return entries;
+      }
+
+      function readIndex() {
+        let entries;
+        try {
+          entries = readRawIndex();
+        } catch (error) {
+          if (!(error instanceof InvalidIndexError)) throw error;
+          console.warn("Could not read the saved map index.", error);
           return [];
         }
 
@@ -317,16 +326,16 @@
               console.warn(`Ignoring invalid saved map metadata at index ${index}:`, entry);
               return false;
             }
+            if (!Number.isInteger(entry.pieceCount) || entry.pieceCount < 0) {
+              console.warn(`Ignoring saved map ${entry.id}: pieceCount must be a non-negative integer.`);
+              return false;
+            }
             if (localStorage.getItem(sessionKey(entry.id)) === null) {
               console.warn(`Ignoring saved map ${entry.id}: its session data is missing.`);
               return false;
             }
             return true;
           })
-          .map((entry) => ({
-            ...entry,
-            pieceCount: Number.isFinite(entry.pieceCount) ? entry.pieceCount : 0,
-          }))
           .sort((a, b) => b.updatedAt - a.updatedAt);
       }
 
@@ -382,7 +391,7 @@
           const date = new Date(map.updatedAt);
           if (Number.isFinite(date.getTime())) updated.dateTime = date.toISOString();
           const pieceCount = document.createElement("span");
-          const count = Number.isFinite(map.pieceCount) ? map.pieceCount : 0;
+          const count = map.pieceCount;
           pieceCount.textContent = `${new Intl.NumberFormat().format(count)} ${count === 1 ? "piece" : "pieces"}`;
           details.append(updated, pieceCount);
           link.append(details);
@@ -427,6 +436,14 @@
         const id = newId();
         const timestamp = Date.now();
         const map = { id, name, createdAt: timestamp, updatedAt: timestamp, pieceCount: 0 };
+        let nextMaps;
+        try {
+          nextMaps = [...readRawIndex(), map];
+        } catch (error) {
+          console.error("Could not read the map index.", error);
+          nameError.textContent = "Could not read the map list in browser storage. Please try again.";
+          return false;
+        }
 
         try {
           localStorage.setItem(sessionKey(id), JSON.stringify({ version: 1 }));
@@ -437,7 +454,7 @@
         }
 
         try {
-          writeIndex([...maps, map]);
+          writeIndex(nextMaps);
         } catch (error) {
           try {
             localStorage.removeItem(sessionKey(id));
@@ -449,39 +466,44 @@
           return false;
         }
 
-        maps = [...maps, map].sort((a, b) => b.updatedAt - a.updatedAt);
         window.location.assign(`./game.html?session=${encodeURIComponent(id)}`);
         return true;
       }
 
       function renameMap(id, name) {
-        const current = maps.find((map) => map.id === id);
-        if (!current) {
+        if (!maps.some((map) => map.id === id)) {
           nameError.textContent = "This map is no longer available. Refresh the page and try again.";
           return false;
         }
-        const nextMaps = maps.map((map) => map.id === id ? { ...map, name } : map);
+        let nextMaps;
         try {
+          nextMaps = readRawIndex().map((map) => map?.id === id ? { ...map, name } : map);
+          if (!nextMaps.some((map) => map?.id === id)) {
+            nameError.textContent = "This map is no longer available. Refresh the page and try again.";
+            return false;
+          }
           writeIndex(nextMaps);
         } catch (error) {
           console.error("Could not rename the map.", error);
           nameError.textContent = "Could not save the new name in browser storage. Please try again.";
           return false;
         }
-        maps = nextMaps;
+        maps = maps.map((map) => map.id === id ? { ...map, name } : map);
         render();
         return true;
       }
 
       function deleteMap(id) {
-        const nextMaps = maps.filter((map) => map.id !== id);
-        if (nextMaps.length === maps.length) {
-          deleteError.textContent = "This map is no longer available. Refresh the page and try again.";
-          return false;
-        }
-
+        let rawMaps;
+        let nextMaps;
         let sessionState;
         try {
+          rawMaps = readRawIndex();
+          if (!rawMaps.some((map) => map?.id === id)) {
+            deleteError.textContent = "This map is no longer available. Refresh the page and try again.";
+            return false;
+          }
+          nextMaps = rawMaps.filter((map) => map?.id !== id);
           sessionState = localStorage.getItem(sessionKey(id));
           writeIndex(nextMaps);
         } catch (error) {
@@ -495,7 +517,7 @@
         } catch (error) {
           try {
             if (sessionState !== null) localStorage.setItem(sessionKey(id), sessionState);
-            writeIndex(maps);
+            writeIndex(rawMaps);
           } catch (rollbackError) {
             console.warn("Could not fully restore the map after a failed delete.", rollbackError);
           }
@@ -504,7 +526,7 @@
           return false;
         }
 
-        maps = nextMaps;
+        maps = maps.filter((map) => map.id !== id);
         render();
         return true;
       }

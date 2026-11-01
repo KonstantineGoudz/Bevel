@@ -47,13 +47,22 @@
       const id = new URLSearchParams(window.location.search).get("session");
       if (!id) {
         showError("Choose a map from the maps page before opening the editor.");
-      } else if (localStorage.getItem(`party-dungeon.session.${id}.v1`) === null) {
-        showError("This map is not available in browser storage.");
       } else {
-        init().catch((err) => {
-          showError(`Failed to start the wasm build:\n\n${err}`);
-          console.error(err);
-        });
+        let hasSession;
+        try {
+          hasSession = localStorage.getItem(`party-dungeon.session.${id}.v1`) !== null;
+        } catch (error) {
+          showError("Browser storage is unavailable; the map cannot be opened.");
+          console.error("Could not read the saved map from browser storage.", error);
+        }
+        if (hasSession === false) {
+          showError("This map is not available in browser storage.");
+        } else if (hasSession === true) {
+          init().catch((err) => {
+            showError(`Failed to start the wasm build:\n\n${err}`);
+            console.error(err);
+          });
+        }
       }
     </script>
   </body>

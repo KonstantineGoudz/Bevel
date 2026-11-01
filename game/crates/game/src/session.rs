@@ -44,14 +44,37 @@ pub struct Snapshot {
     pub next_id: Option<u32>,
     #[serde(default)]
     pub pieces: Vec<SavedPiece>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional")]
     pub character: Option<SavedCharacter>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional")]
     pub camera: Option<SavedCamera>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_history")]
     pub undo: Vec<Vec<SavedPiece>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_history")]
     pub redo: Vec<Vec<SavedPiece>>,
+}
+
+fn deserialize_optional<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value::<Option<T>>(value).ok().flatten())
+}
+
+fn deserialize_history<'de, D>(deserializer: D) -> Result<Vec<Vec<SavedPiece>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let Ok(entries) = serde_json::from_value::<Vec<serde_json::Value>>(value) else {
+        return Ok(Vec::new());
+    };
+    Ok(entries
+        .into_iter()
+        .filter_map(|entry| serde_json::from_value(entry).ok())
+        .collect())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -208,6 +231,7 @@ impl Snapshot {
 pub(crate) enum StorageError {
     QuotaExceeded,
     Unavailable,
+    IndexMissing,
 }
 
 pub(crate) trait Store {
@@ -307,6 +331,7 @@ pub fn show_error(message: &str) {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn encode_index(metas: &[Meta]) -> String {
     serde_json::to_string(metas).expect("session metadata serializes to JSON")
 }
@@ -328,6 +353,7 @@ pub(crate) fn read_index(store: &dyn Store) -> Vec<Meta> {
         .map_or_else(Vec::new, |json| parse_index(&json))
 }
 
+#[cfg(test)]
 pub(crate) fn write_index(store: &mut dyn Store, metas: &[Meta]) -> Result<(), StorageError> {
     store.set(INDEX_KEY, &encode_index(metas))
 }
@@ -352,12 +378,17 @@ pub(crate) fn save_session(
     now_ms: f64,
 ) -> Result<(), StorageError> {
     write_session(store, id, snapshot)?;
-    let mut metas = read_index(store);
-    if let Some(meta) = metas.iter_mut().find(|meta| meta.id == id) {
-        meta.updated_at = now_ms;
-        meta.piece_count = snapshot.pieces.len();
-    }
-    write_index(store, &metas)
+    let raw = store.get(INDEX_KEY).ok_or(StorageError::IndexMissing)?;
+    let mut entries: Vec<serde_json::Value> =
+        serde_json::from_str(&raw).map_err(|_| StorageError::IndexMissing)?;
+    let meta = entries
+        .iter_mut()
+        .find(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(id))
+        .ok_or(StorageError::IndexMissing)?;
+    meta["updatedAt"] = serde_json::json!(now_ms);
+    meta["pieceCount"] = serde_json::json!(snapshot.pieces.len());
+    let json = serde_json::to_string(&entries).expect("raw session metadata serializes to JSON");
+    store.set(INDEX_KEY, &json)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -567,6 +598,57 @@ mod tests {
         assert!(snapshot.next_id.is_none());
     }
 
+    #[test]
+    fn malformed_camera_json_falls_back_to_no_camera() {
+        let snapshot = Snapshot::from_json(
+            r#"{
+                "version": 1,
+                "camera": {
+                    "targetX": "bad",
+                    "targetY": 1,
+                    "targetZ": 2,
+                    "yaw": 0.85,
+                    "pitch": 0.9,
+                    "distance": 7.5,
+                    "mode": "third"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(snapshot.camera.is_none());
+        assert!(snapshot.validate().unwrap().camera.is_none());
+    }
+
+    #[test]
+    fn malformed_character_json_falls_back_to_no_character() {
+        let snapshot =
+            Snapshot::from_json(r#"{"version":1,"character":{"x":1,"z":2,"feet":0}}"#).unwrap();
+
+        assert!(snapshot.character.is_none());
+        assert!(snapshot.validate().unwrap().character.is_none());
+    }
+
+    #[test]
+    fn malformed_history_json_drops_only_the_bad_entry() {
+        let snapshot = Snapshot::from_json(
+            r#"{
+                "version": 1,
+                "undo": [
+                    [{"id":2,"shape":"block","x":0,"z":0,"elevation":0,"rotDeg":0}],
+                    [{"id":9,"shape":"block"}],
+                    [{"id":3,"shape":"block","x":1,"z":0,"elevation":0,"rotDeg":0}]
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = snapshot.validate().unwrap();
+        assert_eq!(loaded.undo.len(), 2);
+        assert_eq!(loaded.undo[0][0].id, 2);
+        assert_eq!(loaded.undo[1][0].id, 3);
+    }
+
     fn saved(id: u32, shape: &str, x: f32, z: f32) -> SavedPiece {
         SavedPiece {
             id,
@@ -759,6 +841,81 @@ mod tests {
         let metas = read_index(&store);
         assert_eq!(metas[0].piece_count, 2);
         assert_eq!(metas[0].updated_at, 42.0);
+        assert_eq!(read_session(&store, "a").unwrap(), snapshot);
+    }
+
+    #[test]
+    fn saving_a_session_preserves_malformed_sibling_index_entries() {
+        let mut store = MemoryStore::new();
+        let sibling = serde_json::json!({"id": "broken", "name": "Missing fields"});
+        let raw = serde_json::json!([
+            {
+                "id": "a",
+                "name": "Alpha",
+                "createdAt": 1,
+                "updatedAt": 2,
+                "pieceCount": 0
+            },
+            sibling.clone()
+        ])
+        .to_string();
+        store.set(INDEX_KEY, &raw).unwrap();
+        let snapshot = Snapshot {
+            version: 1,
+            pieces: vec![saved(1, "block", 0.0, 0.0)],
+            ..Default::default()
+        };
+
+        save_session(&mut store, "a", &snapshot, 42.0).unwrap();
+
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_str(&store.get(INDEX_KEY).unwrap()).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["updatedAt"], 42.0);
+        assert_eq!(entries[0]["pieceCount"], 1);
+        assert_eq!(entries[1], sibling);
+    }
+
+    #[test]
+    fn saving_a_session_with_a_missing_index_entry_returns_an_error() {
+        let mut store = MemoryStore::new();
+        let raw = serde_json::json!([{
+            "id": "a",
+            "name": "Alpha",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "pieceCount": 0
+        }])
+        .to_string();
+        store.set(INDEX_KEY, &raw).unwrap();
+        let snapshot = Snapshot {
+            version: 1,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            save_session(&mut store, "b", &snapshot, 42.0),
+            Err(StorageError::IndexMissing)
+        );
+        assert_eq!(store.get(INDEX_KEY).unwrap(), raw);
+        assert_eq!(read_session(&store, "b").unwrap(), snapshot);
+    }
+
+    #[test]
+    fn saving_a_session_does_not_rewrite_an_invalid_raw_index() {
+        let mut store = MemoryStore::new();
+        let raw = r#"{"id":"a"}"#;
+        store.set(INDEX_KEY, raw).unwrap();
+        let snapshot = Snapshot {
+            version: 1,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            save_session(&mut store, "a", &snapshot, 42.0),
+            Err(StorageError::IndexMissing)
+        );
+        assert_eq!(store.get(INDEX_KEY).unwrap(), raw);
         assert_eq!(read_session(&store, "a").unwrap(), snapshot);
     }
 
