@@ -126,6 +126,7 @@ impl Plugin for ViewerPlugin {
         app.init_resource::<Viewer>()
             .init_resource::<ViewerOrbit>()
             .init_resource::<PendingUploads>()
+            .insert_resource(crate::controls::Controls::load())
             .add_systems(Startup, (setup_viewer, setup_wasm_picker))
             .add_systems(
                 Update,
@@ -631,21 +632,20 @@ fn scene_bounds(
 
 fn orbit_camera(
     time: Res<Time>,
-    mouse: Res<ButtonInput<MouseButton>>,
+    input: crate::controls::PlayerInput,
     mut motions: MessageReader<bevy::input::mouse::MouseMotion>,
     mut wheels: MessageReader<bevy::input::mouse::MouseWheel>,
-    keyboard: Res<ButtonInput<KeyCode>>,
     mut viewer: ResMut<Viewer>,
     mut orbit: ResMut<ViewerOrbit>,
     cameras: Query<(&mut Transform, &mut Projection), With<Camera3d>>,
 ) {
-    if keyboard.just_pressed(KeyCode::KeyR) {
+    if input.just_pressed(crate::controls::Action::ViewerReset) {
         *orbit = ViewerOrbit::default();
     }
     let mut delta = Vec2::ZERO;
     for motion in motions.read() {
         // Right-drag orbits (left stays free for UI clicks).
-        if mouse.pressed(MouseButton::Right) {
+        if input.pressed(crate::controls::Action::OrbitDrag) {
             delta += motion.delta;
         }
     }

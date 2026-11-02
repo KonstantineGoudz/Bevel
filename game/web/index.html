@@ -160,6 +160,18 @@
         border-radius: 14px;
         box-shadow: 0 24px 80px #0009;
       }
+      dialog.wide[open] {
+        width: min(680px, calc(100vw - 32px));
+        max-height: calc(100vh - 64px);
+        display: flex;
+        flex-direction: column;
+        padding-bottom: 16px;
+      }
+      dialog.wide .dialog-scroll {
+        overflow-y: auto;
+        margin: 0 -4px;
+        padding: 0 4px 4px;
+      }
       dialog::backdrop { background: #05070bbd; backdrop-filter: blur(3px); }
       dialog h2 { margin: 0 0 16px; font-size: 21px; }
       dialog p { color: var(--muted); }
@@ -183,6 +195,52 @@
       .dialog-actions button { padding: 12px 16px; }
       .danger { color: #fff; background: #a43b36; }
       .danger:hover { background: #bd4942; }
+      .control-group { margin: 18px 0 4px; }
+      .control-group > h3 {
+        margin: 0 0 8px;
+        font-size: 12px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .control-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 7px 0;
+        border-top: 1px solid #1e2833;
+      }
+      .control-row .control-name { font-size: 14px; }
+      .control-binds { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+      .bind {
+        font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        padding: 8px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        background: #0c1017;
+        color: var(--ink);
+        cursor: pointer;
+      }
+      .bind:hover { border-color: var(--amber); }
+      .bind.capturing {
+        border-color: var(--amber);
+        color: var(--amber);
+        animation: pulse 1s ease-in-out infinite;
+      }
+      @keyframes pulse { 50% { opacity: 0.55; } }
+      .control-hint { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
+      .control-select {
+        font: 600 12px/1 ui-sans-serif, system-ui, sans-serif;
+        padding: 9px 10px;
+        color: var(--ink);
+        background: #0c1017;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      .control-select:hover { border-color: var(--amber); }
+      .control-warning { color: var(--amber); font-size: 13px; margin: 8px 0 0; min-height: 1.4em; }
       .note {
         margin: 30px 0 0;
         font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -223,6 +281,7 @@
       </p>
       <div class="actions">
         <button class="primary" id="new-map" type="button">New map</button>
+        <button class="ghost" id="controls" type="button">Controls</button>
         <button class="ghost" id="view-model" type="button">Import &amp; view 3D model (Bevy)</button>
       </div>
       <section class="maps-section" aria-labelledby="maps-title">
@@ -257,6 +316,21 @@
           <button class="danger" type="submit">Delete</button>
         </div>
       </form>
+    </dialog>
+    <dialog id="controls-dialog" class="wide" aria-labelledby="controls-dialog-title">
+      <h2 id="controls-dialog-title">Controls</h2>
+      <p class="control-hint">
+        Click a binding, then press a key, a mouse button, or a gamepad button…
+        Esc cancels. Left stick moves, right stick orbits, the wheel zooms.
+        The A/B/X/Y touch buttons are remapped in the Touch buttons section
+        below (tap Run/Slide to toggle them in game).
+      </p>
+      <p class="control-warning" id="controls-warning" role="alert" aria-live="polite"></p>
+      <div class="dialog-scroll" id="controls-list"></div>
+      <div class="dialog-actions">
+        <button class="ghost" id="controls-reset" type="button">Reset defaults</button>
+        <button class="primary" id="controls-close" type="button">Done</button>
+      </div>
     </dialog>
     <footer>
       <span>v0.1.0 &middot; built for web &middot; <a href="./game.html">editor build</a> &middot; <a href="./viewer-bevy.html?viewer=1">model viewer (Bevy)</a></span>
@@ -569,6 +643,422 @@
         event.preventDefault();
         if (deleteMap(deleteMapId)) deleteDialog.close();
       });
+
+      // ---- Controls settings ----
+      // Binding shape (shared with the Bevy game):
+      //   { kind: "key" | "mouse" | "pad", code: "KeyW" | "Left" | "South" | ...,
+      //     ctrl: bool, shift: bool, alt: bool }
+      // `code` matches Bevy `Debug` variant names, which equal web
+      // `KeyboardEvent.code` values (Meta* is normalized to Super* below).
+      const CONTROLS_KEY = "party-dungeon.controls.v1";
+      const CONTROLS_VERSION = 1;
+      const GROUP_ORDER = ["Play", "Camera", "Mode", "Editor", "Transform", "Add menu", "Model viewer"];
+      const ACTIONS = [
+        { id: "moveForward", label: "Move forward", group: "Play", context: "Play", defaults: [{ kind: "key", code: "KeyW" }, { kind: "key", code: "ArrowUp" }, { kind: "pad", code: "DPadUp" }] },
+        { id: "moveBack", label: "Move back", group: "Play", context: "Play", defaults: [{ kind: "key", code: "KeyS" }, { kind: "key", code: "ArrowDown" }, { kind: "pad", code: "DPadDown" }] },
+        { id: "moveLeft", label: "Move left", group: "Play", context: "Play", defaults: [{ kind: "key", code: "KeyA" }, { kind: "key", code: "ArrowLeft" }, { kind: "pad", code: "DPadLeft" }] },
+        { id: "moveRight", label: "Move right", group: "Play", context: "Play", defaults: [{ kind: "key", code: "KeyD" }, { kind: "key", code: "ArrowRight" }, { kind: "pad", code: "DPadRight" }] },
+        { id: "jump", label: "Jump", group: "Play", context: "Play", defaults: [{ kind: "key", code: "Space" }, { kind: "pad", code: "South" }] },
+        { id: "sprint", label: "Sprint (hold)", group: "Play", context: "Play", defaults: [{ kind: "key", code: "ShiftLeft", shift: true }, { kind: "key", code: "ShiftRight", shift: true }] },
+        { id: "slide", label: "Slide (hold)", group: "Play", context: "Play", defaults: [{ kind: "key", code: "ControlLeft", ctrl: true }, { kind: "key", code: "ControlRight", ctrl: true }] },
+        { id: "interact", label: "Interact", group: "Play", context: "Play", defaults: [{ kind: "key", code: "KeyE" }, { kind: "pad", code: "East" }] },
+        { id: "orbitDrag", label: "Orbit camera (drag)", group: "Camera", context: "Global", defaults: [{ kind: "mouse", code: "Right" }] },
+        { id: "panDrag", label: "Pan camera (drag)", group: "Camera", context: "Global", defaults: [{ kind: "mouse", code: "Middle" }, { kind: "mouse", code: "Right", shift: true }] },
+        { id: "cycleView", label: "Cycle camera view", group: "Camera", context: "Global", defaults: [{ kind: "key", code: "KeyV" }, { kind: "pad", code: "West" }] },
+        { id: "focusCamera", label: "Focus selection", group: "Camera", context: "Global", defaults: [{ kind: "key", code: "KeyF" }, { kind: "pad", code: "North" }] },
+        { id: "captureToggle", label: "Pointer capture on/off", group: "Camera", context: "Global", defaults: [{ kind: "key", code: "Tab" }] },
+        { id: "togglePlay", label: "Play / build mode", group: "Mode", context: "Global", defaults: [{ kind: "key", code: "KeyP" }, { kind: "pad", code: "Start" }] },
+        { id: "back", label: "Back / cancel", group: "Mode", context: "Global", defaults: [{ kind: "key", code: "Escape" }, { kind: "pad", code: "Select" }] },
+        { id: "walkPlan", label: "Walk route", group: "Play", context: "Global", defaults: [{ kind: "key", code: "Enter" }] },
+        { id: "menuToggle", label: "Add menu", group: "Mode", context: "Global", defaults: [{ kind: "key", code: "F3" }] },
+        { id: "primaryClick", label: "Select / place (click)", group: "Mode", context: "Global", defaults: [{ kind: "mouse", code: "Left" }] },
+        { id: "placeCharacter", label: "Place character", group: "Editor", context: "Build", defaults: [{ kind: "key", code: "KeyC" }] },
+        { id: "copySel", label: "Copy", group: "Editor", context: "Build", defaults: [{ kind: "key", code: "KeyC", ctrl: true }] },
+        { id: "paste", label: "Paste", group: "Editor", context: "Build", defaults: [{ kind: "key", code: "KeyV", ctrl: true }] },
+        { id: "rotatePiece", label: "Rotate piece", group: "Editor", context: "Build", defaults: [{ kind: "key", code: "KeyR" }] },
+        { id: "deletePiece", label: "Delete", group: "Editor", context: "Build", defaults: [{ kind: "key", code: "Delete" }, { kind: "key", code: "Backspace" }] },
+        { id: "undo", label: "Undo", group: "Editor", context: "Build", defaults: [{ kind: "key", code: "KeyZ", ctrl: true }] },
+        { id: "redo", label: "Redo", group: "Editor", context: "Build", defaults: [{ kind: "key", code: "KeyZ", ctrl: true, shift: true }, { kind: "key", code: "KeyY", ctrl: true }] },
+        { id: "saveLevel", label: "Save level", group: "Editor", context: "Build", defaults: [{ kind: "key", code: "KeyS" }] },
+        { id: "copyJson", label: "Copy level JSON", group: "Editor", context: "Build", defaults: [{ kind: "key", code: "KeyS", shift: true }] },
+        { id: "newGroup", label: "New group", group: "Editor", context: "Build", defaults: [{ kind: "key", code: "KeyG", ctrl: true }] },
+        { id: "ungroupNodes", label: "Ungroup nodes", group: "Editor", context: "Build", defaults: [{ kind: "key", code: "KeyG", ctrl: true, shift: true }] },
+        { id: "renameItem", label: "Rename", group: "Editor", context: "Build", defaults: [{ kind: "key", code: "F2" }] },
+        { id: "transMove", label: "Transform: move", group: "Transform", context: "Modal", defaults: [{ kind: "key", code: "KeyG" }] },
+        { id: "transRotate", label: "Transform: rotate", group: "Transform", context: "Modal", defaults: [{ kind: "key", code: "KeyR" }] },
+        { id: "axisX", label: "Transform axis: X", group: "Transform", context: "Modal", defaults: [{ kind: "key", code: "KeyX" }] },
+        { id: "axisY", label: "Transform axis: Y", group: "Transform", context: "Modal", defaults: [{ kind: "key", code: "KeyY" }] },
+        { id: "axisZ", label: "Transform axis: Z", group: "Transform", context: "Modal", defaults: [{ kind: "key", code: "KeyZ" }] },
+        { id: "confirmModal", label: "Confirm", group: "Transform", context: "Modal", defaults: [{ kind: "key", code: "Enter" }, { kind: "pad", code: "South" }] },
+        { id: "menuUp", label: "Menu: previous", group: "Add menu", context: "Menu", defaults: [{ kind: "key", code: "ArrowUp" }] },
+        { id: "menuDown", label: "Menu: next", group: "Add menu", context: "Menu", defaults: [{ kind: "key", code: "ArrowDown" }] },
+        { id: "menuConfirm", label: "Menu: confirm", group: "Add menu", context: "Menu", defaults: [{ kind: "key", code: "Enter" }, { kind: "pad", code: "South" }] },
+        { id: "viewerReset", label: "Viewer: reset view", group: "Model viewer", context: "Viewer", defaults: [{ kind: "key", code: "KeyR" }] },
+      ];
+      const ACTION_BY_ID = Object.fromEntries(ACTIONS.map((action) => [action.id, action]));
+      const PAD_NAMES = { South: "A", East: "B", North: "Y", West: "X", C: "C", Z: "Z", LeftTrigger: "LB", LeftTrigger2: "LT", RightTrigger: "RB", RightTrigger2: "RT", Select: "Back", Start: "Start", Mode: "Home", LeftThumb: "L3", RightThumb: "R3", DPadUp: "D-Up", DPadDown: "D-Down", DPadLeft: "D-Left", DPadRight: "D-Right" };
+      // Standard gamepad mapping: indices match the W3C standard layout.
+      const PAD_INDEX_TO_CODE = ["South", "East", "West", "North", "LeftTrigger", "RightTrigger", "LeftTrigger2", "RightTrigger2", "Select", "Start", "LeftThumb", "RightThumb", "DPadUp", "DPadDown", "DPadLeft", "DPadRight", "Mode"];
+      const TOUCH_BUTTONS = [
+        { id: "A", label: "Button A" },
+        { id: "B", label: "Button B" },
+        { id: "X", label: "Button X" },
+        { id: "Y", label: "Button Y" },
+      ];
+      // Touch-cluster targets. Jump and Interact fire once per tap; Run and
+      // Slide toggle until tapped again (the touch buttons have no release).
+      const TOUCH_TARGETS = [
+        { id: "jump", label: "Jump" },
+        { id: "sprint", label: "Run (sprint)" },
+        { id: "slide", label: "Slide" },
+        { id: "interact", label: "Interact" },
+        { id: "none", label: "Disabled" },
+      ];
+      const TOUCH_DEFAULTS = { A: "jump", B: "slide", X: "interact", Y: "sprint" };
+      const TOUCH_TARGET_IDS = new Set(["jump", "sprint", "slide", "interact"]);
+
+      const controlsDialog = document.querySelector("#controls-dialog");
+      const controlsList = document.querySelector("#controls-list");
+      const controlsWarning = document.querySelector("#controls-warning");
+      let controlTouch = null;
+      let controlBindings = loadControls();
+      let capturing = null;
+      let gamepadRaf = 0;
+
+      function normalizeKeyCode(code) {
+        if (code === "MetaLeft") return "SuperLeft";
+        if (code === "MetaRight") return "SuperRight";
+        return code;
+      }
+
+      function prettyKey(code) {
+        if (code.startsWith("Key")) return code.slice(3);
+        if (code.startsWith("Digit")) return code.slice(5);
+        if (code.startsWith("Numpad")) return `Num${code.slice(6)}`;
+        switch (code) {
+          case "ArrowUp": return "↑";
+          case "ArrowDown": return "↓";
+          case "ArrowLeft": return "←";
+          case "ArrowRight": return "→";
+          case "Escape": return "Esc";
+          case "Backspace": return "⌫";
+          case "Delete": return "Del";
+          case "SuperLeft":
+          case "SuperRight": return "Cmd";
+          default: return code;
+        }
+      }
+
+      function prettyMouse(code) {
+        switch (code) {
+          case "Left": return "LMB";
+          case "Right": return "RMB";
+          case "Middle": return "MMB";
+          case "Back": return "Mouse4";
+          case "Forward": return "Mouse5";
+          default: return code;
+        }
+      }
+
+      function prettyBinding(binding) {
+        if (binding.kind === "key") {
+          const parts = [];
+          if (binding.ctrl) parts.push("Ctrl");
+          if (binding.shift) parts.push("Shift");
+          if (binding.alt) parts.push("Alt");
+          parts.push(prettyKey(binding.code));
+          return parts.join("+");
+        }
+        if (binding.kind === "mouse") {
+          const label = prettyMouse(binding.code);
+          return binding.shift ? `Shift+${label}` : label;
+        }
+        return PAD_NAMES[binding.code] ?? binding.code;
+      }
+
+
+      function defaultBindings() {
+        return Object.fromEntries(ACTIONS.map((action) => [
+          action.id,
+          action.defaults.map((binding) => ({ ctrl: false, shift: false, alt: false, ...binding })),
+        ]));
+      }
+
+      function defaultTouch() {
+        return { ...TOUCH_DEFAULTS };
+      }
+
+      function loadTouch(stored) {
+        const next = defaultTouch();
+        if (!stored || typeof stored !== "object") return next;
+        for (const button of TOUCH_BUTTONS) {
+          if (!(button.id in stored)) continue;
+          const target = stored[button.id];
+          if (target === null) {
+            next[button.id] = null;
+          } else if (typeof target === "string" && TOUCH_TARGET_IDS.has(target)) {
+            next[button.id] = target;
+          }
+        }
+        return next;
+      }
+
+      function loadControls() {
+        const bindings = defaultBindings();
+        controlTouch = defaultTouch();
+        try {
+          const raw = localStorage.getItem(CONTROLS_KEY);
+          if (raw === null) return bindings;
+          const stored = JSON.parse(raw);
+          if (!stored || stored.version !== CONTROLS_VERSION || typeof stored.bindings !== "object") return bindings;
+          controlTouch = loadTouch(stored.touch);
+          for (const [id, list] of Object.entries(stored.bindings)) {
+            if (!ACTION_BY_ID[id] || !Array.isArray(list)) continue;
+            const cleaned = list.filter((binding) =>
+              binding && typeof binding.code === "string"
+              && (binding.kind === "key" || binding.kind === "mouse" || binding.kind === "pad"));
+            bindings[id] = cleaned.map((binding) => ({
+              ctrl: false,
+              shift: false,
+              alt: false,
+              ...binding,
+              kind: binding.kind,
+              code: binding.code,
+            }));
+          }
+        } catch (error) {
+          console.warn("Could not read control bindings; using defaults.", error);
+        }
+        return bindings;
+      }
+
+      function saveControls() {
+        try {
+          localStorage.setItem(CONTROLS_KEY, JSON.stringify({ version: CONTROLS_VERSION, bindings: controlBindings, touch: controlTouch }));
+        } catch (error) {
+          console.warn("Could not save control bindings.", error);
+        }
+      }
+
+      function sameBinding(a, b) {
+        return a.kind === b.kind && a.code === b.code
+          && !!a.ctrl === !!b.ctrl && !!a.shift === !!b.shift && !!a.alt === !!b.alt;
+      }
+
+      function findConflict(actionId, binding) {
+        const context = ACTION_BY_ID[actionId].context;
+        return ACTIONS.find((other) =>
+          other.id !== actionId
+          && other.context === context
+          && (controlBindings[other.id] ?? []).some((existing) => sameBinding(existing, binding)));
+      }
+
+      function renderControls() {
+        controlsList.replaceChildren();
+        controlsWarning.textContent = "";
+        for (const group of GROUP_ORDER) {
+          const section = document.createElement("div");
+          section.className = "control-group";
+          const heading = document.createElement("h3");
+          heading.textContent = group;
+          section.append(heading);
+          for (const action of ACTIONS.filter((entry) => entry.group === group)) {
+            const row = document.createElement("div");
+            row.className = "control-row";
+            const name = document.createElement("span");
+            name.className = "control-name";
+            name.textContent = action.label;
+            const binds = document.createElement("div");
+            binds.className = "control-binds";
+            for (const [index, binding] of (controlBindings[action.id] ?? []).entries()) {
+              const chip = document.createElement("button");
+              chip.type = "button";
+              chip.className = "bind" + (capturing && capturing.actionId === action.id && capturing.index === index ? " capturing" : "");
+              chip.textContent = capturing && capturing.actionId === action.id && capturing.index === index
+                ? "press input…"
+                : prettyBinding(binding);
+              chip.title = "Click to rebind (× removes)";
+              chip.setAttribute("aria-label", `Rebind ${action.label}: currently ${prettyBinding(binding)}`);
+              chip.addEventListener("click", (event) => {
+                event.stopPropagation();
+                if (event.altKey) {
+                  removeBinding(action.id, index);
+                } else {
+                  startCapture(action.id, index);
+                }
+              });
+              chip.addEventListener("contextmenu", (event) => {
+                event.preventDefault();
+                removeBinding(action.id, index);
+              });
+              binds.append(chip);
+            }
+            const add = document.createElement("button");
+            add.type = "button";
+            add.className = "bind ghost";
+            add.textContent = "+";
+            add.title = "Add binding";
+            add.setAttribute("aria-label", `Add binding for ${action.label}`);
+            add.addEventListener("click", () => startCapture(action.id, -1));
+            binds.append(add);
+            row.append(name, binds);
+            section.append(row);
+          }
+          controlsList.append(section);
+        }
+        renderTouchSection();
+      }
+
+      function renderTouchSection() {
+        const section = document.createElement("div");
+        section.className = "control-group";
+        const heading = document.createElement("h3");
+        heading.textContent = "Touch buttons";
+        section.append(heading);
+        for (const button of TOUCH_BUTTONS) {
+          const row = document.createElement("div");
+          row.className = "control-row";
+          const name = document.createElement("span");
+          name.className = "control-name";
+          name.textContent = `Button ${button.id}`;
+          const select = document.createElement("select");
+          select.className = "control-select";
+          select.setAttribute("aria-label", `Action for touch button ${button.id}`);
+          for (const target of TOUCH_TARGETS) {
+            const option = document.createElement("option");
+            option.value = target.id;
+            option.textContent = target.label;
+            select.append(option);
+          }
+          select.value = controlTouch[button.id] ?? TOUCH_DEFAULTS[button.id];
+          if (![...select.options].some((option) => option.value === select.value)) {
+            select.value = TOUCH_DEFAULTS[button.id];
+          }
+          select.addEventListener("change", () => {
+            controlTouch[button.id] = select.value === "none" ? null : select.value;
+            saveControls();
+            controlsWarning.textContent = "";
+          });
+          row.append(name, select);
+          section.append(row);
+        }
+        controlsList.append(section);
+      }
+
+      function removeBinding(actionId, index) {
+        controlBindings[actionId] = (controlBindings[actionId] ?? []).filter((_, i) => i !== index);
+        saveControls();
+        renderControls();
+      }
+
+      function startCapture(actionId, index) {
+        stopCapture();
+        capturing = { actionId, index };
+        renderControls();
+        controlsWarning.textContent = "Press a key, mouse button, or gamepad button… (Esc cancels)";
+        window.addEventListener("keydown", onCaptureKey, { capture: true });
+        window.addEventListener("mousedown", onCaptureMouse, { capture: true });
+        pollGamepad();
+      }
+
+      function stopCapture() {
+        capturing = null;
+        window.removeEventListener("keydown", onCaptureKey, { capture: true });
+        window.removeEventListener("mousedown", onCaptureMouse, { capture: true });
+        if (gamepadRaf) {
+          cancelAnimationFrame(gamepadRaf);
+          gamepadRaf = 0;
+        }
+      }
+
+      function finishCapture(binding) {
+        if (!capturing) return;
+        const { actionId, index } = capturing;
+        const conflict = findConflict(actionId, binding);
+        if (conflict) {
+          startCapture(actionId, index);
+          controlsWarning.textContent = `Already used by “${conflict.label}” — pick something else.`;
+          return;
+        }
+        const list = [...(controlBindings[actionId] ?? [])];
+        if (index >= 0 && index < list.length) {
+          list[index] = binding;
+        } else {
+          list.push(binding);
+        }
+        controlBindings[actionId] = list;
+        stopCapture();
+        controlsWarning.textContent = "";
+        saveControls();
+        renderControls();
+      }
+
+      function cancelCapture() {
+        stopCapture();
+        controlsWarning.textContent = "";
+        renderControls();
+      }
+
+      function onCaptureKey(event) {
+        if (!capturing) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.code === "Escape" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+          cancelCapture();
+          return;
+        }
+        finishCapture({
+          kind: "key",
+          code: normalizeKeyCode(event.code || "Unknown"),
+          ctrl: event.ctrlKey || event.metaKey,
+          shift: event.shiftKey,
+          alt: event.altKey,
+        });
+      }
+
+      function onCaptureMouse(event) {
+        if (!capturing) return;
+        // Let right-clicks behave: only steal the press for the binding.
+        event.preventDefault();
+        event.stopPropagation();
+        const code = ["Left", "Right", "Middle", "Back", "Forward"][event.button] ?? `Mouse${event.button}`;
+        finishCapture({ kind: "mouse", code, ctrl: false, shift: event.shiftKey, alt: false });
+      }
+
+      function pollGamepad() {
+        if (!capturing) return;
+        try {
+          for (const pad of navigator.getGamepads ? navigator.getGamepads() : []) {
+            if (!pad || !pad.connected) continue;
+            const pressed = pad.buttons.findIndex((button) => button && button.pressed);
+            if (pressed >= 0 && pressed < PAD_INDEX_TO_CODE.length) {
+              finishCapture({ kind: "pad", code: PAD_INDEX_TO_CODE[pressed], ctrl: false, shift: false, alt: false });
+              return;
+            }
+          }
+        } catch (error) {
+          console.warn("Could not poll gamepads.", error);
+        }
+        gamepadRaf = requestAnimationFrame(pollGamepad);
+      }
+
+      document.querySelector("#controls").addEventListener("click", () => {
+        renderControls();
+        controlsDialog.showModal();
+      });
+      document.querySelector("#controls-close").addEventListener("click", () => {
+        cancelCapture();
+        controlsDialog.close();
+      });
+      document.querySelector("#controls-reset").addEventListener("click", () => {
+        cancelCapture();
+        controlBindings = defaultBindings();
+        controlTouch = defaultTouch();
+        saveControls();
+        renderControls();
+        controlsWarning.textContent = "Defaults restored.";
+      });
+      controlsDialog.addEventListener("close", () => cancelCapture());
 
       try {
         maps = readIndex();

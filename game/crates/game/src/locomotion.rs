@@ -235,13 +235,7 @@ impl LocomotionMachine {
 mod tests {
     use super::*;
 
-    fn input(
-        grounded: bool,
-        sliding: bool,
-        speed: f32,
-        vy: f32,
-        dead: bool,
-    ) -> LocomotionInput {
+    fn input(grounded: bool, sliding: bool, speed: f32, vy: f32, dead: bool) -> LocomotionInput {
         LocomotionInput::new(grounded, sliding, speed, vy, dead)
     }
 

@@ -663,6 +663,7 @@ fn riding_setup(app: &mut App) {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     app.world_mut().resource_mut::<Editor>().pieces.push(piece);
     let mut movers = Movers::default();
@@ -1770,6 +1771,7 @@ fn clicking_empty_ground_selects_nothing() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     }];
     assert_eq!(pick(&pieces, ray_towards(Vec3::new(5.0, 0.0, 5.0))), None);
 }

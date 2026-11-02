@@ -41,7 +41,7 @@ pub(super) fn manage_capture(
     mut editor: ResMut<Editor>,
     orbit: Res<Orbit>,
     touch: Res<TouchState>,
-    keys: Res<ButtonInput<KeyCode>>,
+    input: PlayerInput,
     window: Single<&Window, With<PrimaryWindow>>,
     mut cursor_options: Single<&mut CursorOptions, With<PrimaryWindow>>,
     mut focus: MessageReader<WindowFocused>,
@@ -57,7 +57,7 @@ pub(super) fn manage_capture(
         view: orbit.mode,
         first_person,
         over_viewport: over_viewport(&editor, &touch, window.cursor_position()),
-        tab: keys.just_pressed(KeyCode::Tab)
+        tab: input.just_pressed(Action::CaptureToggle)
             && editor.keyboard_transform.is_none()
             && input_focus.get().is_none(),
         focus_lost,
@@ -109,8 +109,8 @@ pub(super) fn camera_control(
     mut editor: ResMut<Editor>,
     gesture: Res<PathGesture>,
     mut touch: ResMut<TouchState>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
+    input: PlayerInput,
+    time: Res<Time>,
     capture: Res<PointerCapture>,
     mut motion: MessageReader<MouseMotion>,
     mut wheel: MessageReader<MouseWheel>,
@@ -145,8 +145,16 @@ pub(super) fn camera_control(
     // finger is down, that synthesized motion must not also steer the camera:
     // dragging the stick should move the character only.
     let raw_delta: Vec2 = motion.read().map(|m| m.delta).sum();
+    // A held gizmo handle owns the gesture just like a path-handle drag:
+    // the orbit must not swing while a finger reshapes the selection.
+    let gizmo_held = editor
+        .gizmo_drag
+        .is_some_and(|drag| drag.pointer != PointerId::Mouse);
     let touching = touch.enabled
-        && (touch.stick_pointer.is_some() || !touch.tracks.is_empty() || gesture.0.dragging());
+        && (touch.stick_pointer.is_some()
+            || !touch.tracks.is_empty()
+            || gesture.0.dragging()
+            || gizmo_held);
     let delta = if touching { Vec2::ZERO } else { raw_delta };
     // Browsers report wheel deltas in pixels (often +-100), while some
     // platforms report whole lines. Normalise the big values to lines.
@@ -159,16 +167,14 @@ pub(super) fn camera_control(
     let over_panel = object_editing_allowed(editor.mode)
         && window.cursor_position().is_some_and(|p| p.x <= PANEL_WIDTH);
 
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    let command = command_down(&keys);
-
     // The Add menu owns single-letter shortcuts while open: typing "v" or "f"
-    // in the search must not cycle the view or refocus it.
+    // in the search must not cycle the view or refocus it. (Chords are
+    // modifier-exact, so remapped Ctrl-combos stay disjoint regardless.)
     if !menu.open {
-        if keys.just_pressed(KeyCode::KeyV) && !command {
+        if input.just_pressed(Action::CycleView) {
             cycle_view(&mut orbit, &editor);
         }
-        if keys.just_pressed(KeyCode::KeyF) {
+        if input.just_pressed(Action::FocusCamera) {
             focus(&mut orbit, &editor);
         }
     }
@@ -184,7 +190,7 @@ pub(super) fn camera_control(
             }
         }
     } else if !over_panel {
-        if mouse.pressed(MouseButton::Right) && !shift {
+        if input.pressed(Action::OrbitDrag) {
             // In Build an orbit pivots around the selected piece, so
             // the thing being edited stays in the middle of the view.
             if object_editing_allowed(editor.mode)
@@ -200,7 +206,7 @@ pub(super) fn camera_control(
             };
             orbit.pitch = (orbit.pitch + delta.y * 0.005).clamp(low, high);
         }
-        if mouse.pressed(MouseButton::Middle) || (mouse.pressed(MouseButton::Right) && shift) {
+        if input.pressed(Action::PanDrag) {
             let right = Vec3::new(orbit.yaw.cos(), 0.0, -orbit.yaw.sin());
             let forward = Vec3::new(-orbit.yaw.sin(), 0.0, -orbit.yaw.cos());
             let k = orbit.distance * 0.0018;
@@ -215,7 +221,8 @@ pub(super) fn camera_control(
 
     // Touch: one finger looks/orbits, two fingers pan and pinch. A path
     // handle drag owns the gesture, so the camera keeps still until release.
-    if gesture.0.dragging() {
+    // A held gizmo handle owns it the same way (see `gizmo_held` above).
+    if gesture.0.dragging() || gizmo_held {
         touch.look = Vec2::ZERO;
         touch.pan = Vec2::ZERO;
         touch.zoom = 0.0;
@@ -250,6 +257,30 @@ pub(super) fn camera_control(
                 if touch.zoom != 0.0 {
                     orbit.distance = (orbit.distance * (1.0 - touch.zoom * 0.8)).clamp(1.5, 60.0);
                 }
+            }
+        }
+    }
+
+    // Gamepad right stick orbits (or looks, in first person). Standard fixed
+    // layout; the stick itself is not remappable, only the buttons are.
+    if !menu.open && input_focus.get().is_none() {
+        let stick = input.camera_stick();
+        if stick != Vec2::ZERO {
+            let dt = time.delta_secs().clamp(0.0, 0.25);
+            if orbit.mode == ViewMode::First && editor.character.is_some() {
+                orbit.yaw -= stick.x * 2.5 * dt;
+                orbit.pitch = (orbit.pitch - stick.y * 1.8 * dt).clamp(-1.35, 1.35);
+                if let Some(character) = editor.character.as_mut() {
+                    character.yaw = orbit.yaw;
+                }
+            } else {
+                orbit.yaw -= stick.x * 2.5 * dt;
+                let (low, high) = if orbit.mode == ViewMode::Top {
+                    (0.7, 1.5)
+                } else {
+                    (0.12, 1.5)
+                };
+                orbit.pitch = (orbit.pitch - stick.y * 1.8 * dt).clamp(low, high);
             }
         }
     }

@@ -180,6 +180,8 @@ fn play_mode_only_allows_non_authoring_ui_actions() {
     assert!(!touch_is_authoring(TouchAction::Play));
     assert!(!touch_is_authoring(TouchAction::View));
     assert!(!touch_is_authoring(TouchAction::Jump));
+    assert!(!touch_is_authoring(TouchAction::Interact));
+    assert!(!touch_is_authoring(TouchAction::Pad(ClusterButton::A)));
     assert!(!touch_is_authoring(TouchAction::CopyJson));
     assert!(touch_is_authoring(TouchAction::Path));
     assert!(touch_is_authoring(TouchAction::Place));

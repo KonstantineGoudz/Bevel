@@ -36,6 +36,9 @@ pub(super) enum AddKind {
 pub(super) struct AddMenuRoot;
 
 #[derive(Component)]
+pub(super) struct AddMenuHint;
+
+#[derive(Component)]
 pub(super) struct AddMenuSearch;
 
 #[derive(Component)]
@@ -110,7 +113,12 @@ pub(super) fn activate_add_kind(editor: &mut Editor, kind: AddKind) {
     }
 }
 
-fn open_menu(menu: &mut AddMenu, search: Entity, text: &mut EditableText, focus: &mut InputFocus) {
+pub(super) fn open_menu(
+    menu: &mut AddMenu,
+    search: Entity,
+    text: &mut EditableText,
+    focus: &mut InputFocus,
+) {
     menu.open = true;
     menu.query.clear();
     menu.selected = 0;
@@ -119,7 +127,12 @@ fn open_menu(menu: &mut AddMenu, search: Entity, text: &mut EditableText, focus:
     focus.set(search, FocusCause::Navigated);
 }
 
-fn close_menu(menu: &mut AddMenu, text: &mut EditableText, focus: &mut InputFocus, search: Entity) {
+pub(super) fn close_menu(
+    menu: &mut AddMenu,
+    text: &mut EditableText,
+    focus: &mut InputFocus,
+    search: Entity,
+) {
     menu.open = false;
     menu.query.clear();
     menu.selected = 0;
@@ -187,6 +200,7 @@ pub(super) fn spawn_add_menu(commands: &mut Commands) {
         .id();
     let hint = commands
         .spawn((
+            AddMenuHint,
             Text::new("F3 / Enter add - Esc close"),
             TextFont {
                 font_size: FontSize::Px(11.0),
@@ -243,8 +257,7 @@ pub(super) fn spawn_add_menu(commands: &mut Commands) {
 pub(super) fn update_add_menu(
     mut commands: Commands,
     mut menu: ResMut<AddMenu>,
-    keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
+    input: PlayerInput,
     mut focus: ResMut<InputFocus>,
     mut editor: ResMut<Editor>,
     orbit: Res<Orbit>,
@@ -254,17 +267,9 @@ pub(super) fn update_add_menu(
     list_query: Query<Entity, With<AddMenuList>>,
     mut root_query: Query<&mut Node, With<AddMenuRoot>>,
 ) {
-    // The compact touch layout has its own carousel; the menu is desktop-only.
-    if touch.enabled {
-        if menu.open {
-            menu.open = false;
-            menu.query.clear();
-            menu.selected = 0;
-            menu.last_built = None;
-            focus.clear();
-        }
-        return;
-    }
+    // The touch toolbar's search button opens the same menu; keep it working
+    // in both input layers.
+    let _ = &touch;
     if editor.keyboard_transform.is_some() {
         return;
     }
@@ -302,10 +307,8 @@ pub(super) fn update_add_menu(
     let Ok((search_entity, mut search_text)) = search_query.single_mut() else {
         return;
     };
-    let command = command_down(&keys);
-
     // F3 toggles.
-    if !command && keys.just_pressed(KeyCode::F3) && !gesture.0.dragging() {
+    if input.just_pressed(Action::MenuToggle) && !gesture.0.dragging() {
         if !menu.open {
             open_menu(&mut menu, search_entity, &mut search_text, &mut focus);
         } else {
@@ -320,7 +323,7 @@ pub(super) fn update_add_menu(
         return;
     }
 
-    if keys.just_pressed(KeyCode::Escape) {
+    if input.just_pressed(Action::Back) {
         close_menu(&mut menu, &mut search_text, &mut focus, search_entity);
         sync_root_visibility(&mut root_query, false);
         return;
@@ -328,7 +331,7 @@ pub(super) fn update_add_menu(
     // Right click cancels like the modal transforms; left clicks on the panel
     // are handled by the item observers, and canvas clicks are ignored while
     // open (see `interact`).
-    if mouse.just_pressed(MouseButton::Right) {
+    if input.mouse.just_pressed(MouseButton::Right) {
         close_menu(&mut menu, &mut search_text, &mut focus, search_entity);
         sync_root_visibility(&mut root_query, false);
         return;
@@ -349,13 +352,13 @@ pub(super) fn update_add_menu(
         menu.selected = menu.selected.min(shown.len() - 1);
     }
 
-    if keys.just_pressed(KeyCode::ArrowUp) && !shown.is_empty() {
+    if input.just_pressed(Action::MenuUp) && !shown.is_empty() {
         menu.selected = (menu.selected + shown.len() - 1) % shown.len();
     }
-    if keys.just_pressed(KeyCode::ArrowDown) && !shown.is_empty() {
+    if input.just_pressed(Action::MenuDown) && !shown.is_empty() {
         menu.selected = (menu.selected + 1) % shown.len();
     }
-    if keys.just_pressed(KeyCode::Enter) && !shown.is_empty() {
+    if input.just_pressed(Action::MenuConfirm) && !shown.is_empty() {
         let (kind, _, _) = shown[menu.selected];
         activate_add_kind(&mut editor, kind);
         close_menu(&mut menu, &mut search_text, &mut focus, search_entity);
@@ -373,7 +376,10 @@ pub(super) fn update_add_menu(
     }
 }
 
-fn sync_root_visibility(root_query: &mut Query<&mut Node, With<AddMenuRoot>>, open: bool) {
+pub(super) fn sync_root_visibility(
+    root_query: &mut Query<&mut Node, With<AddMenuRoot>>,
+    open: bool,
+) {
     let display = if open { Display::Flex } else { Display::None };
     for mut node in root_query {
         if node.display != display {
@@ -474,6 +480,165 @@ pub(super) fn on_add_menu_item(
     sync_root_visibility(&mut root_query, false);
     rebuild_list(&mut commands, &list_query, &[], 0);
     menu.last_built = Some((String::new(), 0, 0));
+}
+
+/// Bridge to a transparent HTML `<input>` overlay on mobile web.
+///
+/// winit's web backend ignores `set_ime_allowed`, so focusing Bevy's
+/// `TextInput` never summons the virtual keyboard. Instead, while the menu
+/// is open on a touch device we show a real (but invisible) input element
+/// positioned over the Bevy search box: tapping it is a native tap on a
+/// native field, so the OS shows the keyboard, and every keystroke is
+/// mirrored into the Bevy `EditableText` below. Desktop web and native
+/// builds never create the element and keep the Bevy-only path.
+#[derive(Resource, Default)]
+pub(super) struct WasmSearchBridge {
+    #[cfg(target_arch = "wasm32")]
+    shared: Option<std::sync::Arc<std::sync::Mutex<String>>>,
+    was_open: bool,
+}
+
+/// Transparent overlay geometry: covers the Bevy search box (panel top +
+/// header) with margin, so taps on the visible search field land on the
+/// native input. `font-size:16px` stops iOS from zooming on focus.
+#[cfg(target_arch = "wasm32")]
+const WASM_SEARCH_VISIBLE_STYLE: &str = "position:fixed;left:50%;transform:translateX(-50%);top:140px;width:min(360px,calc(100vw - 40px));height:44px;opacity:0;z-index:20;font-size:16px;margin:0;padding:0;border:none;background:transparent;";
+
+pub(super) fn setup_wasm_search_input(mut commands: Commands) {
+    commands.init_resource::<WasmSearchBridge>();
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast;
+
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Some(document) = window.document() else {
+            return;
+        };
+        if document.get_element_by_id("bevy-add-search").is_some() {
+            return;
+        }
+        let Ok(element) = document.create_element("input") else {
+            return;
+        };
+        let Ok(input) = element.dyn_into::<web_sys::HtmlInputElement>() else {
+            return;
+        };
+        input.set_id("bevy-add-search");
+        input.set_type("text");
+        let _ = input.set_attribute("autocomplete", "off");
+        let _ = input.set_attribute("autocorrect", "off");
+        let _ = input.set_attribute("autocapitalize", "off");
+        let _ = input.set_attribute("spellcheck", "false");
+        let _ = input.set_attribute("inputmode", "search");
+        let _ = input.set_attribute("enterkeyhint", "search");
+        let _ = input.set_attribute("aria-label", "Search components");
+        let _ = input.set_attribute("style", "display:none");
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let writer = std::sync::Arc::clone(&shared);
+        let callback = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
+            let value = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| document.get_element_by_id("bevy-add-search"))
+                .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok())
+                .map(|input| input.value())
+                .unwrap_or_default();
+            if let Ok(mut slot) = writer.lock() {
+                *slot = value;
+            }
+        }) as Box<dyn FnMut()>);
+        input.set_oninput(Some(callback.as_ref().unchecked_ref()));
+        callback.forget();
+        if let Some(body) = document.body() {
+            let _ = body.append_child(&input);
+        }
+        commands.insert_resource(WasmSearchBridge {
+            shared: Some(shared),
+            was_open: false,
+        });
+    }
+}
+
+pub(super) fn sync_wasm_search_input(
+    menu: Res<AddMenu>,
+    touch: Res<TouchState>,
+    mut bridge: ResMut<WasmSearchBridge>,
+    mut search_query: Query<&mut EditableText, With<AddMenuSearch>>,
+    mut hint_query: Query<&mut Text, With<AddMenuHint>>,
+) {
+    for mut hint in &mut hint_query {
+        let text = if touch.enabled {
+            "Tap the search field, type to filter - tap a result to add"
+        } else {
+            "F3 / Enter add - Esc close"
+        };
+        if hint.0 != text {
+            hint.0 = text.to_string();
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast;
+
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Some(element) = document.get_element_by_id("bevy-add-search") else {
+            return;
+        };
+        let Ok(input) = element.dyn_into::<web_sys::HtmlInputElement>() else {
+            return;
+        };
+        let show = menu.open && touch.enabled;
+        if show {
+            if !bridge.was_open {
+                if let Some(shared) = bridge.shared.as_ref() {
+                    if let Ok(mut slot) = shared.lock() {
+                        slot.clear();
+                    }
+                }
+                input.set_value("");
+                // Best effort: a native tap on the (invisible) overlay always
+                // works even when this programmatic focus is blocked.
+                let _ = input.focus();
+            }
+            let pending = bridge
+                .shared
+                .as_ref()
+                .and_then(|shared| shared.lock().ok().map(|slot| slot.clone()));
+            if let Some(pending) = pending {
+                if let Ok(mut text) = search_query.single_mut() {
+                    if text.value().to_string() != pending {
+                        text.editor_mut().set_text(&pending);
+                    }
+                }
+                if input.value() != pending {
+                    input.set_value(&pending);
+                }
+            }
+        } else {
+            let _ = input.set_attribute("style", "display:none");
+            if bridge.was_open {
+                let _ = input.blur();
+                if let Some(shared) = bridge.shared.as_ref() {
+                    if let Ok(mut slot) = shared.lock() {
+                        slot.clear();
+                    }
+                }
+                input.set_value("");
+            }
+            bridge.was_open = false;
+            return;
+        }
+        let _ = input.set_attribute("style", WASM_SEARCH_VISIBLE_STYLE);
+        bridge.was_open = true;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (&menu, &touch, &mut bridge, &mut search_query);
+        bridge.was_open = false;
+    }
 }
 
 #[cfg(test)]

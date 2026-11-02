@@ -179,6 +179,118 @@ pub(super) fn over_controls(pos: Vec2, size: Vec2, scale: f32) -> bool {
         || (pos.y >= size.y - 170.0 * scale && pos.x >= size.x - 120.0 * scale)
 }
 
+/// The A/B/X/Y pad cluster (bottom-right). Its buttons are real widgets, so
+/// a press on them never reaches the canvas observer — but the raw-touch
+/// fallback sees every press and must not steal those taps for gizmos.
+/// Geometry mirrors `spawn_touch_ui`: 76px pads at right/bottom 16/102 and
+/// 20/106, in the same scaled space as `over_controls`.
+pub(super) fn over_pad_cluster(pos: Vec2, size: Vec2, scale: f32) -> bool {
+    pos.x >= size.x - 186.0 * scale && pos.y >= size.y - 190.0 * scale
+}
+
+/// Grab, drive and release gizmo drags straight from the raw touch stream,
+/// without waiting for UI picking to deliver events to the canvas.
+///
+/// On some mobile browsers a press that lands on overlapping UI never
+/// reaches the canvas observer (`on_path_press`), so finger taps on a
+/// handle silently did nothing while mouse and synthetic tests worked.
+/// This runs right after `touch_input` and tries the same grab the observer
+/// would; whichever path runs first wins, because both go through
+/// `gizmo_grab_allowed` (which refuses while a drag exists).
+///
+/// The drive and release halves are load-bearing, not just the grab: a
+/// press that missed the canvas will also miss it for move/release events
+/// (implicit pointer capture retargets them to the press target), so a
+/// raw-grabbed drag must follow the touch track and end when the track
+/// disappears — otherwise it sticks forever and blocks selection and the
+/// camera.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn touch_gizmo_fallback(
+    touches: Res<Touches>,
+    time: Res<Time>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    camera: Single<(&Camera, &Transform)>,
+    capture: Res<PointerCapture>,
+    mut editor: ResMut<Editor>,
+    mut gesture: ResMut<PathGesture>,
+    mut touch: ResMut<TouchState>,
+    focus: Res<InputFocus>,
+    menu: Res<AddMenu>,
+) {
+    if !touch.enabled || capture.grabbed || menu.open {
+        return;
+    }
+    if editor.keyboard_transform.is_some() || focus.get().is_some() {
+        return;
+    }
+    // A second finger down is a pinch, not a handle grab.
+    if touch.multi {
+        return;
+    }
+    let (camera, transform) = *camera;
+    let global = GlobalTransform::from(*transform);
+    let size = window.size();
+    let s = touch.ui_scale;
+    let centre = stick_centre(size, s);
+    let reach = STICK_REACH * s * 1.7;
+    let now = time.elapsed_secs_f64();
+    for pressed in touches.iter_just_pressed() {
+        // The observer path may already own this press.
+        if editor.gizmo_drag.is_some() {
+            return;
+        }
+        let id = pressed.id();
+        let pos = pressed.position();
+        if grabs_stick(pos, centre, reach)
+            || over_controls(pos, size, s)
+            || over_pad_cluster(pos, size, s)
+        {
+            continue;
+        }
+        if !gizmo_grab_allowed(&editor, gesture.0.dragging()) {
+            continue;
+        }
+        let Ok(ray) = camera.viewport_to_world(&global, pos) else {
+            continue;
+        };
+        if let Some((handle, start, grab)) = gizmo_grab(&editor, camera, &global, pos, ray, true) {
+            editor.commit();
+            editor.gizmo_drag = Some(GizmoDrag {
+                id: start.id,
+                handle,
+                grab,
+                start,
+                last_raw: start.elevation,
+                last: start.elevation,
+                pointer: PointerId::Touch(id),
+                screen: pos,
+            });
+            // The track already exists (this runs after `touch_input`): mark
+            // it owned so the finger neither orbits nor taps while dragging.
+            if let Some(track) = touch.tracks.get_mut(&id) {
+                track.control = true;
+            }
+            touch.tap = None;
+            touch.suppress_until = now + 0.08;
+        }
+    }
+    // Drive and release raw-grabbed drags from the track: their move and
+    // release events miss the canvas observers for the same reason the
+    // press did. Mouse drags never match a touch track and are untouched.
+    if let Some(drag) = editor.gizmo_drag.as_mut()
+        && let PointerId::Touch(id) = drag.pointer
+    {
+        if let Some(track) = touch.tracks.get(&id) {
+            drag.screen = track.last;
+        } else {
+            // Finger lifted (or canceled) with no release event delivered:
+            // end the drag here so it can never stick and block selection
+            // and the camera.
+            release_gizmo_drag(&mut editor, &mut touch, PointerId::Touch(id), now);
+        }
+    }
+}
+
 pub(super) fn sync_input_mode(
     touch: Res<TouchState>,
     mut layers: Query<(&InputLayer, &mut Node), Without<ModeUi>>,
@@ -256,6 +368,8 @@ pub(super) fn sync_shape_label(
 pub(super) fn update_touch_buttons(
     editor: Res<Editor>,
     touch: Res<TouchState>,
+    menu: Res<AddMenu>,
+    controls: Res<Controls>,
     mut buttons: Query<(&TouchButton, &mut BackgroundColor, &mut BorderColor)>,
 ) {
     for (button, mut bg, mut border) in &mut buttons {
@@ -264,6 +378,7 @@ pub(super) fn update_touch_buttons(
             TouchAction::Path => editor.actor_tool == Some(ActorTool::Path),
             TouchAction::Plan => editor.actor_tool == Some(ActorTool::Plan),
             TouchAction::Add => touch.append,
+            TouchAction::Search => menu.open,
             TouchAction::Walk => {
                 editor.actor_tool == Some(ActorTool::Plan)
                     && walk_enabled(
@@ -277,6 +392,13 @@ pub(super) fn update_touch_buttons(
                     && editor.plan.as_ref().is_some_and(|plan| !plan.is_empty())
             }
             TouchAction::Place => editor.tool == Some(editor.mobile_shape),
+            // The remappable cluster highlights while its toggled action is
+            // armed; momentary actions (jump / interact) never highlight.
+            TouchAction::Pad(button) => match controls.touch_action(button) {
+                Some(Action::Sprint) => touch.sprint,
+                Some(Action::Slide) => touch.slide,
+                _ => false,
+            },
             _ => false,
         };
         bg.0 = if on {
@@ -334,7 +456,7 @@ pub(super) fn update_touch_status(
 #[allow(dead_code)] // superseded by UI activation; kept for the hit-test test
 pub(super) fn touch_action_at(pos: Vec2, css: Vec2) -> Option<TouchAction> {
     if (8.0..=42.0).contains(&pos.y) {
-        let width = (css.x - 20.0) / 9.0;
+        let width = (css.x - 20.0) / 10.0;
         let index = ((pos.x - 8.0) / (width + 4.0)).floor().max(0.0) as usize;
         return [
             TouchAction::View,
@@ -346,8 +468,9 @@ pub(super) fn touch_action_at(pos: Vec2, css: Vec2) -> Option<TouchAction> {
             TouchAction::Plan,
             TouchAction::Course,
             TouchAction::Play,
+            TouchAction::Search,
         ]
-        .get(index.min(8))
+        .get(index.min(9))
         .copied();
     }
     if (46.0..=84.0).contains(&pos.y) {
@@ -374,6 +497,19 @@ pub(super) fn touch_action_at(pos: Vec2, css: Vec2) -> Option<TouchAction> {
     None
 }
 
+/// Apply one press of a remappable A/B/X/Y cluster button. Jump and
+/// interact fire once; sprint and slide toggle until pressed again (there is
+/// no release event on the touch buttons, so holds are sticky).
+pub(super) fn apply_touch_button(touch: &mut TouchState, action: Option<Action>) {
+    match action {
+        Some(Action::Jump) => touch.jump = true,
+        Some(Action::Interact) => touch.interact = true,
+        Some(Action::Sprint) => touch.sprint = !touch.sprint,
+        Some(Action::Slide) => touch.slide = !touch.slide,
+        _ => {}
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_touch_action(
     action: TouchAction,
@@ -384,6 +520,7 @@ pub(super) fn run_touch_action(
     nav: &Nav,
     spatial_query: &SpatialQuery,
     filter: &SpatialQueryFilter,
+    controls: &Controls,
 ) {
     match action {
         TouchAction::Play => set_mode(editor, editor.mode.toggled()),
@@ -469,11 +606,18 @@ pub(super) fn run_touch_action(
             }
         }
         TouchAction::Jump => touch.jump = true,
+        TouchAction::Interact => touch.interact = true,
+        TouchAction::Pad(button) => {
+            apply_touch_button(touch, controls.touch_action(button));
+        }
         TouchAction::Course => {
             editor.load_course();
             focus_character(orbit, editor.character);
         }
         TouchAction::CopyJson => copy_level_json(editor, clipboard),
+        // The search button toggles the Add menu in `on_touch_button`, which
+        // owns the menu focus and list state. Nothing to do on the level.
+        TouchAction::Search => {}
     }
 }
 
@@ -535,8 +679,12 @@ pub(super) fn on_path_press(
     mut gesture: ResMut<PathGesture>,
     mut touch: ResMut<TouchState>,
     focus: Res<InputFocus>,
+    menu: Res<AddMenu>,
 ) {
     if event.button != PointerButton::Primary || capture.grabbed {
+        return;
+    }
+    if menu.open {
         return;
     }
     if editor.keyboard_transform.is_some() || focus.get().is_some() {
@@ -564,6 +712,37 @@ pub(super) fn on_path_press(
 
     let (camera, transform) = *camera;
     let global = GlobalTransform::from(*transform);
+    let now = time.elapsed_secs_f64();
+    // Gizmo handles take priority over path handles and selection, on
+    // touch just as on desktop. The desktop mouse path lives in
+    // `interact`; this branch only serves non-mouse pointers (fingers,
+    // pens) so the two can never double-grab the same press. Touch uses
+    // the fingertip hit tolerance.
+    if event.pointer.id != PointerId::Mouse
+        && gizmo_grab_allowed(&editor, gesture.0.dragging())
+        && let Ok(ray) = camera.viewport_to_world(&global, pos)
+        && let Some((handle, start, grab)) = gizmo_grab(&editor, camera, &global, pos, ray, true)
+    {
+        editor.commit();
+        editor.gizmo_drag = Some(GizmoDrag {
+            id: start.id,
+            handle,
+            grab,
+            start,
+            last_raw: start.elevation,
+            last: start.elevation,
+            pointer: event.pointer.id,
+            screen: pos,
+        });
+        touch.tap = None;
+        touch.suppress_until = now + 0.08;
+        return;
+    }
+    // A gizmo drag owns the gesture: a second finger must not start a
+    // path drag while a handle is held.
+    if editor.gizmo_drag.is_some() {
+        return;
+    }
     let handle = path_handle_at(
         &editor,
         &movers,
@@ -573,7 +752,6 @@ pub(super) fn on_path_press(
         touch.enabled,
         &orbit,
     );
-    let now = time.elapsed_secs_f64();
     let drag = gesture.0.press(event.pointer.id, pos, now, handle);
     if let Some(drag) = drag {
         if editor.actor_tool == Some(ActorTool::Platform) {
@@ -653,6 +831,69 @@ pub(super) fn on_path_cancel(
     touch.path_drag_active = gesture.0.dragging();
 }
 
+/// Track the owning finger of a touch gizmo drag. PointerDrag keeps
+/// arriving over UI nodes; PointerMove alone would stall over the toolbar.
+fn track_gizmo_pointer(editor: &mut Editor, pointer: PointerId, screen: Vec2) {
+    if let Some(drag) = editor.gizmo_drag.as_mut()
+        && drag.pointer == pointer
+    {
+        drag.screen = screen;
+    }
+}
+
+pub(super) fn on_gizmo_move(event: On<PointerMove>, mut editor: ResMut<Editor>) {
+    track_gizmo_pointer(&mut editor, event.pointer.id, event.pointer.position);
+}
+
+pub(super) fn on_gizmo_drag(event: On<PointerDrag>, mut editor: ResMut<Editor>) {
+    track_gizmo_pointer(&mut editor, event.pointer.id, event.pointer.position);
+}
+
+/// Finish the gizmo drag owned by `pointer`, if any. Touch has no
+/// mouse-release signal, so pointer release ends the drag here instead of
+/// in `interact`.
+pub(super) fn on_gizmo_release(
+    event: On<PointerRelease>,
+    time: Res<Time>,
+    mut editor: ResMut<Editor>,
+    mut touch: ResMut<TouchState>,
+) {
+    release_gizmo_drag(
+        &mut editor,
+        &mut touch,
+        event.pointer.id,
+        time.elapsed_secs_f64(),
+    );
+}
+
+pub(super) fn on_gizmo_drag_end(
+    event: On<PointerDragEnd>,
+    time: Res<Time>,
+    mut editor: ResMut<Editor>,
+    mut touch: ResMut<TouchState>,
+) {
+    release_gizmo_drag(
+        &mut editor,
+        &mut touch,
+        event.pointer.id,
+        time.elapsed_secs_f64(),
+    );
+}
+
+pub(super) fn on_gizmo_cancel(
+    event: On<PointerCancel>,
+    time: Res<Time>,
+    mut editor: ResMut<Editor>,
+    mut touch: ResMut<TouchState>,
+) {
+    release_gizmo_drag(
+        &mut editor,
+        &mut touch,
+        event.pointer.id,
+        time.elapsed_secs_f64(),
+    );
+}
+
 pub(super) fn path_drag(
     mut editor: ResMut<Editor>,
     mut movers: ResMut<Movers>,
@@ -668,6 +909,17 @@ pub(super) fn path_drag(
     // the button is released.
     if capture.grabbed || menu.open {
         return;
+    }
+    // Touch gizmo drags are driven from pointer events: a finger has no
+    // cursor, so `cursor.ray` is stale while it is down. The desktop mouse
+    // path keeps living in `interact`.
+    if let Some(drag) = editor.gizmo_drag
+        && drag.pointer != PointerId::Mouse
+    {
+        let (camera, transform) = *camera;
+        let global = GlobalTransform::from(*transform);
+        let ray = camera.viewport_to_world(&global, drag.screen).ok();
+        apply_gizmo_drag(&mut editor, drag, ray);
     }
     // Play never edits objects, even if a handle drag was in flight when the
     // mode switched. The gesture still releases normally.
@@ -713,6 +965,11 @@ pub(super) fn on_touch_button(
     nav: Res<Nav>,
     spatial_query: SpatialQuery,
     player: Query<Entity, With<CharacterVisual>>,
+    mut menu: ResMut<AddMenu>,
+    mut focus: ResMut<InputFocus>,
+    mut search_query: Query<(Entity, &mut bevy::text::EditableText), With<AddMenuSearch>>,
+    mut root_query: Query<&mut Node, With<AddMenuRoot>>,
+    controls: Res<Controls>,
 ) {
     if editor.keyboard_transform.is_some() {
         return;
@@ -737,6 +994,31 @@ pub(super) fn on_touch_button(
     // A UI tap is not a grid tap: drop any tap from this gesture.
     touch.suppress_until = now + 0.08;
     touch.tap = None;
+    if button.0 == TouchAction::Search {
+        // Mobile-only toggle for the Add (entity search) menu.
+        if !object_editing_allowed(editor.mode) || orbit.mode == ViewMode::First {
+            return;
+        }
+        // Another text field owns the keyboard; don't steal it.
+        if focus.get().is_some() && !menu.open {
+            return;
+        }
+        if menu.open {
+            if let Ok((search_entity, mut text)) = search_query.single_mut() {
+                close_menu(&mut menu, &mut text, &mut focus, search_entity);
+            } else {
+                menu.open = false;
+                menu.query.clear();
+                menu.selected = 0;
+                focus.clear();
+            }
+            sync_root_visibility(&mut root_query, false);
+        } else if let Ok((search_entity, mut text)) = search_query.single_mut() {
+            open_menu(&mut menu, search_entity, &mut text, &mut focus);
+            sync_root_visibility(&mut root_query, true);
+        }
+        return;
+    }
     if !object_editing_allowed(editor.mode) && touch_is_authoring(button.0) {
         return;
     }
@@ -749,5 +1031,6 @@ pub(super) fn on_touch_button(
         &nav,
         &spatial_query,
         &filter,
+        &controls,
     );
 }

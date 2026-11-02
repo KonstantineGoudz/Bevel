@@ -135,6 +135,7 @@ mod tests {
             trigger_alpha: model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         }
     }
 

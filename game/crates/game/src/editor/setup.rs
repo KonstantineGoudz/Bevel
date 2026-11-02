@@ -432,6 +432,9 @@ pub(super) fn spawn_touch_ui(commands: &mut Commands) {
         touch_button(commands, TouchAction::Plan, "Plan"),
         touch_button(commands, TouchAction::Course, "Course"),
         touch_button(commands, TouchAction::Play, "Play"),
+        // Top-right: opens the Add (entity search) menu. Lives in the
+        // mobile-only toolbar so desktop keeps the F3 shortcut.
+        touch_button(commands, TouchAction::Search, "🔍"),
     ];
     commands.entity(tools).add_children(&tool_buttons);
 
@@ -457,6 +460,7 @@ pub(super) fn spawn_touch_ui(commands: &mut Commands) {
     let play_buttons = [
         touch_button(commands, TouchAction::View, "View"),
         touch_button(commands, TouchAction::CopyJson, "JSON"),
+        touch_button(commands, TouchAction::Interact, "Use"),
         touch_button(commands, TouchAction::Play, "Exit"),
     ];
     commands.entity(play_tools).add_children(&play_buttons);
@@ -585,35 +589,76 @@ pub(super) fn spawn_touch_ui(commands: &mut Commands) {
         .id();
     commands.entity(base).add_child(knob);
 
-    // Jump.
-    let jump = commands
-        .spawn((
-            Button,
-            TouchButton(TouchAction::Jump),
-            Node {
-                position_type: PositionType::Absolute,
-                right: px(20),
-                bottom: px(24),
-                width: px(84),
-                height: px(84),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                border: UiRect::all(px(1)),
-                border_radius: BorderRadius::all(percent(50)),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.06, 0.08, 0.11, 0.62)),
-            BorderColor::all(Color::srgba(0.5, 0.7, 0.85, 0.25)),
-            children![(
-                Text::new("Jump"),
-                TextFont {
-                    font_size: FontSize::Px(14.0),
+    // A/B/X/Y action cluster. What each button does is remappable in the
+    // home-screen Controls settings (A jumps, B slides, X interacts and Y
+    // runs by default); jump and interact fire once, run and slide toggle.
+    let pad_button = |commands: &mut Commands,
+                      action: TouchAction,
+                      text: &str,
+                      right: f32,
+                      bottom: f32,
+                      size: f32| {
+        commands
+            .spawn((
+                Button,
+                TouchButton(action),
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: px(right),
+                    bottom: px(bottom),
+                    width: px(size),
+                    height: px(size),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    border: UiRect::all(px(1)),
+                    border_radius: BorderRadius::all(percent(50)),
                     ..default()
                 },
-                TextColor(Color::srgb_u8(0xc3, 0xd0, 0xdf)),
-            )],
-        ))
-        .id();
+                BackgroundColor(Color::srgba(0.06, 0.08, 0.11, 0.62)),
+                BorderColor::all(Color::srgba(0.5, 0.7, 0.85, 0.25)),
+                children![(
+                    Text::new(text),
+                    TextFont {
+                        font_size: FontSize::Px(14.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb_u8(0xc3, 0xd0, 0xdf)),
+                )],
+            ))
+            .id()
+    };
+    let pad_a = pad_button(
+        commands,
+        TouchAction::Pad(ClusterButton::A),
+        "A",
+        16.0,
+        20.0,
+        76.0,
+    );
+    let pad_b = pad_button(
+        commands,
+        TouchAction::Pad(ClusterButton::B),
+        "B",
+        102.0,
+        20.0,
+        76.0,
+    );
+    let pad_y = pad_button(
+        commands,
+        TouchAction::Pad(ClusterButton::Y),
+        "Y",
+        102.0,
+        106.0,
+        76.0,
+    );
+    let pad_x = pad_button(
+        commands,
+        TouchAction::Pad(ClusterButton::X),
+        "X",
+        16.0,
+        106.0,
+        76.0,
+    );
 
     // A full-screen picking layer behind the controls. Taps that reach it are
     // grid taps; taps on buttons are consumed by the button first. Using the
@@ -644,13 +689,18 @@ pub(super) fn spawn_touch_ui(commands: &mut Commands) {
         .observe(on_path_drag)
         .observe(on_path_release)
         .observe(on_path_drag_end)
-        .observe(on_path_cancel);
+        .observe(on_path_cancel)
+        .observe(on_gizmo_move)
+        .observe(on_gizmo_drag)
+        .observe(on_gizmo_release)
+        .observe(on_gizmo_drag_end)
+        .observe(on_gizmo_cancel);
 
     // The canvas is top-level and always pickable: desktop mouse presses need
     // the same pointer stream as touch taps.
-    commands
-        .entity(root)
-        .add_children(&[tools, carousel, path_row, status, base, jump]);
+    commands.entity(root).add_children(&[
+        tools, carousel, path_row, status, base, pad_a, pad_b, pad_y, pad_x,
+    ]);
 }
 
 pub(super) fn touch_button(commands: &mut Commands, action: TouchAction, text: &str) -> Entity {

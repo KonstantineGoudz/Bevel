@@ -649,6 +649,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         }
     }
 

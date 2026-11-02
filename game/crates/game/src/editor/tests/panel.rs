@@ -47,8 +47,8 @@ fn the_property_panel_hit_box_matches_its_floating_window() {
     assert!(over_properties_panel(inside, size, true));
     assert!(!over_properties_panel(inside, size, false));
     assert!(!over_properties_panel(Vec2::new(100.0, 40.0), size, true));
-    // Panel height is 850, so y=750 is still inside (12..862); check beyond.
-    assert!(!over_properties_panel(Vec2::new(760.0, 900.0), size, true));
+    // Panel height is 910, so y=750 is still inside (12..922); check beyond.
+    assert!(!over_properties_panel(Vec2::new(760.0, 960.0), size, true));
 }
 
 #[test]
@@ -66,6 +66,24 @@ fn the_physics_toggle_is_undoable_and_flips_both_ways() {
     assert!(!editor.pieces[0].dynamic);
     assert_eq!(editor.undo.len(), 2);
     assert_eq!(editor.note, "physics: static");
+}
+
+#[test]
+fn the_interact_toggle_cycles_pause_and_is_undoable() {
+    let mut editor = Editor::default();
+    editor.pieces.push(test_piece(1));
+    editor.selected = Some(1);
+    assert!(editor.pieces[0].interact.is_none());
+
+    toggle_selected_interact(&mut editor);
+    assert_eq!(editor.pieces[0].interact, InteractAction::TogglePause);
+    assert_eq!(editor.undo.len(), 1);
+    assert_eq!(editor.note, "interact: pause motion");
+
+    toggle_selected_interact(&mut editor);
+    assert!(editor.pieces[0].interact.is_none());
+    assert_eq!(editor.undo.len(), 2);
+    assert_eq!(editor.note, "interact: off");
 }
 
 #[test]
@@ -105,6 +123,8 @@ fn status_and_panel_systems_have_disjoint_queries() {
         .spawn((PlatformSpeedLabel, Text::new("1.5 m/s")));
     app.world_mut()
         .spawn((PlatformEditLabel, Text::new("Edit path: off")));
+    app.world_mut()
+        .spawn((InteractLabel, Text::new("Interact: off")));
     app.world_mut()
         .spawn((PropertyField::PosX, EditableText::new("0"), Node::default()));
 
@@ -348,4 +368,86 @@ fn a_new_group_button_activation_creates_exactly_one_group() {
         app.world().resource::<OutlinerState>().selection,
         GraphNode::Group(_)
     ));
+}
+
+#[test]
+fn clicking_a_lock_badge_toggles_lock_without_selecting() {
+    use bevy::camera::NormalizedRenderTarget;
+    use bevy::picking::backend::HitData;
+    use bevy::picking::events::Pointer;
+    use bevy::picking::pointer::Location;
+
+    fn spawn_panel(mut commands: Commands) {
+        spawn_object_graph(&mut commands);
+    }
+
+    let mut app = App::new();
+    app.init_resource::<Editor>();
+    app.init_resource::<OutlinerState>();
+    app.init_resource::<OutlinerEdit>();
+    app.init_resource::<InputFocus>();
+    app.init_resource::<Orbit>();
+    app.add_systems(Startup, spawn_panel);
+    app.add_systems(
+        Update,
+        (
+            sync_outliner_selection,
+            sync_outliner_rows,
+            sync_outliner_panel,
+            sync_outliner_fields,
+            update_outliner_rows,
+        ),
+    );
+    app.world_mut()
+        .resource_mut::<Editor>()
+        .pieces
+        .push(test_piece(1));
+    app.update();
+
+    let lock = {
+        let world = app.world_mut();
+        let mut query = world.query::<(&OutlinerLockButton, Entity)>();
+        query
+            .iter(world)
+            .find(|(lock, _)| lock.0 == 1)
+            .map(|(_, entity)| entity)
+            .expect("lock badge")
+    };
+    app.world_mut().entity_mut(lock).observe(on_outliner_press);
+
+    let pointer = || {
+        Pointer::new(
+            PointerId::Mouse,
+            Location {
+                target: NormalizedRenderTarget::None {
+                    width: 100,
+                    height: 100,
+                },
+                position: Vec2::ZERO,
+            },
+        )
+    };
+    app.world_mut().trigger(PointerPress {
+        entity: lock,
+        pointer: pointer(),
+        button: PointerButton::Primary,
+        hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+        count: 1,
+    });
+
+    assert!(app.world().resource::<Editor>().outline.is_locked(1));
+    assert_eq!(app.world().resource::<Editor>().selected, None);
+    assert_eq!(
+        app.world().resource::<OutlinerState>().selection,
+        GraphNode::Root
+    );
+
+    app.world_mut().trigger(PointerPress {
+        entity: lock,
+        pointer: pointer(),
+        button: PointerButton::Primary,
+        hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+        count: 1,
+    });
+    assert!(!app.world().resource::<Editor>().outline.is_locked(1));
 }

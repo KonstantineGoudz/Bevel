@@ -9,7 +9,7 @@ use bevy::ui_widgets::TextInput;
 
 pub(super) const PROPERTIES_WIDTH: f32 = 230.0;
 pub(super) const PROPERTIES_MARGIN: f32 = 12.0;
-pub(super) const PROPERTIES_HEIGHT: f32 = 850.0;
+pub(super) const PROPERTIES_HEIGHT: f32 = 910.0;
 
 #[derive(Component)]
 pub(super) struct PlatformSection;
@@ -46,6 +46,12 @@ pub(super) struct PlatformEditButton;
 
 #[derive(Component)]
 pub(super) struct PlatformEditLabel;
+
+#[derive(Component)]
+pub(super) struct InteractButton;
+
+#[derive(Component)]
+pub(super) struct InteractLabel;
 
 /// Whether a logical screen point is over the floating property panel.
 pub(super) fn over_properties_panel(screen: Vec2, size: Vec2, selected: bool) -> bool {
@@ -587,6 +593,14 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
     commands.entity(clear).observe(on_platform_clear);
     commands.entity(motion).add_child(clear);
     commands.entity(panel).add_child(motion);
+
+    // Interact section: what happens when the player presses E / Interact
+    // near the selected piece. New actions get new variants, not new UI.
+    let interact_label = section_label(commands, "INTERACT (E KEY / USE BUTTON)");
+    commands.entity(panel).add_child(interact_label);
+    let interact = platform_button(commands, InteractButton, InteractLabel, "Interact: off");
+    commands.entity(interact).observe(on_interact_toggle);
+    commands.entity(panel).add_child(interact);
 }
 
 fn platform_button<C: Component, L: Component>(
@@ -723,6 +737,38 @@ pub(super) fn toggle_selected_physics(editor: &mut Editor) {
         "physics: dynamic"
     } else {
         "physics: static"
+    };
+}
+
+pub(super) fn on_interact_toggle(
+    event: On<Activate>,
+    buttons: Query<&InteractButton>,
+    mut editor: ResMut<Editor>,
+) {
+    if buttons.get(event.entity).is_ok() {
+        toggle_selected_interact(&mut editor);
+    }
+}
+
+/// Cycle the selected piece's interaction: off -> pause motion -> off.
+/// New actions slot into this cycle as new enum variants.
+pub(super) fn toggle_selected_interact(editor: &mut Editor) {
+    let Some(id) = editor.selected else {
+        return;
+    };
+    let Some(index) = editor.pieces.iter().position(|piece| piece.id == id) else {
+        return;
+    };
+    editor.commit();
+    editor.pieces[index].interact = match editor.pieces[index].interact {
+        InteractAction::None => InteractAction::TogglePause,
+        InteractAction::TogglePause => InteractAction::None,
+    };
+    editor.hard_dirty = true;
+    editor.note = if editor.pieces[index].interact.is_none() {
+        "interact: off"
+    } else {
+        "interact: pause motion"
     };
 }
 
@@ -1087,6 +1133,7 @@ pub(super) fn sync_properties_panel(
             Without<PlatformSpeedLabel>,
             Without<PlatformEditLabel>,
             Without<TriggerShapeLabel>,
+            Without<InteractLabel>,
         ),
     >,
     mut toggle_label: Single<
@@ -1099,6 +1146,7 @@ pub(super) fn sync_properties_panel(
             Without<PlatformSpeedLabel>,
             Without<PlatformEditLabel>,
             Without<TriggerShapeLabel>,
+            Without<InteractLabel>,
         ),
     >,
     mut mode_label: Single<
@@ -1111,6 +1159,7 @@ pub(super) fn sync_properties_panel(
             Without<PlatformSpeedLabel>,
             Without<PlatformEditLabel>,
             Without<TriggerShapeLabel>,
+            Without<InteractLabel>,
         ),
     >,
     mut pause_label: Single<
@@ -1123,6 +1172,7 @@ pub(super) fn sync_properties_panel(
             Without<PlatformSpeedLabel>,
             Without<PlatformEditLabel>,
             Without<TriggerShapeLabel>,
+            Without<InteractLabel>,
         ),
     >,
     mut speed_label: Single<
@@ -1135,6 +1185,7 @@ pub(super) fn sync_properties_panel(
             Without<PlatformPauseLabel>,
             Without<PlatformEditLabel>,
             Without<TriggerShapeLabel>,
+            Without<InteractLabel>,
         ),
     >,
     mut edit_label: Single<
@@ -1146,6 +1197,20 @@ pub(super) fn sync_properties_panel(
             Without<PlatformModeLabel>,
             Without<PlatformPauseLabel>,
             Without<PlatformSpeedLabel>,
+            Without<TriggerShapeLabel>,
+            Without<InteractLabel>,
+        ),
+    >,
+    mut interact_label: Single<
+        &mut Text,
+        (
+            With<InteractLabel>,
+            Without<PropertyShapeLabel>,
+            Without<PhysicsToggleLabel>,
+            Without<PlatformModeLabel>,
+            Without<PlatformPauseLabel>,
+            Without<PlatformSpeedLabel>,
+            Without<PlatformEditLabel>,
             Without<TriggerShapeLabel>,
         ),
     >,
@@ -1208,6 +1273,11 @@ pub(super) fn sync_properties_panel(
         "Edit path: on".to_string()
     } else {
         "Edit path: off".to_string()
+    };
+    interact_label.0 = if piece.interact.is_none() {
+        "Interact: off".to_string()
+    } else {
+        format!("Interact: {}", piece.interact.label())
     };
     if let Some(mover) = editor.selected.and_then(|id| movers.map.get(&id)) {
         mode_label.0 = format!(

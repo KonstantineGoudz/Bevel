@@ -290,6 +290,57 @@ impl Trigger {
     }
 }
 
+/// Interaction-trigger effects attached to a single placed piece.
+///
+/// An interaction fires when the player presses the interact key (E on
+/// desktop, the Interact touch button) while the character stands near the
+/// piece. Dispatch lives in `interacts::apply_interact`: add a variant here
+/// plus an arm there, a `SavedPiece` entry, and a properties-panel control —
+/// `Piece` stays `Copy` and old saves keep loading because every new field
+/// gets a `#[serde(default)]` entry in `SavedPiece`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InteractAction {
+    /// No interaction. Default for every new piece.
+    #[default]
+    None,
+    /// Pause/resume the piece's own platform path (mover). Interacting with
+    /// a piece that has no path reports "no motion path" and changes nothing.
+    TogglePause,
+}
+
+impl InteractAction {
+    /// Stable id used in save files and the level JSON.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::TogglePause => "togglePause",
+        }
+    }
+
+    /// Short label for the properties panel.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "off",
+            Self::TogglePause => "pause motion",
+        }
+    }
+
+    /// Parse a save-file id. Unknown strings return `None` so that maps
+    /// authored by newer versions (with actions this build does not know)
+    /// still load — the piece simply has no interaction.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "togglepause" | "toggle_pause" | "toggle-pause" => Some(Self::TogglePause),
+            _ => None,
+        }
+    }
+
+    pub fn is_none(self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
 /// Parametric trigger volume shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TriggerShape {
@@ -944,6 +995,10 @@ pub struct Piece {
     /// Whether the trigger zone is rendered in edit mode. When false the zone
     /// is still pickable via the scene graph/outliner but its mesh is hidden.
     pub trigger_visible: bool,
+    /// What happens when the player interacts with this piece (E key /
+    /// Interact button while standing near it). `None` means the piece is
+    /// not interactable.
+    pub interact: InteractAction,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1363,6 +1418,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let ghost = Piece {
             id: 2,
@@ -1379,6 +1435,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
 
         let snap = anchor_snap(&ghost, wall, &[a], SNAP_THRESHOLD).expect("anchor snap");
@@ -1405,6 +1462,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         // Rotate the ghost by 60° and place its left anchor exactly on a's right anchor.
         let off = Vec2::from_angle(std::f32::consts::PI / 3.0) * Vec2::new(-edge_len() / 2.0, 0.0);
@@ -1423,6 +1481,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         assert!(anchor_snap(&ghost, wall, &[a], SNAP_THRESHOLD).is_none());
     }
@@ -1445,6 +1504,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let ghost = Piece {
             id: 2,
@@ -1461,6 +1521,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let snap = anchor_snap(&ghost, crate_shape, &[a], SNAP_THRESHOLD).expect("crate snap");
         near(snap.pos.x, 1.2, 0.01);
@@ -1487,6 +1548,7 @@ mod tests {
                 trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
                 trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
                 trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+                interact: crate::model::InteractAction::None,
             },
             wall,
         );
@@ -1510,6 +1572,7 @@ mod tests {
                 trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
                 trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
                 trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+                interact: crate::model::InteractAction::None,
             },
             crate_shape,
         );
@@ -1535,6 +1598,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         assert!(hit_test(crate_shape, &p, Vec2::ZERO, 0.0));
         assert!(!hit_test(crate_shape, &p, Vec2::new(2.0, 0.0), HIT_PAD));
@@ -1575,6 +1639,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let a = world_anchors(&p, crate_shape);
         near(a[0].pos.x, 0.2, 0.01);
@@ -1636,6 +1701,7 @@ mod tests {
                 trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
                 trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
                 trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+                interact: crate::model::InteractAction::None,
             };
             let before = piece_quat(&piece);
             set_piece_quat(&mut piece, before);
@@ -1664,6 +1730,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let expected = bevy::math::Quat::from_rotation_y(-0.7);
         assert!(piece_quat(&piece).dot(expected).abs() > 0.99999);
@@ -1686,5 +1753,20 @@ mod tests {
         assert_eq!(trigger.damage, 0.0, "negatives clamp to harmless");
         trigger.set_damage(f32::NAN);
         assert_eq!(trigger.damage, 0.0, "NaN input is ignored");
+    }
+
+    #[test]
+    fn interact_actions_default_to_none_and_round_trip() {
+        assert!(InteractAction::default().is_none());
+        assert_eq!(InteractAction::None.id(), "none");
+        assert_eq!(InteractAction::TogglePause.id(), "togglePause");
+        assert_eq!(InteractAction::TogglePause.label(), "pause motion");
+        assert_eq!(
+            InteractAction::parse("togglePause"),
+            Some(InteractAction::TogglePause)
+        );
+        assert_eq!(InteractAction::parse("none"), Some(InteractAction::None));
+        assert_eq!(InteractAction::parse("teleport"), None);
+        assert_eq!(InteractAction::parse(""), None);
     }
 }

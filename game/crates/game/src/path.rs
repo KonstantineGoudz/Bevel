@@ -738,6 +738,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         }
     }
 
@@ -784,6 +785,7 @@ mod tests {
                 trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
                 trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
                 trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+                interact: crate::model::InteractAction::None,
             };
             let (edges, _) = blocked(&[piece]);
             assert!(edges.is_empty(), "{id} should not block");
@@ -819,6 +821,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let (_, hexes) = blocked(&[piece]);
         assert!(hexes.contains(&(1, 0)));
@@ -850,6 +853,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let (edges, hexes) = blocked(&[pillar]);
         assert!(!can_step(here, model::hex_center(1, 0), &edges, &hexes));
@@ -872,6 +876,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let (edges, hexes) = blocked(&[block]);
         assert!(hexes.is_empty(), "a block top is a walkable cell");
@@ -896,6 +901,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let (_, hexes) = blocked(&[ramp]);
         assert!(hexes.is_empty());
@@ -918,6 +924,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let ramp = Piece {
             id: 2,
@@ -934,6 +941,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
 
         // Alone, the block cannot be entered from its sides.
@@ -962,6 +970,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let (edges, _) = blocked(&[ramp]);
 
@@ -1000,6 +1009,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let (edges, hexes) = blocked(&[ramp]);
 
@@ -1030,6 +1040,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let block = Piece {
             id: 2,
@@ -1046,6 +1057,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let (edges, hexes) = blocked(&[ramp, block]);
 
@@ -1089,6 +1101,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let first = Piece {
             id: 2,
@@ -1105,6 +1118,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let second = Piece {
             id: 3,
@@ -1121,6 +1135,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
 
         let (edges, hexes) = blocked(&[ramp, first, second]);
@@ -1166,6 +1181,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         // The square corner pokes into the next hex.
         let corner = model::hex_center(2, 1) + Vec2::new(0.9, -0.9);
@@ -1197,6 +1213,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let home = Piece {
             id: 3,
@@ -1213,6 +1230,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let pieces = [ramp, home, block];
         let (edges, hexes) = blocked(&pieces);
@@ -1326,6 +1344,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let first = Piece {
             id: 2,
@@ -1342,6 +1361,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let second = Piece {
             id: 3,
@@ -1358,6 +1378,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let (edges, blocked) = blocked(&[ramp, first, second]);
 
@@ -1651,6 +1672,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let ramp = Piece {
             id: 2,
@@ -1667,6 +1689,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let (edges, hexes) = blocked(&[block, ramp]);
         assert_eq!(
@@ -1693,6 +1716,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let ramp = Piece {
             id: 2,
@@ -1709,6 +1733,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let (edges, hexes) = blocked(&[block, ramp]);
         assert!(
@@ -1734,6 +1759,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         assert_eq!(
             cell_under(&[block], model::hex_center(1, 0), 1.9),
@@ -1761,6 +1787,7 @@ mod tests {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let pieces = vec![
             piece(1, "block", -2.078, -0.198, 0.0, 89.8),

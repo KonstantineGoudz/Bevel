@@ -33,6 +33,7 @@ fn selecting_a_piece_without_moving_keeps_its_position() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     // Within anchor range, but not yet snapped: a bare selection must not
     // pull it into place.
@@ -52,6 +53,7 @@ fn selecting_a_piece_without_moving_keeps_its_position() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     let mut editor = Editor::default();
     editor.pieces.push(anchor);
@@ -101,6 +103,7 @@ fn g_then_x_locks_to_world_x_and_enter_confirms() {
 
     assert!(keyboard_transform(
         &mut editor,
+        &Controls::with_defaults(),
         &keys_with(KeyCode::KeyG),
         &mouse,
         &cursor,
@@ -112,6 +115,7 @@ fn g_then_x_locks_to_world_x_and_enter_confirms() {
 
     assert!(keyboard_transform(
         &mut editor,
+        &Controls::with_defaults(),
         &keys_with(KeyCode::KeyX),
         &mouse,
         &cursor,
@@ -127,6 +131,7 @@ fn g_then_x_locks_to_world_x_and_enter_confirms() {
     cursor = cursor_looking_at(Vec3::new(2.0, 5.0, 0.0), Vec3::new(2.0, 0.0, 0.0));
     assert!(keyboard_transform(
         &mut editor,
+        &Controls::with_defaults(),
         &ButtonInput::default(),
         &mouse,
         &cursor,
@@ -140,6 +145,7 @@ fn g_then_x_locks_to_world_x_and_enter_confirms() {
 
     assert!(keyboard_transform(
         &mut editor,
+        &Controls::with_defaults(),
         &keys_with(KeyCode::Enter),
         &mouse,
         &cursor,
@@ -161,6 +167,7 @@ fn escape_restores_the_piece_and_removes_the_undo_step() {
 
     assert!(keyboard_transform(
         &mut editor,
+        &Controls::with_defaults(),
         &keys_with(KeyCode::KeyG),
         &mouse,
         &start,
@@ -169,6 +176,7 @@ fn escape_restores_the_piece_and_removes_the_undo_step() {
     ));
     assert!(keyboard_transform(
         &mut editor,
+        &Controls::with_defaults(),
         &ButtonInput::default(),
         &mouse,
         &cursor_looking_at(Vec3::new(2.0, 5.0, 0.0), Vec3::new(2.0, 0.0, 0.0)),
@@ -179,6 +187,7 @@ fn escape_restores_the_piece_and_removes_the_undo_step() {
 
     assert!(keyboard_transform(
         &mut editor,
+        &Controls::with_defaults(),
         &keys_with(KeyCode::Escape),
         &mouse,
         &start,
@@ -201,6 +210,7 @@ fn r_opens_rotate_and_axis_keys_toggle_locks() {
 
     assert!(keyboard_transform(
         &mut editor,
+        &Controls::with_defaults(),
         &keys_with(KeyCode::KeyR),
         &mouse,
         &cursor,
@@ -211,6 +221,7 @@ fn r_opens_rotate_and_axis_keys_toggle_locks() {
 
     assert!(keyboard_transform(
         &mut editor,
+        &Controls::with_defaults(),
         &keys_with(KeyCode::KeyX),
         &mouse,
         &cursor,
@@ -225,6 +236,7 @@ fn r_opens_rotate_and_axis_keys_toggle_locks() {
 
     assert!(keyboard_transform(
         &mut editor,
+        &Controls::with_defaults(),
         &keys_with(KeyCode::KeyZ),
         &mouse,
         &cursor,
@@ -237,6 +249,7 @@ fn r_opens_rotate_and_axis_keys_toggle_locks() {
     // to yaw.
     assert!(keyboard_transform(
         &mut editor,
+        &Controls::with_defaults(),
         &keys_with(KeyCode::KeyZ),
         &mouse,
         &cursor,

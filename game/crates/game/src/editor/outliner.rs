@@ -307,7 +307,7 @@ pub(super) fn spawn_object_graph(commands: &mut Commands) {
 
     let hint = commands
         .spawn((
-            Text::new("Click select - drag to group - padlock locks"),
+            Text::new("Select - drag to group - padlock locks"),
             TextFont {
                 font_size: FontSize::Px(9.0),
                 ..default()
@@ -1059,7 +1059,7 @@ pub(super) fn on_outliner_action(
 }
 
 pub(super) fn outliner_shortcuts(
-    keys: Res<ButtonInput<KeyCode>>,
+    input: PlayerInput,
     menu: Res<AddMenu>,
     mut focus: ResMut<InputFocus>,
     mut editor: ResMut<Editor>,
@@ -1069,27 +1069,27 @@ pub(super) fn outliner_shortcuts(
     if menu.open || focus.get().is_some() || editor.mode != Mode::Build {
         return;
     }
-    if keys.just_pressed(KeyCode::Escape) {
+    if input.just_pressed(Action::Back) {
         state.selection = GraphNode::Root;
         state.drag = None;
         state.drag_start = None;
         return;
     }
-    let command = command_down(&keys);
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    if command && keys.just_pressed(KeyCode::KeyG) {
-        if shift {
-            if let Some(next) = editor.ungroup_node(state.selection) {
-                state.selection = next;
-                editor.selected = None;
-            }
-        } else if let Some(id) = editor.group_node(state.selection) {
+    if input.just_pressed(Action::UngroupNodes) {
+        if let Some(next) = editor.ungroup_node(state.selection) {
+            state.selection = next;
+            editor.selected = None;
+        }
+        return;
+    }
+    if input.just_pressed(Action::NewGroup) {
+        if let Some(id) = editor.group_node(state.selection) {
             state.selection = GraphNode::Group(id);
             editor.selected = None;
         }
         return;
     }
-    if keys.just_pressed(KeyCode::F2)
+    if input.just_pressed(Action::RenameItem)
         && !state.collapsed
         && editor.node_renamable(state.selection)
         && let Ok(input) = inputs.single()

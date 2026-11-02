@@ -2,6 +2,24 @@
 
 use super::*;
 
+/// Borrowed inputs for the modal transform helpers: the same reads as
+/// [`PlayerInput`] without requiring a full system parameter, so unit tests
+/// can drive the modal with plain [`ButtonInput`]s.
+#[derive(Clone, Copy)]
+pub(super) struct ModalInput<'a> {
+    pub controls: &'a Controls,
+    pub keys: &'a ButtonInput<KeyCode>,
+    pub mouse: &'a ButtonInput<MouseButton>,
+}
+
+impl ModalInput<'_> {
+    fn just_pressed(&self, action: Action) -> bool {
+        let pads: [&Gamepad; 0] = [];
+        self.controls
+            .just_pressed(action, self.keys, self.mouse, &pads)
+    }
+}
+
 /// Handle `G`/`R` and the modal move/rotate session.
 ///
 /// Returns true whenever the modal owns input, including the frame it starts,
@@ -9,28 +27,35 @@ use super::*;
 /// a path gesture is in progress.
 pub(super) fn keyboard_transform(
     editor: &mut Editor,
+    controls: &Controls,
     keys: &ButtonInput<KeyCode>,
     mouse: &ButtonInput<MouseButton>,
     cursor: &Cursor,
     allow_start: bool,
     over_palette: bool,
 ) -> bool {
+    let input = ModalInput {
+        controls,
+        keys,
+        mouse,
+    };
     let Some(mut transform) = editor.keyboard_transform else {
-        return start_transform(editor, keys, cursor, allow_start);
+        return start_transform(editor, input, cursor, allow_start);
     };
 
-    if keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right) {
+    if input.just_pressed(Action::Back) || mouse.just_pressed(MouseButton::Right) {
         cancel_transform(editor, transform);
         return true;
     }
-    if keys.just_pressed(KeyCode::Enter) || (mouse.just_pressed(MouseButton::Left) && !over_palette)
+    if input.just_pressed(Action::ConfirmModal)
+        || (input.just_pressed(Action::PrimaryClick) && !over_palette)
     {
         confirm_transform(editor, transform);
         return true;
     }
 
-    if !command_down(keys)
-        && let Some(axis) = pressed_axis(keys)
+    if !command_down(&input.keys)
+        && let Some(axis) = pressed_axis(input)
     {
         let next = if transform.axis == Some(axis) {
             None
@@ -65,18 +90,17 @@ pub(super) fn keyboard_transform(
 
 fn start_transform(
     editor: &mut Editor,
-    keys: &ButtonInput<KeyCode>,
+    input: ModalInput<'_>,
     cursor: &Cursor,
     allow_start: bool,
 ) -> bool {
-    if !allow_start || !object_editing_allowed(editor.mode) || command_down(keys) {
+    if !allow_start || !object_editing_allowed(editor.mode) || command_down(input.keys) {
         return false;
     }
 
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    let mode = if keys.just_pressed(KeyCode::KeyG) {
+    let mode = if input.just_pressed(Action::TransMove) {
         Some(TransformMode::Move)
-    } else if keys.just_pressed(KeyCode::KeyR) && !shift {
+    } else if input.just_pressed(Action::TransRotate) {
         Some(TransformMode::Rotate)
     } else {
         None
@@ -215,12 +239,12 @@ fn cancel_transform(editor: &mut Editor, transform: KeyboardTransform) {
     editor.note = "cancelled";
 }
 
-fn pressed_axis(keys: &ButtonInput<KeyCode>) -> Option<TransformAxis> {
-    if keys.just_pressed(KeyCode::KeyX) {
+fn pressed_axis(input: ModalInput<'_>) -> Option<TransformAxis> {
+    if input.just_pressed(Action::AxisX) {
         Some(TransformAxis::X)
-    } else if keys.just_pressed(KeyCode::KeyY) {
+    } else if input.just_pressed(Action::AxisY) {
         Some(TransformAxis::Y)
-    } else if keys.just_pressed(KeyCode::KeyZ) {
+    } else if input.just_pressed(Action::AxisZ) {
         Some(TransformAxis::Z)
     } else {
         None

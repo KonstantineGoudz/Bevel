@@ -619,7 +619,7 @@ fn apply_pushes(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn walk(
     time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
+    input: PlayerInput,
     mut touch: ResMut<TouchState>,
     mut editor: ResMut<Editor>,
     mut orbit: ResMut<Orbit>,
@@ -668,11 +668,11 @@ pub(super) fn walk(
     // forward along the path instead of cancelling it. Read it only after the
     // arrival check: a jump pressed as the route ends is left for the free
     // controller so the button still lands.
-    let jump = keys.pressed(KeyCode::Space) || touch.jump;
+    let jump = input.pressed(Action::Jump) || touch.jump;
     touch.jump = false;
     // Left Ctrl held on landing after the jump starts a momentum slide,
     // exactly as in free control; releasing it (or jumping) ends the slide.
-    let slide_held = keys.pressed(KeyCode::ControlLeft);
+    let slide_held = input.pressed(Action::Slide) || touch.slide;
 
     // Steering, not teleporting: grounded route following uses the same
     // sampled-terrain walk as first-person control, so ramps, gaps and
@@ -792,16 +792,10 @@ pub(super) fn walk(
 
     // Any manual steering hands control back to the player.
     if touch.stick.length_squared() > 0.02
-        || keys.any_pressed([
-            KeyCode::KeyW,
-            KeyCode::KeyA,
-            KeyCode::KeyS,
-            KeyCode::KeyD,
-            KeyCode::ArrowUp,
-            KeyCode::ArrowDown,
-            KeyCode::ArrowLeft,
-            KeyCode::ArrowRight,
-        ])
+        || input.pressed(Action::MoveForward)
+        || input.pressed(Action::MoveBack)
+        || input.pressed(Action::MoveLeft)
+        || input.pressed(Action::MoveRight)
     {
         editor.walk = None;
         editor.note = "manual control";
@@ -811,7 +805,7 @@ pub(super) fn walk(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn character_move(
     time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
+    input: PlayerInput,
     mut editor: ResMut<Editor>,
     mut orbit: ResMut<Orbit>,
     mut touch: ResMut<TouchState>,
@@ -842,19 +836,9 @@ pub(super) fn character_move(
 
     // The stick and WASD both steer, in every view. Third person is the
     // default on a phone, and the pad is the only movement control there.
-    let mut wish = Vec2::ZERO;
-    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
-        wish.y += 1.0;
-    }
-    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
-        wish.y -= 1.0;
-    }
-    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
-        wish.x += 1.0;
-    }
-    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
-        wish.x -= 1.0;
-    }
+    // Keyboard, D-pad and the left stick merge in `move_vector`; touch
+    // overrides while the thumb is down.
+    let mut wish = input.move_vector();
     if touch.enabled && touch.stick.length_squared() > 0.01 {
         wish = touch.stick;
     }
@@ -874,7 +858,7 @@ pub(super) fn character_move(
     let right = Vec2::new(orbit.yaw.cos(), -orbit.yaw.sin());
     let direction = (forward * wish.y + right * wish.x).normalize_or_zero();
 
-    let sprint = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let sprint = input.pressed(Action::Sprint) || touch.sprint;
     let wish_speed = (if sprint { 5.5 } else { 2.8 }) * strength;
     let target = direction * wish_speed;
 
@@ -885,7 +869,7 @@ pub(super) fn character_move(
 
     // `pressed`, not `just_pressed`: a frame can span the whole key tap on a
     // slow frame, and a held space should still jump on landing.
-    let jump = keys.pressed(KeyCode::Space) || touch.jump;
+    let jump = input.pressed(Action::Jump) || touch.jump;
     touch.jump = false;
     // A jump is a vertical impulse: it sets `vy` and leaves `hv` alone so
     // run-up momentum carries into the leap.
@@ -901,8 +885,9 @@ pub(super) fn character_move(
     // Slide: Left Ctrl is only read as a landing input. Holding it while
     // airborne queues a slide that starts on touchdown (see `next_sliding`);
     // holding it while already grounded never starts one, and a jump
-    // takeoff cancels any slide in progress.
-    let slide_held = keys.pressed(KeyCode::ControlLeft);
+    // takeoff cancels any slide in progress. The touch slide button toggles
+    // the same held state.
+    let slide_held = input.pressed(Action::Slide) || touch.slide;
     let sliding = character.sliding && slide_held && !taking_off;
 
     let filter = SpatialQueryFilter::from_excluded_entities([entity]);

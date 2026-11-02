@@ -110,6 +110,8 @@ fn physics_app() -> App {
     app.init_resource::<avian3d::collider_tree::ColliderTreeDiagnostics>();
     app.init_resource::<avian3d::collision::CollisionDiagnostics>();
     app.init_resource::<avian3d::dynamics::solver::SolverDiagnostics>();
+    app.init_resource::<ButtonInput<MouseButton>>();
+    app.init_resource::<crate::controls::Controls>();
     app.insert_resource(Kit {
         parts: Vec::new(),
         mats: Vec::new(),
@@ -183,5 +185,6 @@ fn test_piece(id: u32) -> Piece {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     }
 }

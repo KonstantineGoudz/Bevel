@@ -1,6 +1,52 @@
 use super::*;
 
 #[test]
+fn gizmo_grab_allowed_needs_build_select_and_no_tool() {
+    let mut editor = Editor::default();
+    editor.pieces.push(test_piece(1));
+    editor.selected = Some(1);
+    assert!(gizmo_grab_allowed(&editor, false));
+    editor.actor_tool = Some(ActorTool::Place);
+    assert!(!gizmo_grab_allowed(&editor, false));
+    editor.actor_tool = None;
+    assert!(
+        !gizmo_grab_allowed(&editor, true),
+        "an in-flight handle drag owns the pointer"
+    );
+    editor.selected = None;
+    assert!(!gizmo_grab_allowed(&editor, false));
+    editor.selected = Some(1);
+    editor.mode = Mode::Play;
+    assert!(!gizmo_grab_allowed(&editor, false));
+}
+
+#[test]
+fn release_gizmo_drag_clears_and_suppresses_the_tap() {
+    let mut editor = Editor::default();
+    let mut touch = TouchState::default();
+    // A foreign pointer must not disturb the drag.
+    release_gizmo_drag(&mut editor, &mut touch, PointerId::Touch(9), 1.0);
+    assert!(editor.gizmo_drag.is_none());
+
+    let start = test_piece(1);
+    editor.gizmo_drag = Some(GizmoDrag {
+        id: 1,
+        handle: GizmoHandle::Y,
+        grab: Vec3::ZERO,
+        start,
+        last_raw: 0.0,
+        last: 0.0,
+        pointer: PointerId::Touch(3),
+        screen: Vec2::ZERO,
+    });
+    release_gizmo_drag(&mut editor, &mut touch, PointerId::Touch(3), 2.0);
+    assert!(editor.gizmo_drag.is_none());
+    assert!(editor.hard_dirty);
+    assert!(touch.tap.is_none());
+    assert!(touch.suppress_until >= 2.0);
+}
+
+#[test]
 fn a_gizmo_handle_wins_over_an_armed_shape_tool() {
     let mut editor = Editor {
         tool: Some(0),
@@ -42,6 +88,7 @@ fn a_wall_face_is_clickable_at_mid_height() {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         },
         Piece {
             id: 2,
@@ -58,6 +105,7 @@ fn a_wall_face_is_clickable_at_mid_height() {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         },
     ];
     let hit = pick(&pieces, ray_towards(Vec3::new(0.519, 1.4, -0.9)));
@@ -86,6 +134,7 @@ fn a_wall_is_clickable_near_its_top_too() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     }];
     let hit = pick(&pieces, ray_towards(Vec3::new(0.519, 2.6, -0.9)));
     assert_eq!(hit, Some(2), "the upper face of a wall should be clickable");
@@ -109,6 +158,7 @@ fn the_floor_is_clickable() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     }];
     assert_eq!(
         pick(&pieces, ray_towards(Vec3::new(0.2, 0.0, 0.2))),
@@ -134,6 +184,7 @@ fn the_gizmo_is_bigger_than_the_selected_pieces_bounding_box() {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let (reach, ring) = gizmo_frame(&piece, shape);
         let size = bounding_size(&piece, shape);
@@ -185,6 +236,7 @@ fn an_axis_drag_moves_by_the_pointer_delta_not_to_the_pointer() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     // Grabbed far out on the handle, then moved a little. The piece must
     // follow the little movement, not leap out to the pointer.
@@ -195,6 +247,38 @@ fn an_axis_drag_moves_by_the_pointer_delta_not_to_the_pointer() {
         Vec3::new(3.4, 0.5, 2.0),
     );
     assert!((moved.pos.x - 1.4).abs() < 1e-5, "pos = {:?}", moved.pos);
+    assert!((moved.pos.y - 2.0).abs() < 1e-5, "pos = {:?}", moved.pos);
+    assert!((moved.elevation - 0.0).abs() < 1e-5);
+}
+
+#[test]
+fn a_negative_axis_drag_moves_by_the_pointer_delta() {
+    let start = Piece {
+        id: 1,
+        shape: 0,
+        pos: Vec2::new(1.0, 2.0),
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
+    };
+    // Grabbed on the negative X end and shoved further negative: the piece
+    // follows the pointer travel, not the grab position.
+    let moved = dragged_piece(
+        start,
+        GizmoHandle::X,
+        Vec3::new(-3.0, 0.5, 2.0),
+        Vec3::new(-3.4, 0.5, 2.0),
+    );
+    assert!((moved.pos.x - 0.6).abs() < 1e-5, "pos = {:?}", moved.pos);
     assert!((moved.pos.y - 2.0).abs() < 1e-5, "pos = {:?}", moved.pos);
     assert!((moved.elevation - 0.0).abs() < 1e-5);
 }
@@ -216,6 +300,7 @@ fn the_vertical_handle_lifts_and_lowers_a_piece() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     // Grabbed at the top of the vertical handle, not at the piece origin.
     let moved = dragged_piece(
@@ -247,6 +332,7 @@ fn grabbing_the_vertical_handle_without_dragging_keeps_the_height() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     let mut editor = Editor::default();
     editor.pieces.push(start);
@@ -262,6 +348,8 @@ fn grabbing_the_vertical_handle_without_dragging_keeps_the_height() {
         start,
         last_raw: start.elevation,
         last: start.elevation,
+        pointer: PointerId::Mouse,
+        screen: Vec2::ZERO,
     };
 
     // A click with no pointer travel must not change the height.
@@ -295,6 +383,7 @@ fn a_yaw_drag_keeps_the_grab_offset() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     // Grabbed on the +X side of the ring and dragged a quarter turn to +Z.
     let moved = dragged_piece(
@@ -324,6 +413,7 @@ fn a_pitch_drag_tilts_around_the_world_x_axis() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     let origin = gizmo_origin(&start, &shapes()[start.shape]);
     let angle = 0.6_f32;
@@ -361,6 +451,7 @@ fn a_roll_drag_tilts_around_the_world_z_axis() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     let origin = gizmo_origin(&start, &shapes()[start.shape]);
     let angle = -0.45_f32;
@@ -398,6 +489,7 @@ fn a_plane_handle_moves_in_two_axes_at_once() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     let moved = dragged_piece(
         start,
@@ -428,6 +520,7 @@ fn height_snapping_stacks_a_block_on_the_one_below() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     let moving = Piece {
         id: 2,
@@ -444,6 +537,7 @@ fn height_snapping_stacks_a_block_on_the_one_below() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     let top = shapes()[block].top();
     let snapped = snap_elevation(
@@ -476,6 +570,7 @@ fn height_snapping_leaves_free_heights_alone() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     let shape = &shapes()[crate_index];
     let free = snap_elevation(piece, shape, &[], 0.62, 1.0, true, ELEVATION_SNAP);
@@ -502,6 +597,7 @@ fn height_snapping_releases_a_stacked_piece_immediately() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     let moving = Piece {
         id: 2,
@@ -518,6 +614,7 @@ fn height_snapping_releases_a_stacked_piece_immediately() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     let top = shapes()[block].top();
     let lifted = snap_elevation(
@@ -550,6 +647,7 @@ fn height_snapping_only_captures_surfaces_ahead_of_the_drag() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     let shape = &shapes()[crate_index];
     // Lifting away from the ground is free: it must not be pulled back down.
@@ -578,6 +676,7 @@ fn the_gizmo_offers_a_vertical_and_three_plane_handles() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     let shape = &shapes()[block];
     let origin = gizmo_origin(&piece, shape);
@@ -650,6 +749,7 @@ fn the_build_orbit_target_is_the_selected_piece_centre() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     });
     editor.selected = Some(7);
     let target = selection_center(&editor).expect("selected centre");

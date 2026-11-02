@@ -105,6 +105,7 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         },
         // 270 deg makes the ramp rise along +x.
         Piece {
@@ -122,6 +123,7 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         },
         Piece {
             id: 3,
@@ -138,6 +140,7 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         },
         Piece {
             id: 4,
@@ -154,6 +157,7 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         },
     ];
 

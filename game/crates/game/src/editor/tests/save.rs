@@ -107,6 +107,7 @@ fn saving_writes_each_pieces_height() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     });
     let json = level_json(&editor);
     assert!(json.contains("\"y\":1.250"), "{json}");
@@ -131,12 +132,39 @@ fn saving_writes_each_pieces_full_rotation() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     });
     let json = level_json(&editor);
     assert!(json.contains("\"rotDeg\":30.0"), "{json}");
     assert!(json.contains("\"pitchDeg\":-15.0"), "{json}");
     assert!(json.contains("\"rollDeg\":10.0"), "{json}");
     assert!(json.contains("\"dynamic\":true"), "{json}");
+    assert!(!json.contains("\"interact\""), "{json}");
+}
+
+#[test]
+fn saving_writes_an_interaction_only_when_set() {
+    let block = model::shape_index("block").unwrap();
+    let mut editor = Editor::default();
+    editor.pieces.push(Piece {
+        id: 1,
+        shape: block,
+        pos: Vec2::ZERO,
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::TogglePause,
+    });
+    let json = level_json(&editor);
+    assert!(json.contains("\"interact\":\"togglePause\""), "{json}");
 }
 
 #[test]
@@ -157,6 +185,7 @@ fn copying_keeps_the_selected_piece() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     let mut editor = Editor::default();
     editor.pieces.push(piece);
@@ -185,6 +214,7 @@ fn pasting_makes_a_new_selected_copy_at_the_cursor() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     };
     let mut editor = Editor::default();
     editor.snap = false;
@@ -226,6 +256,7 @@ fn pasting_without_a_cursor_lands_beside_the_source() {
         trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
         trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
     });
     editor.selected = Some(1);
     copy_piece(&mut editor);
@@ -344,12 +375,14 @@ fn a_session_capture_restores_labels_and_groups() {
     let group = editor.group_node(GraphNode::Piece(1)).unwrap();
     editor.commit();
     assert!(editor.rename_node(GraphNode::Piece(1), "North crate"));
+    assert!(editor.outline.toggle_lock(1));
 
     let orbit = Orbit::default();
     let movers = Movers::default();
     let snapshot = editor.capture(&orbit, &movers);
     assert_eq!(snapshot.pieces[0].name.as_deref(), Some("North crate"));
     assert_eq!(snapshot.pieces[0].group, Some(group));
+    assert!(snapshot.pieces[0].locked);
     assert_eq!(snapshot.groups.len(), 1);
     assert_eq!(snapshot.undo.len(), 2);
     assert!(snapshot.undo[0].groups.is_empty());
@@ -366,6 +399,7 @@ fn a_session_capture_restores_labels_and_groups() {
     );
     assert_eq!(restored.node_label(GraphNode::Piece(1)), "North crate");
     assert_eq!(restored.outline.piece_parent(1), Some(group));
+    assert!(restored.outline.is_locked(1));
     assert_eq!(
         restored.outline.group(group).unwrap().name,
         format!("Group {group}")
@@ -382,8 +416,10 @@ fn the_debug_level_json_includes_labels_and_groups() {
     editor.pieces.push(test_piece(1));
     let group = editor.group_node(GraphNode::Piece(1)).unwrap();
     editor.rename_node(GraphNode::Piece(1), "North \"wall\"");
+    editor.outline.toggle_lock(1);
     let json = level_json(&editor);
     assert!(json.contains("\"name\":\"North \\\"wall\\\"\""), "{json}");
+    assert!(json.contains("\"locked\":true"), "{json}");
     assert!(json.contains(&format!("\"group\":{group}")), "{json}");
     assert!(json.contains("\"groups\":[{\"id\":"), "{json}");
     assert!(json.contains("\"collapsed\":false"), "{json}");

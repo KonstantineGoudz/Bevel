@@ -31,8 +31,13 @@ pub(super) fn level_json(editor: &Editor) -> String {
             } else {
                 ""
             };
+            let interact = if p.interact.is_none() {
+                String::new()
+            } else {
+                format!(",\"interact\":\"{}\"", p.interact.id())
+            };
             format!(
-                "{{\"id\":{},\"shape\":\"{}\",\"x\":{:.3},\"z\":{:.3},\"y\":{:.3},\"rotDeg\":{:.1},\"pitchDeg\":{:.1},\"rollDeg\":{:.1},\"dynamic\":{},\"damage\":{:.1}{name}{group}{locked}}}",
+                "{{\"id\":{},\"shape\":\"{}\",\"x\":{:.3},\"z\":{:.3},\"y\":{:.3},\"rotDeg\":{:.1},\"pitchDeg\":{:.1},\"rollDeg\":{:.1},\"dynamic\":{},\"damage\":{:.1}{interact}{name}{group}{locked}}}",
                 p.id,
                 shapes()[p.shape].id,
                 p.pos.x,
@@ -298,7 +303,7 @@ pub(super) fn persist(
 /// S-key manual save, split out of `interact` so that system stays under
 /// Bevy's 16-parameter limit while still seeing platform paths.
 pub(super) fn save_shortcut(
-    keys: Res<ButtonInput<KeyCode>>,
+    input: PlayerInput,
     mut editor: ResMut<Editor>,
     orbit: Res<Orbit>,
     movers: Res<Movers>,
@@ -314,10 +319,10 @@ pub(super) fn save_shortcut(
     if focus.get().is_some() || menu.open {
         return;
     }
-    if keys.just_pressed(KeyCode::KeyS) && !command_down(&keys) {
-        if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
-            copy_level_json(&mut editor, &mut clipboard);
-        } else if editor.mode == Mode::Build {
+    if input.just_pressed(Action::CopyJson) {
+        copy_level_json(&mut editor, &mut clipboard);
+    } else if input.just_pressed(Action::SaveLevel) {
+        if editor.mode == Mode::Build {
             save(
                 &mut editor,
                 &orbit,

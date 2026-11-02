@@ -25,15 +25,16 @@ use bevy::shape::InfinitePlane3d;
 use bevy::ui_widgets::{Activate, Button};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 
+use crate::controls::{Action, ClusterButton, Controls, PlayerInput};
+use crate::locomotion::{LocomotionInput, LocomotionState};
 use crate::mesh::{extrude, wedge};
 use crate::model::{
-    self, AnchorKind, CATEGORIES, HIT_PAD, PANEL_WIDTH, Piece, SNAP_THRESHOLD, SnapKind, Style,
-    shapes,
+    self, AnchorKind, CATEGORIES, HIT_PAD, InteractAction, PANEL_WIDTH, Piece, SNAP_THRESHOLD,
+    SnapKind, Style, shapes,
 };
 use crate::path;
 use crate::path_edit::{self, PathDrag, PathHandle, Plan, TangentSide};
 use crate::session;
-use crate::locomotion::{LocomotionInput, LocomotionState};
 use crate::statuses::Health;
 
 const PANEL_BG: Color = Color::srgb_u8(0x10, 0x16, 0x1e);
@@ -120,7 +121,9 @@ impl Plugin for EditorPlugin {
             .init_resource::<AddMenu>()
             .init_resource::<OutlinerState>()
             .init_resource::<OutlinerEdit>()
-            .add_systems(Startup, (load_session, setup).chain())
+            // Remappable controls, loaded from browser storage on web.
+            .insert_resource(crate::controls::Controls::load())
+            .add_systems(Startup, (load_session, setup, setup_wasm_search_input).chain())
             .add_systems(
                 Update,
                 (
@@ -137,6 +140,7 @@ impl Plugin for EditorPlugin {
                     move_movers,
                     character_move,
                     hazard_damage,
+                    handle_interact,
                     respawn_on_death,
                     manage_capture,
                     camera_control,
@@ -154,6 +158,8 @@ impl Plugin for EditorPlugin {
                 (
                     update_cursor,
                     sync_dynamic_pieces,
+                    touch_gizmo_fallback,
+                    sync_wasm_search_input,
                     update_add_menu,
                     save_shortcut,
                     interact,
@@ -448,6 +454,13 @@ struct GizmoDrag {
     last_raw: f32,
     /// Elevation applied last frame, kept while the pointer is still.
     last: f32,
+    /// Which pointer owns the drag. Desktop uses the mouse (driven from the
+    /// live cursor in `interact`); a finger drag is driven from pointer
+    /// events in `touch`, where there is no cursor while the finger is down.
+    pointer: PointerId,
+    /// Latest screen position of the owning pointer. Updated by the move
+    /// observers; only the touch path reads it.
+    screen: Vec2,
 }
 
 /// Blender-style modal transform: `G` for move, `R` for rotate.
@@ -500,6 +513,13 @@ struct TouchState {
     tap: Option<Vec2>,
     /// Set by the jump button, consumed by the movement system.
     jump: bool,
+    /// Set by the interact button, consumed by the interaction system.
+    interact: bool,
+    /// Toggled by the sprint cluster button; ORed with the Sprint action.
+    sprint: bool,
+    /// Toggled by the slide cluster button; ORed with the Slide action and
+    /// read as "crouch held" once slide becomes crouch.
+    slide: bool,
     /// Ignore canvas taps until this time; a UI button tap must not also place.
     suppress_until: f64,
     /// Last touch action and when it fired, for the same double-fire guard.
@@ -911,7 +931,14 @@ enum TouchAction {
     PrevShape,
     NextShape,
     Jump,
+    /// Player interaction (E key equivalent). Live in Play, like Jump.
+    Interact,
+    /// Remappable A/B/X/Y cluster button. Resolved through the Controls
+    /// touch map at press time.
+    Pad(ClusterButton),
     Course,
+    /// Open the Add (entity search) menu. Mobile-only; desktop uses F3.
+    Search,
     /// Copy the level JSON for debugging. This is not a level edit.
     CopyJson,
 }
@@ -957,6 +984,7 @@ mod gizmo;
 mod hazards;
 mod hud;
 mod input;
+mod interacts;
 mod movers;
 pub(crate) mod outline;
 mod outliner;
@@ -980,6 +1008,7 @@ use gizmo::*;
 use hazards::*;
 use hud::*;
 use input::*;
+use interacts::*;
 use movers::*;
 use outline::*;
 use outliner::*;

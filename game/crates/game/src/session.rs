@@ -129,6 +129,11 @@ pub struct SavedPiece {
     /// means "use the catalogue default" so untouched pieces stay small.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub damage: Option<f32>,
+    /// Interaction effect id (e.g. "togglePause"). Missing or unknown means
+    /// the piece is not interactable, so old saves and newer unknown actions
+    /// keep loading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interact: Option<String>,
     /// Parametric trigger volume size (width, length, height) for trigger shapes.
     /// Missing on older saves or non-trigger pieces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -343,6 +348,11 @@ impl From<&Piece> for SavedPiece {
             roll_deg: piece.roll.to_degrees(),
             dynamic: piece.dynamic,
             damage,
+            interact: if piece.interact.is_none() {
+                None
+            } else {
+                Some(piece.interact.id().to_owned())
+            },
             trigger_width,
             trigger_length,
             trigger_height,
@@ -996,6 +1006,13 @@ fn validate_piece(saved: SavedPiece) -> Result<Piece, LoadError> {
     let trigger_visible = saved
         .trigger_visible
         .unwrap_or(model::TRIGGER_DEFAULT_VISIBLE);
+    // Unknown interaction ids are ignored (not an error) so maps authored
+    // by newer versions keep loading; the piece is just not interactable.
+    let interact = saved
+        .interact
+        .as_deref()
+        .and_then(model::InteractAction::parse)
+        .unwrap_or_default();
 
     Ok(Piece {
         id: saved.id,
@@ -1012,6 +1029,7 @@ fn validate_piece(saved: SavedPiece) -> Result<Piece, LoadError> {
         trigger_alpha,
         trigger_color,
         trigger_visible,
+        interact,
     })
 }
 
@@ -1082,6 +1100,7 @@ mod tests {
             name: None,
             group: None,
             locked: false,
+            interact: None,
             rot_deg: 30.0,
             pitch_deg: -15.0,
             roll_deg: 10.0,
@@ -1260,6 +1279,7 @@ mod tests {
             name: None,
             group: None,
             locked: false,
+            interact: None,
             rot_deg: 0.0,
             pitch_deg: 0.0,
             roll_deg: 0.0,
@@ -1635,6 +1655,53 @@ mod tests {
     }
 
     #[test]
+    fn interact_round_trips_through_json() {
+        let mut piece = saved(1, "block", 0.0, 0.0);
+        piece.interact = Some("togglePause".into());
+        let snapshot = Snapshot {
+            version: 1,
+            pieces: vec![piece],
+            ..Default::default()
+        };
+        let json = snapshot.to_json();
+        assert!(json.contains("\"interact\":\"togglePause\""), "{json}");
+        let loaded = Snapshot::from_json(&json).unwrap().validate().unwrap();
+        assert_eq!(
+            loaded.pieces[0].interact,
+            model::InteractAction::TogglePause
+        );
+        // Saving again omits nothing: a real edit persists.
+        let resaved = SavedPiece::from(&loaded.pieces[0]);
+        assert_eq!(resaved.interact.as_deref(), Some("togglePause"));
+    }
+
+    #[test]
+    fn unedited_pieces_omit_interact_and_old_saves_load_without_it() {
+        let block = SavedPiece {
+            interact: None,
+            ..saved(1, "block", 0.0, 0.0)
+        };
+        let json = Snapshot {
+            version: 1,
+            pieces: vec![block],
+            ..Default::default()
+        }
+        .to_json();
+        assert!(!json.contains("interact"), "{json}");
+        let loaded = Snapshot::from_json(&json).unwrap().validate().unwrap();
+        assert!(loaded.pieces[0].interact.is_none());
+
+        // Unknown future actions are ignored, not fatal.
+        let future = Snapshot::from_json(
+            r#"{"version":1,"pieces":[{"id":1,"shape":"block","x":0,"z":0,"elevation":0,"rotDeg":0,"interact":"teleport"}]}"#,
+        )
+        .unwrap()
+        .validate()
+        .unwrap();
+        assert!(future.pieces[0].interact.is_none());
+    }
+
+    #[test]
     fn labels_groups_and_membership_round_trip() {
         let snapshot = Snapshot {
             version: 1,
@@ -1643,6 +1710,7 @@ mod tests {
                     name: Some("North wall".into()),
                     group: Some(10),
                     locked: true,
+                    interact: None,
                     ..saved(1, "wall", 0.0, 0.0)
                 },
                 SavedPiece {

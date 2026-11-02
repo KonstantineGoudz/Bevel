@@ -6,18 +6,21 @@ pub(super) fn transform_gizmo(gizmos: &mut Gizmos, piece: &Piece, shape: &model:
     let origin = gizmo_origin(piece, shape);
     let (reach, ring) = gizmo_frame(piece, shape);
 
+    // Each axis runs both ways from the origin so a piece can be shoved
+    // from either side; both ends get an arrowhead pointing outward.
+    // Arrow heads are diamonds so they still read edge-on, scaled to the
+    // handle. A vertical arrow uses X for its visible width.
     for (dir, colour) in [(Vec3::X, GIZMO_X), (Vec3::Y, GIZMO_Y), (Vec3::Z, GIZMO_Z)] {
-        let end = origin + dir * reach;
-        gizmos.line(origin, end, colour);
-        // Arrow heads as diamonds so they still read edge-on, scaled to the
-        // handle. A vertical arrow uses X as its visible width.
-        let back = end - dir * (reach * GIZMO_ARROW_BACK);
-        let side = if dir == Vec3::Y {
-            Vec3::X * (reach * GIZMO_ARROW_SIDE)
-        } else {
-            Vec3::new(dir.z, 0.0, dir.x) * (reach * GIZMO_ARROW_SIDE)
-        };
-        closed(gizmos, &[back + side, end, back - side], colour);
+        gizmos.line(origin - dir * reach, origin + dir * reach, colour);
+        for (end, outward) in [(origin + dir * reach, dir), (origin - dir * reach, -dir)] {
+            let back = end - outward * (reach * GIZMO_ARROW_BACK);
+            let side = if dir == Vec3::Y {
+                Vec3::X * (reach * GIZMO_ARROW_SIDE)
+            } else {
+                Vec3::new(dir.z, 0.0, dir.x) * (reach * GIZMO_ARROW_SIDE)
+            };
+            closed(gizmos, &[back + side, end, back - side], colour);
+        }
     }
 
     for (a, b, colour) in [
@@ -67,8 +70,9 @@ pub(super) fn gizmo_plane_corners(origin: Vec3, a: Vec3, b: Vec3, reach: f32) ->
     ]
 }
 
-/// World points that identify each draggable handle. Axis handles use their
-/// tip; plane handles use their centre.
+/// World points that identify each draggable handle. Axis handles list their
+/// positive tip; the hit test mirrors it through the origin so the negative
+/// end grabs the same handle. Plane handles use their centre.
 pub(super) fn gizmo_handle_points(piece: &Piece, shape: &model::Shape) -> Vec<(GizmoHandle, Vec3)> {
     let origin = gizmo_origin(piece, shape);
     let (reach, _) = gizmo_frame(piece, shape);
@@ -158,13 +162,27 @@ pub(super) fn gizmo_takes_pointer(editor: &Editor, touch_tap: bool) -> bool {
     object_editing_allowed(editor.mode) && editor.actor_tool.is_none() && !touch_tap
 }
 
-/// Which gizmo handle is under the pointer, if any.
+/// Whether a press may start a gizmo drag. This is the shared gate for the
+/// desktop mouse path (`interact`) and the touch path (`on_path_press`): a
+/// selected piece, no armed tool, and no other gesture in flight.
+pub(super) fn gizmo_grab_allowed(editor: &Editor, gesture_dragging: bool) -> bool {
+    object_editing_allowed(editor.mode)
+        && editor.actor_tool.is_none()
+        && editor.selected.is_some()
+        && !gesture_dragging
+        && editor.gizmo_drag.is_none()
+}
+
+/// Which gizmo handle is under the pointer, if any. Touch gets a fingertip
+/// tolerance (matching the path-handle hit test); the mouse keeps the exact
+/// one so dense handles stay distinguishable.
 pub(super) fn gizmo_hit(
     editor: &Editor,
     camera: &Camera,
     camera_transform: &GlobalTransform,
     screen: Vec2,
     ray: Ray3d,
+    touch: bool,
 ) -> Option<GizmoHandle> {
     let id = editor.selected?;
     let piece = editor.pieces.iter().find(|p| p.id == id)?;
@@ -196,15 +214,21 @@ pub(super) fn gizmo_hit(
     }
 
     let mut best: Option<(f32, GizmoHandle)> = None;
+    // Fingertips need a bigger target than a mouse cursor.
+    let hit_radius = if touch { 24.0 } else { GIZMO_HANDLE_HIT };
     if let Ok(origin_screen) = camera.world_to_viewport(camera_transform, origin) {
         for (handle, point) in gizmo_handle_points(piece, shape) {
             if !matches!(handle, GizmoHandle::X | GizmoHandle::Y | GizmoHandle::Z) {
                 continue;
             }
-            if let Some(end_screen) = project(point) {
-                let distance = point_segment_distance(screen, origin_screen, end_screen);
-                if distance < GIZMO_HANDLE_HIT && best.is_none_or(|(d, _)| distance < d) {
-                    best = Some((distance, handle));
+            // Both ends of the axis grab the same handle; the negative tip
+            // mirrors the positive one through the origin.
+            for tip in [point, 2.0 * origin - point] {
+                if let Some(end_screen) = project(tip) {
+                    let distance = point_segment_distance(screen, origin_screen, end_screen);
+                    if distance < hit_radius && best.is_none_or(|(d, _)| distance < d) {
+                        best = Some((distance, handle));
+                    }
                 }
             }
         }
@@ -229,6 +253,48 @@ pub(super) fn gizmo_hit(
     }
 
     best.map(|(_, handle)| handle)
+}
+
+/// Start a gizmo drag from a press at `screen`: hit-test the selected
+/// piece's handles and resolve the world grab point. Shared by the desktop
+/// mouse path and the touch path so both grab the same handles. Returns the
+/// handle, the grabbed piece snapshot, and the grab point.
+pub(super) fn gizmo_grab(
+    editor: &Editor,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    screen: Vec2,
+    ray: Ray3d,
+    touch: bool,
+) -> Option<(GizmoHandle, Piece, Vec3)> {
+    let handle = gizmo_hit(editor, camera, camera_transform, screen, ray, touch)?;
+    let start = editor
+        .selected
+        .and_then(|id| editor.pieces.iter().find(|p| p.id == id).copied())?;
+    let shape = shapes().get(start.shape)?;
+    let grab = gizmo_drag_point(ray, handle, gizmo_origin(&start, shape))?;
+    Some((handle, start, grab))
+}
+
+/// Finish the gizmo drag owned by `pointer`, if any. Mirrors the mouse
+/// release in `interact`: the commit ran at grab time, so mark the finished
+/// pose dirty. Also kills the release tap and suppresses canvas taps briefly,
+/// so lifting the finger does not reselect the piece it just moved.
+pub(super) fn release_gizmo_drag(
+    editor: &mut Editor,
+    touch: &mut TouchState,
+    pointer: PointerId,
+    now: f64,
+) {
+    if editor
+        .gizmo_drag
+        .is_some_and(|drag| drag.pointer == pointer)
+    {
+        editor.hard_dirty = true;
+        editor.gizmo_drag = None;
+        touch.tap = None;
+        touch.suppress_until = touch.suppress_until.max(now + 0.25);
+    }
 }
 
 /// The point on the drag line or plane that the pointer ray meets. Quantities

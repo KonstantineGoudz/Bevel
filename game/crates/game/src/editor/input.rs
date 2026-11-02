@@ -196,7 +196,10 @@ pub(super) fn set_mode(editor: &mut Editor, mode: Mode) {
             editor.drag = None;
             editor.gizmo_drag = None;
             editor.note = if editor.character.is_some() {
-                "playing: WASD / stick moves, Space jumps, hold Left Ctrl in the air to slide on landing"
+                // Key names live in the Controls settings, not here: the
+                // defaults are WASD / arrows / stick to move, Space to jump,
+                // E to interact, hold Left Ctrl in the air to slide on landing.
+                "playing: move / jump / interact (see Controls on the home screen)"
             } else {
                 "playing: place a character to control one"
             };
@@ -216,11 +219,16 @@ pub(super) fn palette_is_authoring(action: PaletteAction) -> bool {
     )
 }
 
-/// Camera, jump and the mode switch stay live in Play; the rest author.
+/// Camera, jump, interact and the mode switch stay live in Play; the rest author.
 pub(super) fn touch_is_authoring(action: TouchAction) -> bool {
     !matches!(
         action,
-        TouchAction::Play | TouchAction::View | TouchAction::Jump | TouchAction::CopyJson
+        TouchAction::Play
+            | TouchAction::View
+            | TouchAction::Jump
+            | TouchAction::Interact
+            | TouchAction::Pad(_)
+            | TouchAction::CopyJson
     )
 }
 
@@ -232,7 +240,9 @@ pub(super) fn command_down(keys: &ButtonInput<KeyCode>) -> bool {
         || keys.pressed(KeyCode::SuperRight)
 }
 
-/// Cmd/Ctrl+Shift+Z or Cmd/Ctrl+Y.
+/// Cmd/Ctrl+Shift+Z or Cmd/Ctrl+Y. Covered by the Redo action in live
+/// code; kept for the shortcut test below.
+#[allow(dead_code)]
 pub(super) fn redo_requested(keys: &ButtonInput<KeyCode>) -> bool {
     if !command_down(keys) {
         return false;
@@ -255,8 +265,7 @@ pub(super) fn interact(
     camera: Single<(&Camera, &Transform)>,
     spatial_query: SpatialQuery,
     player: Query<Entity, With<CharacterVisual>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
+    input: PlayerInput,
     time: Res<Time>,
     mut movers: ResMut<Movers>,
 ) {
@@ -286,8 +295,9 @@ pub(super) fn interact(
     let over_palette = !touch.enabled && cursor.screen.is_some_and(|p| p.x <= PANEL_WIDTH);
     if keyboard_transform(
         &mut editor,
-        &keys,
-        &mouse,
+        &input.controls,
+        &input.keys,
+        &input.mouse,
         &cursor,
         allow_transform,
         over_palette,
@@ -297,24 +307,23 @@ pub(super) fn interact(
 
     // P flips between authoring and play. Toggle before the cursor check so it
     // works even when the pointer leaves the window.
-    if keys.just_pressed(KeyCode::KeyP) {
+    if input.just_pressed(Action::TogglePlay) {
         let mode = editor.mode.toggled();
         set_mode(&mut editor, mode);
         return;
     }
     let playing = !object_editing_allowed(editor.mode);
-    if playing && keys.just_pressed(KeyCode::Escape) {
+    if playing && input.just_pressed(Action::Back) {
         set_mode(&mut editor, Mode::Build);
         return;
     }
 
     // Object copy/paste works from the keyboard even when the pointer is off
     // the grid. Paste falls back to one hex beside the source in that case.
-    let command = command_down(&keys);
-    if !playing && command && keys.just_pressed(KeyCode::KeyC) {
+    if !playing && input.just_pressed(Action::CopySel) {
         copy_piece(&mut editor);
     }
-    if !playing && command && keys.just_pressed(KeyCode::KeyV) && editor.actor_tool.is_none() {
+    if !playing && input.just_pressed(Action::Paste) && editor.actor_tool.is_none() {
         paste_piece(&mut editor, cursor.world);
     }
 
@@ -322,7 +331,7 @@ pub(super) fn interact(
         return;
     };
 
-    if !playing && keys.just_pressed(KeyCode::Escape) {
+    if !playing && input.just_pressed(Action::Back) {
         editor.tool = None;
         editor.actor_tool = None;
         editor.selected = None;
@@ -334,27 +343,28 @@ pub(super) fn interact(
         editor.note = "Click a component, then the grid";
     }
 
-    if keys.just_pressed(KeyCode::Enter) && editor.actor_tool == Some(ActorTool::Plan) {
+    if input.just_pressed(Action::WalkPlan) && editor.actor_tool == Some(ActorTool::Plan) {
         walk_from_plan(&mut editor, &nav, &spatial_query, &surface_filter);
     }
 
-    if !playing && !command && keys.just_pressed(KeyCode::KeyC) {
+    if !playing && input.just_pressed(Action::PlaceCharacter) {
         editor.tool = None;
         editor.actor_tool = Some(ActorTool::Place);
         editor.ghost = None;
         editor.note = "click the grid to place the character";
     }
 
-    if !playing && !command && keys.just_pressed(KeyCode::KeyR) {
-        let step = if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
-            -model::ANCHOR_STEP
-        } else {
-            model::ANCHOR_STEP
-        };
+    if !playing && input.just_pressed(Action::RotatePiece) {
+        let step =
+            if input.keys.pressed(KeyCode::ShiftLeft) || input.keys.pressed(KeyCode::ShiftRight) {
+                -model::ANCHOR_STEP
+            } else {
+                model::ANCHOR_STEP
+            };
         rotate_piece(&mut editor, step);
     }
 
-    if !playing && (keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::Backspace)) {
+    if !playing && input.just_pressed(Action::DeletePiece) {
         // Motion waypoints win while the Motion tool is armed; otherwise the
         // whole piece goes.
         if editor.actor_tool == Some(ActorTool::Platform)
@@ -375,14 +385,9 @@ pub(super) fn interact(
         }
     }
 
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    if !playing && command && keys.just_pressed(KeyCode::KeyZ) {
-        if shift {
-            editor.redo();
-        } else {
-            editor.undo();
-        }
-    } else if !playing && redo_requested(&keys) {
+    if !playing && input.just_pressed(Action::Undo) {
+        editor.undo();
+    } else if !playing && input.just_pressed(Action::Redo) {
         editor.redo();
     }
 
@@ -416,7 +421,7 @@ pub(super) fn interact(
 
     // Mouse clicks work in both layers; raw touch taps arrive in `cursor.tap`.
     // A tap that armed a UI button is filtered by `tap_allowed`.
-    let clicked = (cursor.tap || mouse.just_pressed(MouseButton::Left))
+    let clicked = (cursor.tap || input.just_pressed(Action::PrimaryClick))
         && tap_allowed(time.elapsed_secs_f64(), &touch);
 
     // A handle drag owns the pointer; do not also place or select.
@@ -429,13 +434,9 @@ pub(super) fn interact(
     // Gizmo handles take priority over selecting whatever is under them.
     if gizmo_takes_pointer(&editor, touch.tap.is_some())
         && let (Some(screen), Some(ray)) = (cursor.screen, cursor.ray)
-        && mouse.just_pressed(MouseButton::Left)
-        && let Some(handle) = gizmo_hit(&editor, camera, &camera_global, screen, ray)
-        && let Some(start) = editor
-            .selected
-            .and_then(|id| editor.pieces.iter().find(|p| p.id == id).copied())
-        && let Some(shape) = shapes().get(start.shape)
-        && let Some(grab) = gizmo_drag_point(ray, handle, gizmo_origin(&start, shape))
+        && input.just_pressed(Action::PrimaryClick)
+        && let Some((handle, start, grab)) =
+            gizmo_grab(&editor, camera, &camera_global, screen, ray, false)
     {
         editor.commit();
         editor.gizmo_drag = Some(GizmoDrag {
@@ -445,15 +446,17 @@ pub(super) fn interact(
             start,
             last_raw: start.elevation,
             last: start.elevation,
+            pointer: PointerId::Mouse,
+            screen,
         });
         editor.ghost = None;
     }
 
     if let Some(drag) = editor.gizmo_drag {
-        if mouse.pressed(MouseButton::Left) {
+        if input.pressed(Action::PrimaryClick) {
             apply_gizmo_drag(&mut editor, drag, cursor.ray);
         }
-        if mouse.just_released(MouseButton::Left) {
+        if input.just_released(Action::PrimaryClick) {
             // `commit` ran when the drag started, before the pointer moved. Mark
             // the finished pose dirty so autosave captures the actual rotation,
             // not the snapshot from the first frame of the drag.
@@ -481,6 +484,7 @@ pub(super) fn interact(
             trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
             trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
         };
         let snap = model::snap_piece(
             &raw,
@@ -515,6 +519,7 @@ pub(super) fn interact(
                 trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
                 trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
                 trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+                interact: crate::model::InteractAction::None,
             });
             editor.selected = Some(id);
             editor.note = match snap.kind {
@@ -553,7 +558,8 @@ pub(super) fn interact(
         if clicked && orbit.mode != ViewMode::First {
             let (target, height) = surface_target(&cursor, &spatial_query, &surface_filter, world);
             let cell = resolve_cell(&editor.pieces, target, height);
-            let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+            let shift =
+                input.keys.pressed(KeyCode::ShiftLeft) || input.keys.pressed(KeyCode::ShiftRight);
             let append = append_for(shift, touch.append);
             add_waypoint(
                 &mut editor,
@@ -584,7 +590,8 @@ pub(super) fn interact(
         if clicked {
             let (target, height) = surface_target(&cursor, &spatial_query, &surface_filter, world);
             let cell = resolve_cell(&editor.pieces, target, height);
-            let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+            let shift =
+                input.keys.pressed(KeyCode::ShiftLeft) || input.keys.pressed(KeyCode::ShiftRight);
             let append = append_for(shift, touch.append);
             let start_walk = click_starts_walk(true, editor.walk.is_some());
             add_waypoint(
@@ -640,7 +647,8 @@ pub(super) fn interact(
         if click_routes(playing, orbit.mode, editor.character.is_some()) {
             let (target, height) = surface_target(&cursor, &spatial_query, &surface_filter, world);
             let cell = resolve_cell(&editor.pieces, target, height);
-            let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+            let shift =
+                input.keys.pressed(KeyCode::ShiftLeft) || input.keys.pressed(KeyCode::ShiftRight);
             let append = orbit.mode == ViewMode::Top && append_for(shift, touch.append);
             add_waypoint(
                 &mut editor,
@@ -683,7 +691,7 @@ pub(super) fn interact(
         }
     }
 
-    if !playing && mouse.pressed(MouseButton::Left) {
+    if !playing && input.pressed(Action::PrimaryClick) {
         if let Some(drag) = editor.drag {
             let base = cursor
                 .ray
@@ -694,7 +702,7 @@ pub(super) fn interact(
     }
 
     if !playing
-        && mouse.just_released(MouseButton::Left)
+        && input.just_released(Action::PrimaryClick)
         && let Some(drag) = editor.drag
     {
         if drag.moved {
