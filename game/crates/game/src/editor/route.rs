@@ -269,22 +269,88 @@ pub(super) fn tangent_hit(
     best.map(|(_, waypoint, side)| (waypoint, side))
 }
 
+/// Which mover waypoint/tangent handle is under a screen point, if any.
+/// Mover handles win while the Motion tool is armed on a selected piece with
+/// a path; indices double as handle ids.
+pub(super) fn mover_handle_at(
+    editor: &Editor,
+    movers: &Movers,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    screen: Vec2,
+    radius: f32,
+) -> Option<PathHandle> {
+    if editor.actor_tool != Some(ActorTool::Platform) {
+        return None;
+    }
+    let id = editor.selected?;
+    let mover = movers.map.get(&id)?;
+    if mover.waypoints.len() < 2 {
+        return None;
+    }
+    let piece = editor.pieces.iter().find(|p| p.id == id)?;
+    let y = piece.elevation + 0.06;
+    let mut best: Option<(f32, PathHandle)> = None;
+    let mut consider = |screen_pos: Vec2, handle: PathHandle| {
+        let at = Vec3::new(screen_pos.x, y, screen_pos.y);
+        let Ok(target) = camera.world_to_viewport(camera_transform, at) else {
+            return;
+        };
+        if !within_radius(screen, target, radius) {
+            return;
+        }
+        let distance = screen.distance(target);
+        if best.is_none_or(|(best_distance, _)| distance < best_distance) {
+            best = Some((distance, handle));
+        }
+    };
+    for (index, waypoint) in mover.waypoints.iter().enumerate() {
+        let id = index as u32;
+        consider(waypoint.pos, PathHandle::Waypoint(id));
+        if let Some(incoming) = waypoint.incoming {
+            consider(
+                incoming,
+                PathHandle::Tangent {
+                    waypoint: id,
+                    side: TangentSide::Incoming,
+                },
+            );
+        }
+        if let Some(outgoing) = waypoint.outgoing {
+            consider(
+                outgoing,
+                PathHandle::Tangent {
+                    waypoint: id,
+                    side: TangentSide::Outgoing,
+                },
+            );
+        }
+    }
+    best.map(|(_, handle)| handle)
+}
+
 /// Which waypoint/tangent handle is under a screen point.
 pub(super) fn path_handle_at(
     editor: &Editor,
+    movers: &Movers,
     camera: &Camera,
     camera_transform: &GlobalTransform,
     screen: Vec2,
     touch_enabled: bool,
     orbit: &Orbit,
 ) -> Option<PathHandle> {
+    let radius = if touch_enabled { 24.0 } else { 10.0 };
+    // Motion handles belong to the selected piece's path and are only live
+    // while the Motion tool is armed.
+    if editor.actor_tool == Some(ActorTool::Platform) {
+        return mover_handle_at(editor, movers, camera, camera_transform, screen, radius);
+    }
     // Play can still reshape the route handles; object editing is what Play
     // leaves behind.
     let editing = editor.actor_tool == Some(ActorTool::Plan) || editor.mode == Mode::Play;
     if !editing || orbit.mode != ViewMode::Top {
         return None;
     }
-    let radius = if touch_enabled { 24.0 } else { 10.0 };
     if let Some(id) = waypoint_hit(editor, camera, camera_transform, screen, radius) {
         return Some(PathHandle::Waypoint(id));
     }

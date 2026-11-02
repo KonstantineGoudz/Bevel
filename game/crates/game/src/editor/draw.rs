@@ -80,6 +80,7 @@ pub(super) fn draw(
                 roll: 0.0,
                 elevation: 0.0,
                 dynamic: false,
+                trigger: crate::model::Trigger::harmless(),
             };
             anchors(&mut gizmos, &piece, shape);
         }
@@ -165,13 +166,29 @@ pub(super) fn draw(
                 gizmos.linestrip(line, colour);
             }
         }
-        for waypoint in &mover.waypoints {
+        for (index, waypoint) in mover.waypoints.iter().enumerate() {
             let at = Vec3::new(waypoint.pos.x, y, waypoint.pos.y);
+            let selected_waypoint =
+                editor.selected == Some(piece.id) && mover.selected == Some(index);
+            let waypoint_colour = if selected_waypoint { AMBER } else { colour };
             gizmos.circle(
                 Isometry3d::new(at, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
                 0.12,
-                colour,
+                waypoint_colour,
             );
+            gizmos.sphere(Isometry3d::new(at, Quat::IDENTITY), 0.05, waypoint_colour);
+            // Tangent handles for the selected piece's path, like the plan.
+            if editor.selected == Some(piece.id) {
+                for control in [waypoint.incoming, waypoint.outgoing].into_iter().flatten() {
+                    let handle = Vec3::new(control.x, y, control.y);
+                    gizmos.line(at, handle, waypoint_colour);
+                    gizmos.sphere(
+                        Isometry3d::new(handle, Quat::IDENTITY),
+                        0.05,
+                        waypoint_colour,
+                    );
+                }
+            }
         }
     }
 

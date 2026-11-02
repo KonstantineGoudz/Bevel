@@ -99,6 +99,7 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         },
         // 270 deg makes the ramp rise along +x.
         Piece {
@@ -110,6 +111,7 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         },
         Piece {
             id: 3,
@@ -120,6 +122,7 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         },
         Piece {
             id: 4,
@@ -130,6 +133,7 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         },
     ];
 
@@ -139,6 +143,8 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
         // Forward along +x with this yaw convention.
         yaw: -std::f32::consts::FRAC_PI_2,
         vy: 0.0,
+        hv: Vec2::ZERO,
+        ride_vel: Vec2::ZERO,
         grounded: true,
         health: crate::statuses::Health::default(),
     };

@@ -117,6 +117,8 @@ impl Plugin for EditorPlugin {
             .init_resource::<DamageClock>()
             .init_resource::<Movers>()
             .init_resource::<AddMenu>()
+            .init_resource::<OutlinerState>()
+            .init_resource::<OutlinerEdit>()
             .add_systems(Startup, (load_session, setup).chain())
             .add_systems(
                 Update,
@@ -163,13 +165,27 @@ impl Plugin for EditorPlugin {
             .add_systems(
                 Update,
                 (
+                    outliner_shortcuts,
+                    sync_outliner_selection,
+                    apply_outliner_edit,
+                    sync_outliner_rows,
+                    sync_outliner_fields,
+                    update_outliner_rows,
+                    outliner_scroll,
+                )
+                    .chain()
+                    .after(sync_visuals),
+            )
+            .add_systems(
+                Update,
+                (
                     sync_properties_panel,
                     update_palette,
                     sync_path_actions,
                     update_touch_buttons,
                     update_status,
                     update_touch_status,
-                    update_health_hud,
+                    update_character_status,
                     draw,
                     autosave_session,
                 )
@@ -178,7 +194,8 @@ impl Plugin for EditorPlugin {
             )
             .add_observer(on_palette_activate)
             .add_observer(on_touch_button)
-            .add_observer(on_add_menu_item);
+            .add_observer(on_add_menu_item)
+            .add_observer(on_outliner_action);
     }
 }
 
@@ -190,6 +207,8 @@ impl Plugin for EditorPlugin {
 struct Editor {
     session: Option<String>,
     pieces: Vec<Piece>,
+    /// User labels, groups, and group membership layered over the pieces.
+    outline: SceneOutline,
     tool: Option<usize>,
     actor_tool: Option<ActorTool>,
     /// Build authors the level; Play hands the capsule to the player.
@@ -208,8 +227,8 @@ struct Editor {
     drag: Option<Drag>,
     gizmo_drag: Option<GizmoDrag>,
     keyboard_transform: Option<KeyboardTransform>,
-    undo: Vec<Vec<Piece>>,
-    redo: Vec<Vec<Piece>>,
+    undo: Vec<LevelState>,
+    redo: Vec<LevelState>,
     /// Set by any change to the level itself, including undo and redo.
     hard_dirty: bool,
     /// Set by changes that are not level edits.
@@ -224,6 +243,14 @@ struct Editor {
     seen_nav: u64,
     /// One pending platform waypoint from the Motion tool, drained by movers.
     platform_request: Option<(u32, Vec2)>,
+}
+
+/// One undo step: the level geometry plus its authoring metadata, so grouping
+/// and labels undo alongside placement, transforms and deletes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct LevelState {
+    pub(crate) pieces: Vec<Piece>,
+    pub(crate) outline: SceneOutline,
 }
 
 #[derive(Clone, PartialEq)]
@@ -246,6 +273,7 @@ impl Default for Editor {
         Self {
             session: None,
             pieces: Vec::new(),
+            outline: SceneOutline::default(),
             tool: None,
             actor_tool: None,
             mode: Mode::Build,
@@ -293,8 +321,30 @@ pub(crate) struct Character {
     pub(crate) yaw: f32,
     /// Vertical velocity from the physics step.
     pub(crate) vy: f32,
+    /// Horizontal velocity in world XZ (`x` = world x, `y` = world z).
+    /// Ground control drives this toward the wish velocity; in the air it
+    /// carries inertia and only gains limited strafing acceleration.
+    pub(crate) hv: Vec2,
+    /// Platform velocity underfoot, stamped by `move_movers` each frame and
+    /// zero when not riding. A jump adds this to `hv` so leaps inherit the
+    /// ride; landing subtracts it back so repeated hops cannot stack speed.
+    pub(crate) ride_vel: Vec2,
     pub(crate) grounded: bool,
     pub(crate) health: Health,
+}
+
+impl Character {
+    /// Velocity in world metres per second: `x`/`z` horizontal, `y` vertical.
+    /// The platform underfoot is folded in, so a rider shows its world motion.
+    pub(crate) fn velocity(self) -> Vec3 {
+        let horizontal = self.hv + self.ride_vel;
+        Vec3::new(horizontal.x, self.vy, horizontal.y)
+    }
+
+    /// Speed in metres per second, ignoring direction.
+    pub(crate) fn speed(self) -> f32 {
+        self.velocity().length()
+    }
 }
 
 /// A routed path with arc length, so the walker moves at a constant speed.
@@ -331,6 +381,10 @@ struct Ghost {
 struct Drag {
     id: u32,
     offset: Vec2,
+    /// Height of the horizontal plane the drag moves in. Fixed at grab time
+    /// so the piece tracks the pointer 1:1 instead of sliding with the
+    /// ground-plane projection when the piece is elevated.
+    plane: f32,
     moved: bool,
 }
 
@@ -619,19 +673,21 @@ impl Editor {
         session::Snapshot {
             version: session::SNAPSHOT_VERSION,
             next_id: Some(self.next_id),
-            pieces: self.pieces.iter().map(session::SavedPiece::from).collect(),
+            pieces: self
+                .pieces
+                .iter()
+                .map(|piece| session::SavedPiece::from_piece(piece, &self.outline))
+                .collect(),
+            groups: self
+                .outline
+                .groups
+                .iter()
+                .map(session::SavedGroup::from)
+                .collect(),
             character: self.character.as_ref().map(session::SavedCharacter::from),
             camera: Some(session::SavedCamera::from(orbit)),
-            undo: self
-                .undo
-                .iter()
-                .map(|pieces| pieces.iter().map(session::SavedPiece::from).collect())
-                .collect(),
-            redo: self
-                .redo
-                .iter()
-                .map(|pieces| pieces.iter().map(session::SavedPiece::from).collect())
-                .collect(),
+            undo: self.undo.iter().map(session::SavedLevel::from).collect(),
+            redo: self.redo.iter().map(session::SavedLevel::from).collect(),
             platforms: movers
                 .map
                 .iter()
@@ -640,13 +696,10 @@ impl Editor {
         }
     }
 
-    fn apply_loaded(
-        &mut self,
-        orbit: &mut Orbit,
-        movers: &mut Movers,
-        loaded: session::Loaded,
-    ) {
+    fn apply_loaded(&mut self, orbit: &mut Orbit, movers: &mut Movers, loaded: session::Loaded) {
         self.pieces = loaded.pieces;
+        self.outline = loaded.outline;
+        self.outline.bump();
         self.character = loaded.character;
         self.undo = loaded.undo;
         self.redo = loaded.redo;
@@ -682,6 +735,8 @@ impl Editor {
         self.next_id = base + pieces.len() as u32;
 
         self.pieces = pieces;
+        self.outline = SceneOutline::default();
+        self.outline.bump();
         self.character = Some(character);
         self.selected = None;
         self.ghost = None;
@@ -699,8 +754,15 @@ impl Editor {
         self.note = "course: walk straight, up the ramp, over the block, drop";
     }
 
+    fn snapshot(&self) -> LevelState {
+        LevelState {
+            pieces: self.pieces.clone(),
+            outline: self.outline.clone(),
+        }
+    }
+
     fn commit(&mut self) {
-        self.undo.push(self.pieces.clone());
+        self.undo.push(self.snapshot());
         if self.undo.len() > session::MAX_HISTORY {
             self.undo.remove(0);
         }
@@ -710,10 +772,15 @@ impl Editor {
 
     fn undo(&mut self) {
         if let Some(prev) = self.undo.pop() {
-            self.redo.push(std::mem::replace(&mut self.pieces, prev));
+            let revision = self.outline.revision;
+            self.redo.push(self.snapshot());
             if self.redo.len() > session::MAX_HISTORY {
                 self.redo.remove(0);
             }
+            self.pieces = prev.pieces;
+            self.outline = prev.outline;
+            // Keep the UI's rebuild counter monotonic across history moves.
+            self.outline.revision = revision.wrapping_add(1);
             self.selected = None;
             self.hard_dirty = true;
         }
@@ -721,10 +788,14 @@ impl Editor {
 
     fn redo(&mut self) {
         if let Some(next) = self.redo.pop() {
-            self.undo.push(std::mem::replace(&mut self.pieces, next));
+            let revision = self.outline.revision;
+            self.undo.push(self.snapshot());
             if self.undo.len() > session::MAX_HISTORY {
                 self.undo.remove(0);
             }
+            self.pieces = next.pieces;
+            self.outline = next.outline;
+            self.outline.revision = revision.wrapping_add(1);
             self.selected = None;
             self.hard_dirty = true;
         }
@@ -758,7 +829,6 @@ enum PaletteAction {
     Character,
     Path,
     Plan,
-    Platform,
     Walk,
     Smooth,
     Course,
@@ -807,7 +877,6 @@ enum TouchAction {
     Redo,
     Path,
     Plan,
-    Platform,
     Add,
     Walk,
     Smooth,
@@ -852,8 +921,8 @@ struct Kit {
     character_collider: Collider,
 }
 
-mod camera;
 mod add_menu;
+mod camera;
 mod colliders;
 mod draw;
 mod editing;
@@ -862,6 +931,8 @@ mod hazards;
 mod hud;
 mod input;
 mod movers;
+pub(crate) mod outline;
+mod outliner;
 mod overlay;
 mod picking;
 mod properties;
@@ -873,8 +944,8 @@ mod transform;
 mod visuals;
 mod walking;
 
-use camera::*;
 use add_menu::*;
+use camera::*;
 use colliders::*;
 use draw::*;
 use editing::*;
@@ -883,6 +954,8 @@ use hazards::*;
 use hud::*;
 use input::*;
 use movers::*;
+use outline::*;
+use outliner::*;
 use overlay::*;
 use picking::*;
 use properties::*;

@@ -36,6 +36,8 @@ fn a_successful_save_refreshes_the_saved_pose_and_clock() {
         feet: 0.5,
         yaw: 0.75,
         vy: 3.0,
+        hv: Vec2::ZERO,
+        ride_vel: Vec2::ZERO,
         grounded: true,
         health: crate::statuses::Health::default(),
     };
@@ -98,6 +100,7 @@ fn saving_writes_each_pieces_height() {
         roll: 0.0,
         elevation: 1.25,
         dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
     });
     let json = level_json(&editor);
     assert!(json.contains("\"y\":1.250"), "{json}");
@@ -116,6 +119,7 @@ fn saving_writes_each_pieces_full_rotation() {
         roll: 10.0_f32.to_radians(),
         elevation: 0.0,
         dynamic: true,
+        trigger: crate::model::Trigger::harmless(),
     });
     let json = level_json(&editor);
     assert!(json.contains("\"rotDeg\":30.0"), "{json}");
@@ -136,6 +140,7 @@ fn copying_keeps_the_selected_piece() {
         roll: 0.0,
         elevation: 1.5,
         dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
     };
     let mut editor = Editor::default();
     editor.pieces.push(piece);
@@ -158,6 +163,7 @@ fn pasting_makes_a_new_selected_copy_at_the_cursor() {
         roll: 0.0,
         elevation: 1.5,
         dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
     };
     let mut editor = Editor::default();
     editor.snap = false;
@@ -193,6 +199,7 @@ fn pasting_without_a_cursor_lands_beside_the_source() {
         roll: 0.0,
         elevation: 0.0,
         dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
     });
     editor.selected = Some(1);
     copy_piece(&mut editor);
@@ -271,8 +278,8 @@ fn both_history_stacks_are_capped_at_sixty() {
         editor.pieces.push(test_piece(id));
     }
     assert_eq!(editor.undo.len(), 60);
-    assert_eq!(editor.undo[0].len(), 10);
-    assert_eq!(editor.undo[59].len(), 69);
+    assert_eq!(editor.undo[0].pieces.len(), 10);
+    assert_eq!(editor.undo[59].pieces.len(), 69);
     for _ in 0..70 {
         editor.undo();
     }
@@ -296,7 +303,62 @@ fn edits_and_history_moves_mark_the_session_dirty() {
 #[test]
 fn the_course_reset_clears_redo() {
     let mut editor = Editor::default();
-    editor.redo.push(vec![test_piece(1)]);
+    editor.redo.push(LevelState {
+        pieces: vec![test_piece(1)],
+        ..default()
+    });
     editor.load_course();
     assert!(editor.redo.is_empty());
+}
+
+#[test]
+fn a_session_capture_restores_labels_and_groups() {
+    let mut editor = Editor::default();
+    editor.pieces.push(test_piece(1));
+    let group = editor.group_node(GraphNode::Piece(1)).unwrap();
+    editor.commit();
+    assert!(editor.rename_node(GraphNode::Piece(1), "North crate"));
+
+    let orbit = Orbit::default();
+    let movers = Movers::default();
+    let snapshot = editor.capture(&orbit, &movers);
+    assert_eq!(snapshot.pieces[0].name.as_deref(), Some("North crate"));
+    assert_eq!(snapshot.pieces[0].group, Some(group));
+    assert_eq!(snapshot.groups.len(), 1);
+    assert_eq!(snapshot.undo.len(), 2);
+    assert!(snapshot.undo[0].groups.is_empty());
+    assert_eq!(snapshot.undo[1].groups.len(), 1);
+    assert_eq!(snapshot.undo[1].pieces[0].group, Some(group));
+
+    let mut restored = Editor::default();
+    let mut restored_orbit = Orbit::default();
+    let mut restored_movers = Movers::default();
+    restored.apply_loaded(
+        &mut restored_orbit,
+        &mut restored_movers,
+        snapshot.validate().unwrap(),
+    );
+    assert_eq!(restored.node_label(GraphNode::Piece(1)), "North crate");
+    assert_eq!(restored.outline.piece_parent(1), Some(group));
+    assert_eq!(
+        restored.outline.group(group).unwrap().name,
+        format!("Group {group}")
+    );
+    assert_eq!(restored.undo.len(), editor.undo.len());
+    assert!(restored.undo[0].outline.groups.is_empty());
+    assert_eq!(restored.undo[1].outline.groups.len(), 1);
+    assert_eq!(restored.undo[1].outline.piece_parent(1), Some(group));
+}
+
+#[test]
+fn the_debug_level_json_includes_labels_and_groups() {
+    let mut editor = Editor::default();
+    editor.pieces.push(test_piece(1));
+    let group = editor.group_node(GraphNode::Piece(1)).unwrap();
+    editor.rename_node(GraphNode::Piece(1), "North \"wall\"");
+    let json = level_json(&editor);
+    assert!(json.contains("\"name\":\"North \\\"wall\\\"\""), "{json}");
+    assert!(json.contains(&format!("\"group\":{group}")), "{json}");
+    assert!(json.contains("\"groups\":[{\"id\":"), "{json}");
+    assert!(json.contains("\"collapsed\":false"), "{json}");
 }

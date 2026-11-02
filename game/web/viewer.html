@@ -102,6 +102,13 @@
         gap: 12px;
         min-height: 0;
       }
+      #file-status {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      #file-status b { color: var(--ink); }
       #drop-hint {
         color: var(--muted);
         font-size: 13px;
@@ -199,17 +206,18 @@
         <input
           id="file"
           type="file"
-          accept=".glb,.gltf,.bin,.png,.jpg,.jpeg,.webp,.ktx2"
+          accept=".glb,.gltf,model/gltf-binary,model/gltf+json,.bin,.png,.jpg,.jpeg,.webp,.ktx2"
           multiple
-          hidden
         />
       </div>
+      <p id="file-status">No file selected yet — click <b>Choose .glb / .gltf</b> to open your files.</p>
       <p id="drop-hint">Tip: for a <b>.gltf</b> with external textures, select the <b>.gltf plus its companion files</b> together so textures resolve.</p>
       <div id="viewport-wrap">
         <canvas id="viewport"></canvas>
         <div id="drop-overlay">
           <strong>Drop a .glb or .gltf here</strong>
-          <span>…or use “Choose .glb / .gltf”. Dragging a .gltf plus its .bin and images keeps textures intact.</span>
+          <span>…or pick one from disk. Dragging a .gltf plus its .bin and images keeps textures intact.</span>
+          <button class="primary" id="choose-big" type="button">Open .glb / .gltf from disk</button>
         </div>
         <div id="hud" hidden></div>
       </div>
@@ -219,64 +227,118 @@
       <span>local 3D preview &middot; three.js r160 &middot; <a href="./">maps</a> &middot; <a href="./game.html">editor build</a></span>
     </footer>
 
-    <script type="module">
-      import * as THREE from "three";
-      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-      import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+    <script>
+      // File-picker wiring lives OUTSIDE the 3D module on purpose: the
+      // "Choose" buttons must open the OS dialog even if the three.js CDN
+      // is unreachable. Selected files are queued for the viewer module.
+      (function () {
+        var chooseBtn = document.querySelector("#choose");
+        var chooseBig = document.querySelector("#choose-big");
+        var fileInput = document.querySelector("#file");
+        var status = document.querySelector("#file-status");
+        var errorBox = document.querySelector("#error");
+        var wrap = document.querySelector("#viewport-wrap");
 
+        window.__modelFilesQueue = [];
+        window.__engineReady = false;
+
+        function openPicker() {
+          if (errorBox) errorBox.textContent = "";
+          try {
+            if (typeof fileInput.showPicker === "function") fileInput.showPicker();
+            else fileInput.click();
+          } catch (err) {
+            fileInput.click();
+          }
+        }
+
+        function announce(files) {
+          var list = Array.prototype.slice.call(files || []);
+          if (list.length === 0) return;
+          var names = list.map(function (f) { return f.name; }).join(", ");
+          if (status) status.innerHTML = "";
+          if (status) {
+            var label = document.createElement("span");
+            label.textContent = "Selected: ";
+            var bold = document.createElement("b");
+            bold.textContent = names;
+            status.append(label, bold);
+            if (!window.__engineReady) {
+              var extra = document.createElement("span");
+              extra.textContent = " — loading 3D engine…";
+              status.append(extra);
+            }
+          }
+          window.__modelFilesQueue.push(list);
+          window.dispatchEvent(new CustomEvent("model-files", { detail: list }));
+        }
+
+        chooseBtn.addEventListener("click", openPicker);
+        if (chooseBig) chooseBig.addEventListener("click", openPicker);
+        // Clicking the empty overlay (not the canvas) also opens the dialog.
+        var overlay = document.querySelector("#drop-overlay");
+        overlay.addEventListener("click", function (e) {
+          if (e.target === overlay || e.target.tagName === "STRONG" || e.target.tagName === "SPAN") openPicker();
+        });
+
+        fileInput.addEventListener("change", function () {
+          if (fileInput.files && fileInput.files.length) announce(fileInput.files);
+          fileInput.value = "";
+        });
+
+        // Drag & drop highlight works without the 3D engine too.
+        var dragDepth = 0;
+        function hasFiles(e) {
+          return Array.prototype.slice.call(e.dataTransfer?.types || []).includes("Files");
+        }
+        window.addEventListener("dragenter", function (e) {
+          if (!hasFiles(e)) return;
+          e.preventDefault();
+          dragDepth += 1;
+          wrap.classList.add("dragging");
+        });
+        window.addEventListener("dragover", function (e) {
+          if (hasFiles(e)) e.preventDefault();
+        });
+        window.addEventListener("dragleave", function () {
+          dragDepth = Math.max(0, dragDepth - 1);
+          if (dragDepth === 0) wrap.classList.remove("dragging");
+        });
+        window.addEventListener("drop", function (e) {
+          if (!hasFiles(e)) return;
+          e.preventDefault();
+          dragDepth = 0;
+          wrap.classList.remove("dragging");
+          if (e.dataTransfer.files && e.dataTransfer.files.length) announce(e.dataTransfer.files);
+        });
+      })();
+    </script>
+
+    <script type="module">
       const canvas = document.querySelector("#viewport");
       const wrap = document.querySelector("#viewport-wrap");
       const overlay = document.querySelector("#drop-overlay");
       const hud = document.querySelector("#hud");
       const errorBox = document.querySelector("#error");
-      const chooseBtn = document.querySelector("#choose");
+      const statusLine = document.querySelector("#file-status");
       const fileInput = document.querySelector("#file");
       const spinBtn = document.querySelector("#spin");
       const resetBtn = document.querySelector("#reset");
       const animBtn = document.querySelector("#anim");
 
-      const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-      renderer.outputColorSpace = THREE.SRGBColorSpace;
-      renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.0;
-
-      const scene = new THREE.Scene();
-      scene.background = new THREE.Color(0x07090d);
-
-      const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 2000);
-      camera.position.set(3.2, 2.4, 4.2);
-
-      const controls = new OrbitControls(camera, canvas);
-      controls.enableDamping = true;
-      controls.dampingFactor = 0.08;
-      controls.autoRotate = true;
-      controls.autoRotateSpeed = 0.9;
-
-      const pmrem = new THREE.PMREMGenerator(renderer);
-      scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-
-      const hemi = new THREE.HemisphereLight(0xdfeaff, 0x1a1410, 0.7);
-      scene.add(hemi);
-      const key = new THREE.DirectionalLight(0xffffff, 1.6);
-      key.position.set(4, 7, 3);
-      scene.add(key);
-
-      const grid = new THREE.GridHelper(12, 24, 0x2c3a4d, 0x1a222c);
-      grid.position.y = 0;
-      scene.add(grid);
-
-      const loader = new GLTFLoader();
-      let current = null; // { root, urls: string[], home: {pos, target} }
-      let mixer = null;
-      let mixerClock = new THREE.Clock();
-      let animPlaying = true;
-      let objectUrlsByName = new Map();
-
       function setError(message) {
         errorBox.textContent = message || "";
       }
+
+      let THREE = null;
+      let OrbitControls = null;
+      let GLTFLoader = null;
+      let RoomEnvironment = null;
+      let renderer, scene, camera, controls, loader, grid, pmrem;
+      let current = null; // { root, urls: string[], home: {pos, target} }
+      let mixer = null;
+      let mixerClock = null;
+      let animPlaying = true;
 
       function formatBytes(bytes) {
         if (!Number.isFinite(bytes)) return "unknown size";
@@ -308,7 +370,6 @@
         animPlaying = true;
         animBtn.hidden = true;
         resetBtn.disabled = true;
-        objectUrlsByName = new Map();
       }
 
       function showHud({ name, size, meshes, materials, animations }) {
@@ -368,6 +429,11 @@
       async function loadFiles(fileList) {
         const files = [...fileList];
         if (files.length === 0) return;
+        if (!THREE) {
+          setError("3D engine is still loading — your files are queued and will preview in a moment.");
+          window.__modelFilesQueue.push(files);
+          return;
+        }
         setError("");
 
         const models = files.filter((f) => /\.(glb|gltf)$/i.test(f.name));
@@ -390,7 +456,6 @@
           byName.set(f.name.toLowerCase(), url);
           byName.set(f.name.split("/").pop().toLowerCase(), url);
         }
-        objectUrlsByName = byName;
         loader.manager.setURLModifier((url) => {
           try {
             const clean = decodeURIComponent(url.split("?")[0].split("#")[0]);
@@ -417,6 +482,14 @@
             materials,
             animations: gltf.animations.length,
           });
+          if (statusLine) {
+            statusLine.innerHTML = "";
+            const label = document.createElement("span");
+            label.textContent = "Viewing: ";
+            const bold = document.createElement("b");
+            bold.textContent = main.name;
+            statusLine.append(label, bold);
+          }
 
           if (gltf.animations.length > 0) {
             mixer = new THREE.AnimationMixer(root);
@@ -429,7 +502,6 @@
         } catch (err) {
           console.error(err);
           for (const url of urls) URL.revokeObjectURL(url);
-          objectUrlsByName = new Map();
           overlay.hidden = false;
           hud.hidden = true;
           setError(`Could not load “${main.name}”. Make sure it is a valid .glb/.gltf file${/\.gltf$/i.test(main.name) ? " and that its .bin/textures were selected alongside it" : ""}.`);
@@ -438,88 +510,113 @@
         }
       }
 
-      function resize() {
-        const rect = wrap.getBoundingClientRect();
-        const w = Math.max(1, Math.floor(rect.width));
-        const h = Math.max(1, Math.floor(rect.height));
-        renderer.setSize(w, h, false);
-        camera.aspect = w / h;
-        camera.updateProjectionMatrix();
-      }
-      new ResizeObserver(resize).observe(wrap);
-      window.addEventListener("resize", resize);
-      resize();
-
-      renderer.setAnimationLoop(() => {
-        controls.update();
-        if (mixer && animPlaying) mixer.update(Math.min(mixerClock.getDelta(), 0.05));
-        else mixerClock.getDelta();
-        renderer.render(scene, camera);
-      });
-
-      chooseBtn.addEventListener("click", () => fileInput.click());
-      fileInput.addEventListener("change", () => {
-        if (fileInput.files?.length) loadFiles(fileInput.files);
-        fileInput.value = "";
-      });
-
-      spinBtn.addEventListener("click", () => {
-        controls.autoRotate = !controls.autoRotate;
-        spinBtn.textContent = `Auto-rotate: ${controls.autoRotate ? "on" : "off"}`;
-        spinBtn.setAttribute("aria-pressed", String(controls.autoRotate));
-      });
-
-      resetBtn.addEventListener("click", () => {
-        if (!current) return;
-        camera.position.copy(current.home.pos);
-        controls.target.copy(current.home.target);
-        controls.update();
-      });
-
-      animBtn.addEventListener("click", () => {
-        animPlaying = !animPlaying;
-        animBtn.textContent = animPlaying ? "Pause animation" : "Play animation";
-      });
-
-      // Drag & drop anywhere on the page.
-      let dragDepth = 0;
-      window.addEventListener("dragenter", (e) => {
-        if (![...(e.dataTransfer?.types || [])].includes("Files")) return;
-        e.preventDefault();
-        dragDepth += 1;
-        wrap.classList.add("dragging");
-      });
-      window.addEventListener("dragover", (e) => {
-        if ([...(e.dataTransfer?.types || [])].includes("Files")) e.preventDefault();
-      });
-      window.addEventListener("dragleave", (e) => {
-        if ([...(e.dataTransfer?.types || [])].includes("Files")) {
-          dragDepth = Math.max(0, dragDepth - 1);
-          if (dragDepth === 0) wrap.classList.remove("dragging");
-        }
-      });
-      window.addEventListener("drop", (e) => {
-        if (![...(e.dataTransfer?.types || [])].includes("Files")) return;
-        e.preventDefault();
-        dragDepth = 0;
-        wrap.classList.remove("dragging");
-        if (e.dataTransfer.files?.length) loadFiles(e.dataTransfer.files);
-      });
-
-      // `viewer.html?src=./demo.glb` deep-links a model from the same origin.
-      const preset = new URLSearchParams(window.location.search).get("src");
-      if (preset) {
+      async function boot() {
         try {
-          const res = await fetch(preset);
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const blob = await res.blob();
-          const name = preset.split("/").pop().split("?")[0] || "model.glb";
-          await loadFiles([new File([blob], name, { type: blob.type })]);
+          THREE = await import("three");
+          ({ OrbitControls } = await import("three/addons/controls/OrbitControls.js"));
+          ({ GLTFLoader } = await import("three/addons/loaders/GLTFLoader.js"));
+          ({ RoomEnvironment } = await import("three/addons/environments/RoomEnvironment.js"));
         } catch (err) {
-          console.warn("Could not load ?src= preset.", err);
-          setError("Could not load the linked model file. Try choosing it from disk instead.");
+          console.error("3D engine failed to load.", err);
+          setError("Could not load the 3D engine (the jsDelivr CDN may be blocked or offline). The file picker above still works — check your connection and reload to preview.");
+          return;
+        }
+
+        renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        renderer.outputColorSpace = THREE.SRGBColorSpace;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.0;
+
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x07090d);
+
+        camera = new THREE.PerspectiveCamera(45, 1, 0.01, 2000);
+        camera.position.set(3.2, 2.4, 4.2);
+
+        controls = new OrbitControls(camera, canvas);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.08;
+        controls.autoRotate = true;
+        controls.autoRotateSpeed = 0.9;
+
+        pmrem = new THREE.PMREMGenerator(renderer);
+        scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+        const hemi = new THREE.HemisphereLight(0xdfeaff, 0x1a1410, 0.7);
+        scene.add(hemi);
+        const key = new THREE.DirectionalLight(0xffffff, 1.6);
+        key.position.set(4, 7, 3);
+        scene.add(key);
+
+        grid = new THREE.GridHelper(12, 24, 0x2c3a4d, 0x1a222c);
+        grid.position.y = 0;
+        scene.add(grid);
+
+        loader = new GLTFLoader();
+        mixerClock = new THREE.Clock();
+
+        function resize() {
+          const rect = wrap.getBoundingClientRect();
+          const w = Math.max(1, Math.floor(rect.width));
+          const h = Math.max(1, Math.floor(rect.height));
+          renderer.setSize(w, h, false);
+          camera.aspect = w / h;
+          camera.updateProjectionMatrix();
+        }
+        new ResizeObserver(resize).observe(wrap);
+        window.addEventListener("resize", resize);
+        resize();
+
+        renderer.setAnimationLoop(() => {
+          controls.update();
+          if (mixer && animPlaying) mixer.update(Math.min(mixerClock.getDelta(), 0.05));
+          else mixerClock.getDelta();
+          renderer.render(scene, camera);
+        });
+
+        spinBtn.addEventListener("click", () => {
+          controls.autoRotate = !controls.autoRotate;
+          spinBtn.textContent = `Auto-rotate: ${controls.autoRotate ? "on" : "off"}`;
+          spinBtn.setAttribute("aria-pressed", String(controls.autoRotate));
+        });
+
+        resetBtn.addEventListener("click", () => {
+          if (!current) return;
+          camera.position.copy(current.home.pos);
+          controls.target.copy(current.home.target);
+          controls.update();
+        });
+
+        animBtn.addEventListener("click", () => {
+          animPlaying = !animPlaying;
+          animBtn.textContent = animPlaying ? "Pause animation" : "Play animation";
+        });
+
+        window.__engineReady = true;
+        window.addEventListener("model-files", (e) => loadFiles(e.detail));
+
+        // Flush anything picked while the engine was loading.
+        const queued = window.__modelFilesQueue.splice(0);
+        for (const files of queued) await loadFiles(files);
+
+        // `viewer.html?src=./demo.glb` deep-links a model from the same origin.
+        const preset = new URLSearchParams(window.location.search).get("src");
+        if (preset && !queued.length) {
+          try {
+            const res = await fetch(preset);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const blob = await res.blob();
+            const name = preset.split("/").pop().split("?")[0] || "model.glb";
+            await loadFiles([new File([blob], name, { type: blob.type })]);
+          } catch (err) {
+            console.warn("Could not load ?src= preset.", err);
+            setError("Could not load the linked model file. Try choosing it from disk instead.");
+          }
         }
       }
+
+      boot();
     </script>
   </body>
 </html>

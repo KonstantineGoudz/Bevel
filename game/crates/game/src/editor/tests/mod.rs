@@ -146,6 +146,27 @@ fn tick_character(app: &mut App) {
         .expect("character move");
 }
 
+fn tick_walk(app: &mut App) {
+    app.world_mut()
+        .resource_mut::<Time>()
+        .advance_by(std::time::Duration::from_millis(16));
+    app.world_mut().run_system_once(walk).expect("walk");
+}
+
+/// Movers run before the character, like the live schedule: platforms carry
+/// the rider, then physics jumps or lands on the carried pose.
+fn tick_rider(app: &mut App) {
+    app.world_mut()
+        .resource_mut::<Time>()
+        .advance_by(std::time::Duration::from_millis(16));
+    app.world_mut()
+        .run_system_once(move_movers)
+        .expect("move movers");
+    app.world_mut()
+        .run_system_once(character_move)
+        .expect("character move");
+}
+
 fn test_piece(id: u32) -> Piece {
     Piece {
         id,
@@ -156,5 +177,6 @@ fn test_piece(id: u32) -> Piece {
         roll: 0.0,
         elevation: 0.0,
         dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
     }
 }

@@ -227,7 +227,6 @@ pub(super) fn setup(
         palette_compact_button(&mut commands, PaletteAction::Character, "Char"),
         palette_compact_button(&mut commands, PaletteAction::Path, "Path"),
         palette_compact_button(&mut commands, PaletteAction::Plan, "Plan"),
-        palette_compact_button(&mut commands, PaletteAction::Platform, "Motion"),
         palette_compact_button(&mut commands, PaletteAction::Course, "Course"),
         palette_compact_button(&mut commands, PaletteAction::CopyJson, "JSON"),
     ];
@@ -303,7 +302,7 @@ pub(super) fn setup(
     let hint_text = commands
         .spawn((
             Text::new(
-                "LMB place / select / drag  |  Y lifts, plane squares slide  |  rings pitch / yaw / roll  |  Ctrl+C / Ctrl+V copy & paste  |  Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo  |  Path: click route, Shift append  |  Enter walk  |  drag waypoints / curve handles  |  RMB orbit (selection in Build)  |  MMB pan  |  wheel zoom  |  V view  |  Tab mouse  |  P play / build  |  C character  |  Shift+A add menu  |  G move / R rotate  |  X Y Z lock axis  |  Enter / LMB confirm  |  Esc / RMB cancel  |  Shift+R 30 deg  |  S save  |  Shift+S copy JSON",
+                "LMB place / select / drag  |  Y lifts, plane squares slide  |  rings pitch / yaw / roll  |  Ctrl+C / Ctrl+V copy & paste  |  Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo  |  Path: click route, Shift append  |  Enter walk  |  drag waypoints / curve handles  |  RMB orbit (selection in Build)  |  MMB pan  |  wheel zoom  |  V view  |  Tab mouse  |  P play / build  |  C character  |  Shift+A add menu (not first person)  |  G move / R rotate  |  X Y Z lock axis  |  Enter / LMB confirm  |  Esc / RMB cancel  |  Shift+R 30 deg  |  S save  |  Shift+S copy JSON",
             ),
             TextFont { font_size: FontSize::Px(11.0), ..default() },
             TextColor(Color::srgb_u8(0x6b, 0x7d, 0x93)),
@@ -340,7 +339,8 @@ pub(super) fn setup(
 
     spawn_touch_ui(&mut commands);
     spawn_properties_panel(&mut commands);
-    spawn_health_hud(&mut commands);
+    spawn_object_graph(&mut commands);
+    spawn_character_status(&mut commands);
     spawn_add_menu(&mut commands);
 }
 
@@ -390,7 +390,6 @@ pub(super) fn spawn_touch_ui(commands: &mut Commands) {
         touch_button(commands, TouchAction::Redo, "Redo"),
         touch_button(commands, TouchAction::Path, "Path"),
         touch_button(commands, TouchAction::Plan, "Plan"),
-        touch_button(commands, TouchAction::Platform, "Motion"),
         touch_button(commands, TouchAction::Course, "Course"),
         touch_button(commands, TouchAction::Play, "Play"),
     ];

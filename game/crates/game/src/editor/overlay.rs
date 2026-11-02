@@ -17,7 +17,6 @@ pub(super) fn update_palette(
             PaletteAction::Character => editor.actor_tool == Some(ActorTool::Place),
             PaletteAction::Path => editor.actor_tool == Some(ActorTool::Path),
             PaletteAction::Plan => editor.actor_tool == Some(ActorTool::Plan),
-            PaletteAction::Platform => editor.actor_tool == Some(ActorTool::Platform),
             PaletteAction::Walk => {
                 editor.actor_tool == Some(ActorTool::Plan)
                     && walk_enabled(
@@ -56,6 +55,7 @@ pub(super) fn update_status(
     editor: Res<Editor>,
     cursor: Res<Cursor>,
     orbit: Res<Orbit>,
+    outliner: Res<OutlinerState>,
     mut text: Single<&mut Text, With<StatusText>>,
 ) {
     let hex = if orbit.mode == ViewMode::First {
@@ -104,11 +104,15 @@ pub(super) fn update_status(
         })
         .unwrap_or_default();
 
-    let selection = editor
-        .selected
-        .and_then(|id| editor.pieces.iter().find(|p| p.id == id))
-        .map(|p| shapes()[p.shape].name)
-        .unwrap_or("none");
+    let selection = if let Some(id) = editor.selected {
+        editor.node_label(GraphNode::Piece(id))
+    } else {
+        match outliner.selection {
+            GraphNode::Group(_) => editor.node_label(outliner.selection),
+            GraphNode::Character => "character".to_owned(),
+            _ => "none".to_owned(),
+        }
+    };
 
     let snap = editor
         .ghost

@@ -11,8 +11,24 @@ pub(super) fn level_json(editor: &Editor) -> String {
         .pieces
         .iter()
         .map(|p| {
+            let name = editor
+                .outline
+                .label(p.id)
+                .map(|name| {
+                    format!(
+                        ",\"name\":{}",
+                        serde_json::to_string(name).expect("label serializes")
+                    )
+                })
+                .unwrap_or_default();
+            let group = editor
+                .outline
+                .piece_parent(p.id)
+                .map(|group| format!(",\"group\":{group}"))
+                .unwrap_or_default();
             format!(
-                "{{\"shape\":\"{}\",\"x\":{:.3},\"z\":{:.3},\"y\":{:.3},\"rotDeg\":{:.1},\"pitchDeg\":{:.1},\"rollDeg\":{:.1},\"dynamic\":{}}}",
+                "{{\"id\":{},\"shape\":\"{}\",\"x\":{:.3},\"z\":{:.3},\"y\":{:.3},\"rotDeg\":{:.1},\"pitchDeg\":{:.1},\"rollDeg\":{:.1},\"dynamic\":{},\"damage\":{:.1}{name}{group}}}",
+                p.id,
                 shapes()[p.shape].id,
                 p.pos.x,
                 p.pos.y,
@@ -20,7 +36,25 @@ pub(super) fn level_json(editor: &Editor) -> String {
                 p.rot.to_degrees(),
                 p.pitch.to_degrees(),
                 p.roll.to_degrees(),
-                p.dynamic
+                p.dynamic,
+                p.trigger.damage
+            )
+        })
+        .collect();
+    let groups: Vec<String> = editor
+        .outline
+        .groups
+        .iter()
+        .map(|group| {
+            format!(
+                "{{\"id\":{},\"name\":{},\"parent\":{},\"collapsed\":{}}}",
+                group.id,
+                serde_json::to_string(&group.name).expect("group name serializes"),
+                group
+                    .parent
+                    .map(|parent| parent.to_string())
+                    .unwrap_or_else(|| "null".to_owned()),
+                group.collapsed
             )
         })
         .collect();
@@ -36,8 +70,9 @@ pub(super) fn level_json(editor: &Editor) -> String {
         })
         .unwrap_or_default();
     format!(
-        "{{\"format\":\"party-dungeon-level\",\"version\":1,\"units\":\"metres\",\"hexSize\":{},\"pieces\":[{}]{character}}}",
+        "{{\"format\":\"party-dungeon-level\",\"version\":1,\"units\":\"metres\",\"hexSize\":{},\"groups\":[{}],\"pieces\":[{}]{character}}}",
         model::HEX_SIZE,
+        groups.join(","),
         pieces.join(",")
     )
 }

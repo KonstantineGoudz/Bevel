@@ -17,6 +17,8 @@ fn camera_and_character_changes_are_noticed() {
         feet: 0.0,
         yaw: 0.0,
         vy: 0.0,
+        hv: Vec2::ZERO,
+        ride_vel: Vec2::ZERO,
         grounded: true,
         health: crate::statuses::Health::default(),
     };
@@ -77,6 +79,79 @@ fn a_jump_launches_only_from_the_ground() {
 }
 
 #[test]
+fn ground_velocity_chases_the_wish() {
+    let dt = 1.0 / 60.0;
+    // A standing start moves toward the target but does not teleport.
+    let stepped = ground_step(Vec2::ZERO, Vec2::new(2.8, 0.0), dt);
+    assert!(
+        stepped.x > 0.0 && stepped.x < 2.8,
+        "one step should make progress without snapping: {stepped:?}"
+    );
+    // Close enough snaps to the target.
+    assert_eq!(
+        ground_step(Vec2::new(2.79, 0.0), Vec2::new(2.8, 0.0), dt),
+        Vec2::new(2.8, 0.0)
+    );
+    // A reversal takes more than one frame: momentum matters on the ground.
+    let turned = ground_step(Vec2::new(2.8, 0.0), Vec2::new(-2.8, 0.0), dt);
+    assert!(turned.x > 0.0, "should still move forward: {turned:?}");
+    // Stopping decays instead of halting instantly.
+    let stopping = ground_step(Vec2::new(2.8, 0.0), Vec2::ZERO, dt);
+    assert!(
+        stopping.x > 2.0 && stopping.x < 2.8,
+        "landing should slide a little: {stopping:?}"
+    );
+}
+
+#[test]
+fn air_keeps_inertia_without_steering() {
+    let dt = 1.0 / 60.0;
+    let cruising = Vec2::new(2.8, 0.0);
+    // No input: velocity is untouched.
+    assert_eq!(air_step(cruising, Vec2::ZERO, 0.0, dt), cruising);
+    // A jump-length coast with no steering loses nothing.
+    let mut coast = cruising;
+    for _ in 0..48 {
+        coast = air_step(coast, Vec2::ZERO, 0.0, dt);
+    }
+    assert_eq!(coast, cruising);
+}
+
+#[test]
+fn air_strafing_is_limited() {
+    let dt = 1.0 / 60.0;
+    // Shoving back against forward momentum only nibbles at it.
+    let braked = air_step(Vec2::new(2.8, 0.0), Vec2::new(-1.0, 0.0), 2.8, dt);
+    assert!(
+        braked.x > 2.5,
+        "one frame must not reverse momentum: {braked:?}"
+    );
+    // Strafing sideways adds a little lateral speed while keeping most of
+    // the forward run-up.
+    let strafed = air_step(Vec2::new(2.8, 0.0), Vec2::Y, 2.8, dt);
+    assert!(strafed.y > 0.0 && strafed.y < 0.3, "{strafed:?}");
+    assert!(strafed.x > 2.5, "forward momentum survives: {strafed:?}");
+    // Speed never grows past the faster of entry speed and wish speed.
+    let mut fast = Vec2::new(5.5, 0.0);
+    for _ in 0..120 {
+        fast = air_step(fast, Vec2::X, 2.8, dt);
+    }
+    assert!(
+        fast.length() <= 5.5 + 1e-4,
+        "sprint momentum caps air speed: {fast:?}"
+    );
+    // From standstill the wish still builds up over the jump.
+    let mut still = Vec2::ZERO;
+    for _ in 0..120 {
+        still = air_step(still, Vec2::X, 2.8, dt);
+    }
+    assert!(
+        (still.x - 2.8).abs() < 0.05,
+        "a standing jump steers up to the wish: {still:?}"
+    );
+}
+
+#[test]
 fn a_slope_counts_as_ground_on_the_way_down() {
     assert_eq!(ground_support(0.0, false, false), (true, None), "standing");
     assert_eq!(
@@ -131,6 +206,8 @@ fn third_person_can_jump_without_a_route() {
             feet: 0.0,
             yaw: 0.0,
             vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
             grounded: true,
             health: crate::statuses::Health::default(),
         });
@@ -160,6 +237,8 @@ fn an_airborne_character_lands_without_a_route() {
             feet: 1.0,
             yaw: 0.0,
             vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
             grounded: false,
             health: crate::statuses::Health::default(),
         });
@@ -178,6 +257,837 @@ fn an_airborne_character_lands_without_a_route() {
         character.feet
     );
     assert!(character.grounded, "should be grounded after landing");
+}
+
+#[test]
+fn a_jump_carries_forward_momentum() {
+    let mut app = physics_app();
+    // Forward along +x with this yaw convention.
+    app.world_mut().resource_mut::<Orbit>().yaw = -std::f32::consts::FRAC_PI_2;
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: Vec2::ZERO,
+            feet: 0.0,
+            yaw: -std::f32::consts::FRAC_PI_2,
+            vy: 0.0,
+            // Sprinting along +x when the jump fires.
+            hv: Vec2::new(5.5, 0.0),
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+    // No steering held: only the jump button.
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Space);
+
+    tick_character(&mut app);
+
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(!character.grounded, "should be airborne after jumping");
+    assert!(
+        (character.hv.x - 5.5).abs() < 0.3,
+        "takeoff keeps sprint momentum, hv={:?}",
+        character.hv
+    );
+
+    // Release everything and coast: inertia alone should keep carrying the
+    // character forward while airborne.
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .release(KeyCode::Space);
+    let before = character.pos.x;
+    for _ in 0..20 {
+        tick_character(&mut app);
+    }
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        !character.grounded,
+        "should still be airborne mid-jump, feet={}",
+        character.feet
+    );
+    assert!(
+        character.pos.x - before > 0.8,
+        "momentum should carry the jump with no input, moved {}",
+        character.pos.x - before
+    );
+    assert!(
+        character.hv.x > 3.5,
+        "airborne speed decays only a little, hv={:?}",
+        character.hv
+    );
+}
+
+#[test]
+fn air_steering_cannot_snap_momentum_around() {
+    let mut app = physics_app();
+    app.world_mut().resource_mut::<Orbit>().yaw = -std::f32::consts::FRAC_PI_2;
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: Vec2::ZERO,
+            feet: 1.0,
+            yaw: -std::f32::consts::FRAC_PI_2,
+            vy: 0.0,
+            // Already flying along +x.
+            hv: Vec2::new(2.8, 0.0),
+            ride_vel: Vec2::ZERO,
+            grounded: false,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+    // Hold backwards (-x) for one frame: momentum must survive.
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyS);
+    tick_character(&mut app);
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        character.hv.x > 2.0,
+        "one frame of opposite steering must not kill momentum, hv={:?}",
+        character.hv
+    );
+}
+
+/// A block piece shuttling along +x with a rider standing on it. The world
+/// collider stays put (visual sync is not running) while the editor piece —
+/// the source of carry truth — travels; the rider starts centred so a short
+/// ride stays over both.
+fn riding_setup(app: &mut App) {
+    let piece = Piece {
+        id: 7,
+        shape: model::shape_index("block").unwrap(),
+        pos: Vec2::ZERO,
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
+    };
+    app.world_mut().resource_mut::<Editor>().pieces.push(piece);
+    let mut movers = Movers::default();
+    let mover = movers.mover_mut(7, Vec2::ZERO);
+    mover
+        .waypoints
+        .push(crate::platforms::PlatformWaypoint::new(Vec2::X * 4.0));
+    mover.rebuild();
+    mover.speed = 1.5;
+    app.insert_resource(movers);
+    // Static world geometry matching the platform's start pose.
+    let block = &shapes()[model::shape_index("block").unwrap()];
+    app.world_mut().spawn((
+        RigidBody::Static,
+        piece_collider(block).unwrap(),
+        Position::from_xyz(0.0, 0.0, 0.0),
+        Rotation::default(),
+    ));
+    app.update();
+    app.update();
+}
+
+fn riding_character() -> Character {
+    Character {
+        pos: Vec2::ZERO,
+        feet: 0.9,
+        yaw: -std::f32::consts::FRAC_PI_2,
+        vy: 0.0,
+        hv: Vec2::ZERO,
+        ride_vel: Vec2::ZERO,
+        grounded: true,
+        health: crate::statuses::Health::default(),
+    }
+}
+
+#[test]
+fn jumping_from_a_moving_platform_carries_its_motion() {
+    let mut app = physics_app();
+    riding_setup(&mut app);
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(riding_character());
+        editor.walk = None;
+    }
+
+    // Ride a few frames with no input: positional carry plus the stamped
+    // ride velocity, while `hv` stays put.
+    for _ in 0..10 {
+        tick_rider(&mut app);
+    }
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        (character.ride_vel.x - 1.5).abs() < 0.05,
+        "ride velocity tracks the platform, ride_vel={:?}",
+        character.ride_vel
+    );
+    assert!(
+        (character.pos.x - 0.24).abs() < 0.05,
+        "carry moves the rider, pos={:?}",
+        character.pos
+    );
+    assert!(
+        character.hv.length() < 0.3,
+        "standing adds no self motion, hv={:?}",
+        character.hv
+    );
+
+    // Jump with no steering: the leap inherits the full ride.
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Space);
+    tick_rider(&mut app);
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(!character.grounded, "should be airborne after jumping");
+    assert!(
+        (character.hv.x - 1.5).abs() < 0.3,
+        "takeoff inherits platform motion, hv={:?}",
+        character.hv
+    );
+
+    // Coast with no input: inertia keeps carrying the jump along.
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .release(KeyCode::Space);
+    let before = character.pos.x;
+    for _ in 0..20 {
+        tick_rider(&mut app);
+    }
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        !character.grounded,
+        "should still be airborne mid-jump, feet={}",
+        character.feet
+    );
+    assert!(
+        character.pos.x - before > 0.35,
+        "the jump drifts with the ride, moved {}",
+        character.pos.x - before
+    );
+}
+
+#[test]
+fn landing_on_a_moving_platform_does_not_stack_speed() {
+    let mut app = physics_app();
+    riding_setup(&mut app);
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    {
+        // Dropping in fast from just above the platform top.
+        let mut falling = riding_character();
+        falling.feet = 1.2;
+        falling.hv = Vec2::new(3.0, 0.0);
+        falling.grounded = false;
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(falling);
+        editor.walk = None;
+    }
+
+    let mut landed = false;
+    for _ in 0..120 {
+        tick_rider(&mut app);
+        if app.world().resource::<Editor>().character.unwrap().grounded {
+            landed = true;
+            break;
+        }
+    }
+    assert!(landed, "should land on the platform");
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        (character.hv.x - 1.5).abs() < 0.35,
+        "landing converts back to ride-frame velocity, hv={:?}",
+        character.hv
+    );
+
+    // Hopping again inherits the ride exactly once: no stacking.
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Space);
+    tick_rider(&mut app);
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(!character.grounded, "should be airborne after jumping");
+    assert!(
+        (character.hv.x - 3.0).abs() < 0.4,
+        "one fold per jump, hv={:?}",
+        character.hv
+    );
+}
+
+/// Walk from a floor tile into an adjacent ramp's low edge, the way a player
+/// crosses the tile border in the game. The ramp must be mountable without
+/// jumping.
+#[test]
+fn walking_off_a_tile_mounts_the_next_ramp() {
+    let mut app = physics_app();
+    let floor = &shapes()[model::shape_index("floor").unwrap()];
+    let ramp = &shapes()[model::shape_index("ramp").unwrap()];
+    // Tile centred on the origin; its vertical edge sits near x = 1.04.
+    app.world_mut().spawn((
+        RigidBody::Static,
+        piece_collider(floor).unwrap(),
+        Position::from_xyz(0.0, 0.0, 0.0),
+        Rotation::default(),
+    ));
+    // Ramp low edge flush with the tile edge, rising along +x.
+    app.world_mut().spawn((
+        RigidBody::Static,
+        piece_collider(ramp).unwrap(),
+        Position::from_xyz(2.04, 0.0, 0.0),
+        Rotation(Quat::from_rotation_y(-std::f32::consts::PI * 1.5)),
+    ));
+    app.update();
+    app.update();
+
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    app.world_mut().resource_mut::<Orbit>().yaw = -std::f32::consts::FRAC_PI_2;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: Vec2::new(-0.5, 0.0),
+            feet: 0.0,
+            yaw: -std::f32::consts::FRAC_PI_2,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyW);
+
+    // The ramp is short: the character mounts it, rides up and walks off the
+    // far side, so track the peak height along the way.
+    let mut peak = 0.0f32;
+    for _ in 0..240 {
+        tick_character(&mut app);
+        let character = app.world().resource::<Editor>().character.unwrap();
+        peak = peak.max(character.feet);
+    }
+
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        character.pos.x > 3.4,
+        "should cross the tile border, climb the ramp and walk off, pos={:?} feet={}",
+        character.pos,
+        character.feet
+    );
+    assert!(
+        peak > 0.5,
+        "should ride up the ramp slope on the way, peak={peak}"
+    );
+}
+
+/// Repro: ramp top into the neighbouring block (the course map layout).
+/// The capsule must walk off the ramp onto the block without launching into
+/// the air or teleporting forward in a single frame.
+#[test]
+fn walking_up_a_ramp_steps_onto_the_next_block() {
+    let mut app = physics_app();
+    let ramp = &shapes()[model::shape_index("ramp").unwrap()];
+    let block = &shapes()[model::shape_index("block").unwrap()];
+    // Course layout: ramp at hex (1,0) rising along +x, block at hex (2,0).
+    let ramp_pos = model::hex_center(1, 0);
+    let block_pos = model::hex_center(2, 0);
+    app.world_mut().spawn((
+        RigidBody::Static,
+        piece_collider(ramp).unwrap(),
+        Position::from_xyz(ramp_pos.x, 0.0, ramp_pos.y),
+        Rotation(Quat::from_rotation_y(-std::f32::consts::PI * 1.5)),
+    ));
+    app.world_mut().spawn((
+        RigidBody::Static,
+        piece_collider(block).unwrap(),
+        Position::from_xyz(block_pos.x, 0.0, block_pos.y),
+        Rotation::default(),
+    ));
+    app.update();
+    app.update();
+
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    app.world_mut().resource_mut::<Orbit>().yaw = -std::f32::consts::FRAC_PI_2;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: Vec2::new(ramp_pos.x - 1.5, ramp_pos.y),
+            feet: 0.0,
+            yaw: -std::f32::consts::FRAC_PI_2,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyW);
+
+    let mut peak = 0.0f32;
+    let mut max_step = 0.0f32;
+    let mut prev: Option<Vec2> = None;
+    for _ in 0..600 {
+        tick_character(&mut app);
+        let character = app.world().resource::<Editor>().character.unwrap();
+        peak = peak.max(character.feet);
+        if let Some(p) = prev {
+            max_step = max_step.max(character.pos.distance(p));
+        }
+        prev = Some(character.pos);
+        // Launch guard: the capsule should never leave the ground here.
+        assert!(
+            character.feet < 1.6,
+            "capsule launched into the air, pos={:?} feet={} vy={}",
+            character.pos,
+            character.feet,
+            character.vy,
+        );
+    }
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        max_step < 0.2,
+        "capsule teleported at the ramp/block border, max single-frame step={max_step}"
+    );
+    assert!(
+        character.pos.x > block_pos.x + 1.0,
+        "should cross the ramp top onto the block and walk off, pos={:?} feet={}",
+        character.pos,
+        character.feet
+    );
+    assert!(
+        peak > 0.8 && peak < 1.3,
+        "should ride up to the 0.9 block top without launching, peak={peak}"
+    );
+}
+
+/// Full course walk: floor, ramp, block, floor (the default map layout) in
+/// route-following mode. No launches, no single-frame pops at any seam.
+#[test]
+fn route_walk_crosses_the_full_course_without_pops() {
+    let mut app = physics_app();
+    let floor = &shapes()[model::shape_index("floor").unwrap()];
+    let ramp = &shapes()[model::shape_index("ramp").unwrap()];
+    let block = &shapes()[model::shape_index("block").unwrap()];
+    for (i, shape) in [floor, ramp, block, floor].into_iter().enumerate() {
+        let pos = model::hex_center(i as i32, 0);
+        let (y, rot) = if i == 1 {
+            (0.0, Quat::from_rotation_y(-std::f32::consts::PI * 1.5))
+        } else {
+            (0.0, Quat::default())
+        };
+        app.world_mut().spawn((
+            RigidBody::Static,
+            piece_collider(shape).unwrap(),
+            Position::from_xyz(pos.x, y, pos.y),
+            Rotation(rot),
+        ));
+    }
+    app.update();
+    app.update();
+
+    let start = model::hex_center(0, 0);
+    let end = model::hex_center(3, 0);
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: start,
+            feet: 0.0,
+            yaw: -std::f32::consts::FRAC_PI_2,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            health: crate::statuses::Health::default(),
+        });
+        editor.route = Some(Route {
+            track: path::Track::new(vec![start, end]),
+            trail: Vec::new(),
+            line: Vec::new(),
+            distances: vec![start.distance(end)],
+            controls: vec![path::AnchorControls {
+                incoming: None,
+                outgoing: None,
+            }],
+            valid: true,
+            hexes: 2,
+        });
+        editor.walk = Some(Walk {
+            distance: 0.0,
+            stuck: 0.0,
+        });
+    }
+
+    let mut peak = 0.0f32;
+    let mut max_step = 0.0f32;
+    let mut prev: Option<Vec2> = None;
+    for _ in 0..900 {
+        tick_walk(&mut app);
+        let editor = app.world().resource::<Editor>();
+        if let Some(character) = editor.character {
+            peak = peak.max(character.feet);
+            if let Some(p) = prev {
+                max_step = max_step.max(character.pos.distance(p));
+            }
+            prev = Some(character.pos);
+            assert!(
+                character.feet < 1.6,
+                "route walker launched, pos={:?} feet={} vy={}",
+                character.pos,
+                character.feet,
+                character.vy,
+            );
+        }
+        if editor.walk.is_none() {
+            break;
+        }
+    }
+    let editor = app.world().resource::<Editor>();
+    assert!(
+        max_step < 0.2,
+        "route walker teleported at a seam, max single-tick step={max_step}"
+    );
+    assert!(
+        peak > 0.8 && peak < 1.3,
+        "walker should ride up to the 0.9 block top, peak={peak}"
+    );
+}
+
+/// Same border crossing one level up: block top into a ramp resting on it.
+#[test]
+fn walking_off_a_block_mounts_the_ramp_on_it() {
+    let mut app = physics_app();
+    let block = &shapes()[model::shape_index("block").unwrap()];
+    let ramp = &shapes()[model::shape_index("ramp").unwrap()];
+    // Block top at y = 0.9, spanning x in [-0.9, 0.9].
+    app.world_mut().spawn((
+        RigidBody::Static,
+        piece_collider(block).unwrap(),
+        Position::from_xyz(0.0, 0.0, 0.0),
+        Rotation::default(),
+    ));
+    // Ramp resting on the block, low edge flush with the block edge.
+    app.world_mut().spawn((
+        RigidBody::Static,
+        piece_collider(ramp).unwrap(),
+        Position::from_xyz(1.9, 0.9, 0.0),
+        Rotation(Quat::from_rotation_y(-std::f32::consts::PI * 1.5)),
+    ));
+    app.update();
+    app.update();
+
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    app.world_mut().resource_mut::<Orbit>().yaw = -std::f32::consts::FRAC_PI_2;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: Vec2::new(-0.5, 0.0),
+            feet: 0.9,
+            yaw: -std::f32::consts::FRAC_PI_2,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyW);
+
+    let mut peak = 0.0f32;
+    for _ in 0..240 {
+        tick_character(&mut app);
+        let character = app.world().resource::<Editor>().character.unwrap();
+        peak = peak.max(character.feet);
+    }
+
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        character.pos.x > 3.2,
+        "should cross the block border, climb the ramp and walk off, pos={:?} feet={}",
+        character.pos,
+        character.feet
+    );
+    assert!(
+        peak > 1.4,
+        "should ride up the ramp slope on the way, peak={peak}"
+    );
+}
+
+/// A ramp base sitting slightly above the floor (a small placement lip) must
+/// still be mountable: the step-up assist walks over ledges within STEP_UP
+/// instead of pinning the character at the border. Taller faces stay walls.
+#[test]
+fn a_small_lip_at_the_ramp_base_is_stepped_over() {
+    for lift in [0.05, 0.15, 0.3] {
+        let mut app = physics_app();
+        let ramp = &shapes()[model::shape_index("ramp").unwrap()];
+        app.world_mut().spawn((
+            RigidBody::Static,
+            piece_collider(ramp).unwrap(),
+            Position::from_xyz(2.0, lift, 0.0),
+            Rotation(Quat::from_rotation_y(-std::f32::consts::PI * 1.5)),
+        ));
+        app.update();
+        app.update();
+
+        app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+        app.world_mut().resource_mut::<Orbit>().yaw = -std::f32::consts::FRAC_PI_2;
+        {
+            let mut editor = app.world_mut().resource_mut::<Editor>();
+            editor.character = Some(Character {
+                pos: Vec2::new(0.5, 0.0),
+                feet: 0.0,
+                yaw: -std::f32::consts::FRAC_PI_2,
+                vy: 0.0,
+                hv: Vec2::ZERO,
+                ride_vel: Vec2::ZERO,
+                grounded: true,
+                health: crate::statuses::Health::default(),
+            });
+            editor.walk = None;
+        }
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+
+        let mut peak = 0.0f32;
+        for _ in 0..240 {
+            tick_character(&mut app);
+            let character = app.world().resource::<Editor>().character.unwrap();
+            peak = peak.max(character.feet);
+        }
+
+        let character = app.world().resource::<Editor>().character.unwrap();
+        assert!(
+            character.pos.x > 3.0,
+            "lift={lift}: should step over the lip and cross the ramp, pos={:?} feet={}",
+            character.pos,
+            character.feet
+        );
+        assert!(
+            peak > lift + 0.4,
+            "lift={lift}: should ride up the slope after the step, peak={peak}"
+        );
+    }
+}
+
+/// A step onto a ledge is refused when the capsule would not fit there: a
+/// lipped ramp backed directly by a block. The probe ray threads onto the
+/// ramp slope, but the fat capsule at the destination overlaps the block
+/// behind it. Stepping anyway would embed the capsule in solid rock and the
+/// next move-and-slide would depenetrate it — a launch into the air followed
+/// by a flicker between poses. Staying blocked is correct here.
+#[test]
+fn step_up_refuses_a_destination_inside_the_next_block() {
+    let mut app = physics_app();
+    let ramp = &shapes()[model::shape_index("ramp").unwrap()];
+    let block = &shapes()[model::shape_index("block").unwrap()];
+    // Ramp lip at x = 1.0, floating 0.3 above the floor; block face at x = 1.2
+    // so the step destination overlaps the block.
+    app.world_mut().spawn((
+        RigidBody::Static,
+        piece_collider(ramp).unwrap(),
+        Position::from_xyz(2.0, 0.3, 0.0),
+        Rotation(Quat::from_rotation_y(-std::f32::consts::PI * 1.5)),
+    ));
+    app.world_mut().spawn((
+        RigidBody::Static,
+        piece_collider(block).unwrap(),
+        Position::from_xyz(2.1, 0.0, 0.0),
+        Rotation::default(),
+    ));
+    app.update();
+    app.update();
+
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    app.world_mut().resource_mut::<Orbit>().yaw = -std::f32::consts::FRAC_PI_2;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: Vec2::new(0.5, 0.0),
+            feet: 0.0,
+            yaw: -std::f32::consts::FRAC_PI_2,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyW);
+
+    let mut max_step = 0.0f32;
+    let mut prev: Option<Vec2> = None;
+    for _ in 0..240 {
+        tick_character(&mut app);
+        let character = app.world().resource::<Editor>().character.unwrap();
+        if let Some(p) = prev {
+            max_step = max_step.max(character.pos.distance(p));
+        }
+        prev = Some(character.pos);
+        assert!(
+            character.feet < 0.5,
+            "capsule launched out of the crowded border, pos={:?} feet={} vy={}",
+            character.pos,
+            character.feet,
+            character.vy,
+        );
+    }
+
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        max_step < 0.2,
+        "capsule teleported into the block behind the lip, max single-frame step={max_step}"
+    );
+    assert!(
+        character.pos.x < 1.0,
+        "the occupied step must stay blocked, pos={:?} feet={}",
+        character.pos,
+        character.feet
+    );
+}
+
+/// Taller faces stay walls: a lip above STEP_UP cannot be stepped over.
+#[test]
+fn a_tall_lip_still_blocks() {
+    let mut app = physics_app();
+    let ramp = &shapes()[model::shape_index("ramp").unwrap()];
+    app.world_mut().spawn((
+        RigidBody::Static,
+        piece_collider(ramp).unwrap(),
+        Position::from_xyz(2.0, 0.6, 0.0),
+        Rotation(Quat::from_rotation_y(-std::f32::consts::PI * 1.5)),
+    ));
+    app.update();
+    app.update();
+
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    app.world_mut().resource_mut::<Orbit>().yaw = -std::f32::consts::FRAC_PI_2;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: Vec2::new(0.5, 0.0),
+            feet: 0.0,
+            yaw: -std::f32::consts::FRAC_PI_2,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyW);
+
+    for _ in 0..180 {
+        tick_character(&mut app);
+    }
+
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        character.pos.x < 1.0,
+        "a 0.6 lip must stay a wall, pos={:?} feet={}",
+        character.pos,
+        character.feet
+    );
+    assert!(
+        character.feet < 0.05,
+        "should not gain height off the wall, feet={}",
+        character.feet
+    );
+}
+
+/// Route following mounts a lipped ramp too: the walker shares the step-up.
+#[test]
+fn route_following_mounts_a_lipped_ramp() {
+    let mut app = physics_app();
+    let ramp = &shapes()[model::shape_index("ramp").unwrap()];
+    app.world_mut().spawn((
+        RigidBody::Static,
+        piece_collider(ramp).unwrap(),
+        Position::from_xyz(2.0, 0.15, 0.0),
+        Rotation(Quat::from_rotation_y(-std::f32::consts::PI * 1.5)),
+    ));
+    app.update();
+    app.update();
+
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    app.world_mut().resource_mut::<Orbit>().yaw = -std::f32::consts::FRAC_PI_2;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: Vec2::new(-0.5, 0.0),
+            feet: 0.0,
+            yaw: -std::f32::consts::FRAC_PI_2,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            health: crate::statuses::Health::default(),
+        });
+        editor.route = Some(Route {
+            track: path::Track::new(vec![Vec2::new(-0.5, 0.0), Vec2::new(4.5, 0.0)]),
+            trail: Vec::new(),
+            line: Vec::new(),
+            distances: vec![5.0],
+            controls: vec![path::AnchorControls {
+                incoming: None,
+                outgoing: None,
+            }],
+            valid: true,
+            hexes: 2,
+        });
+        editor.walk = Some(Walk {
+            distance: 0.0,
+            stuck: 0.0,
+        });
+    }
+
+    let mut peak = 0.0f32;
+    for _ in 0..300 {
+        tick_walk(&mut app);
+        let editor = app.world().resource::<Editor>();
+        if let Some(character) = editor.character {
+            peak = peak.max(character.feet);
+        }
+        if editor.walk.is_none() {
+            break;
+        }
+    }
+
+    let editor = app.world().resource::<Editor>();
+    let character = editor.character.unwrap();
+    assert!(
+        editor.walk.is_none(),
+        "the route should finish, note={}",
+        editor.note
+    );
+    assert!(
+        character.pos.x > 3.0,
+        "should cross the lipped ramp on the route, pos={:?} feet={}",
+        character.pos,
+        character.feet
+    );
+    assert!(
+        peak > 0.5,
+        "should ride up the slope on the way, peak={peak}"
+    );
 }
 
 #[test]
@@ -201,6 +1111,8 @@ fn can_jump_while_climbing_a_ramp() {
             feet: 0.0,
             yaw: -std::f32::consts::FRAC_PI_2,
             vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
             grounded: true,
             health: crate::statuses::Health::default(),
         });
@@ -256,6 +1168,8 @@ fn can_jump_while_descending_a_ramp() {
             feet: 0.85,
             yaw: std::f32::consts::FRAC_PI_2,
             vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
             grounded: true,
             health: crate::statuses::Health::default(),
         });
@@ -304,6 +1218,7 @@ fn clicking_empty_ground_selects_nothing() {
         roll: 0.0,
         elevation: 0.0,
         dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
     }];
     assert_eq!(pick(&pieces, ray_towards(Vec3::new(5.0, 0.0, 5.0))), None);
 }
@@ -318,11 +1233,19 @@ fn a_session_captures_and_restores_pieces_camera_character_and_history() {
         feet: 0.25,
         yaw: 0.5,
         vy: 3.0,
+        hv: Vec2::ZERO,
+        ride_vel: Vec2::ZERO,
         grounded: false,
         health: crate::statuses::Health::default(),
     });
-    editor.undo = vec![vec![test_piece(1)]];
-    editor.redo = vec![vec![test_piece(5)]];
+    editor.undo = vec![LevelState {
+        pieces: vec![test_piece(1)],
+        ..default()
+    }];
+    editor.redo = vec![LevelState {
+        pieces: vec![test_piece(5)],
+        ..default()
+    }];
     editor.next_id = 6;
     let orbit = Orbit {
         target: Vec3::new(1.0, 2.0, 3.0),
@@ -348,8 +1271,8 @@ fn a_session_captures_and_restores_pieces_camera_character_and_history() {
 
     assert_eq!(restored.pieces, vec![test_piece(2), test_piece(4)]);
     assert_eq!(restored.next_id, 6);
-    assert_eq!(restored.undo, vec![vec![test_piece(1)]]);
-    assert_eq!(restored.redo, vec![vec![test_piece(5)]]);
+    assert_eq!(restored.undo[0].pieces, vec![test_piece(1)]);
+    assert_eq!(restored.redo[0].pieces, vec![test_piece(5)]);
     let character = restored.character.unwrap();
     assert_eq!(character.pos, Vec2::new(1.5, -2.5));
     assert_eq!(character.feet, 0.25);
@@ -413,6 +1336,8 @@ fn walking_into_a_dynamic_crate_shoves_it() {
             feet: 0.0,
             yaw: 0.0,
             vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
             grounded: true,
             health: crate::statuses::Health::default(),
         });
@@ -460,6 +1385,8 @@ fn walking_into_a_static_wall_shoves_nothing() {
             feet: 0.0,
             yaw: 0.0,
             vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
             grounded: true,
             health: crate::statuses::Health::default(),
         });

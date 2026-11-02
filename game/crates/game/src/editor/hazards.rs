@@ -1,9 +1,13 @@
-//! Touch damage from hazard pieces (spikes for now).
+//! Touch triggers from pieces (spikes deal damage by default).
 //!
-//! A hazard hurts the character while their capsule overlaps its solid:
-//! same 2D footprint (`hit_test`) plus vertical overlap. Damage is per hit
-//! with a short cooldown so one touch does not drain the whole bar in a
-//! single frame.
+//! A trigger fires while the character overlaps a piece's solid: same 2D
+//! footprint (`hit_test`) plus vertical overlap. Damage is per hit with a
+//! short cooldown so one touch does not drain the whole bar in a single
+//! frame.
+//!
+//! Each placed piece carries its own [`model::Trigger`]: any object can deal
+//! damage, and new effects (heal, bounce, message, ...) slot into
+//! [`apply_trigger`] without touching the overlap test or the cooldown.
 
 use super::*;
 
@@ -21,7 +25,9 @@ impl Default for DamageClock {
     fn default() -> Self {
         // Allow the very first touch to hurt immediately; otherwise a fresh
         // map would grant a free second on the spikes.
-        Self { last: -DAMAGE_COOLDOWN_SECS * 10.0 }
+        Self {
+            last: -DAMAGE_COOLDOWN_SECS * 10.0,
+        }
     }
 }
 
@@ -29,18 +35,18 @@ pub(super) fn damage_ready(now: f64, last: f64) -> bool {
     now - last >= DAMAGE_COOLDOWN_SECS
 }
 
-/// Damage of the first hazard overlapping `(pos, feet)`, if any.
+/// Trigger of the first piece overlapping `(pos, feet)`, if any.
 ///
 /// The check is generous by the capsule radius: the physics collider stops
-/// the character at the hazard's edge, so an exact-centre test would never
+/// the character at the piece's edge, so an exact-centre test would never
 /// fire while walking into it.
-pub(crate) fn hazard_at(pos: Vec2, feet: f32, pieces: &[Piece]) -> Option<f32> {
+pub(crate) fn trigger_at(pos: Vec2, feet: f32, pieces: &[Piece]) -> Option<model::Trigger> {
     let head = feet + CHARACTER_HEIGHT;
     for piece in pieces {
         let Some(shape) = shapes().get(piece.shape) else {
             continue;
         };
-        if shape.damage <= 0.0 {
+        if piece.trigger.is_harmless() {
             continue;
         }
         if !model::hit_test(shape, piece, pos, PILL_RADIUS + 0.15) {
@@ -48,13 +54,27 @@ pub(crate) fn hazard_at(pos: Vec2, feet: f32, pieces: &[Piece]) -> Option<f32> {
         }
         let bottom = piece.elevation + shape.base;
         let top = piece.elevation + shape.top();
-        // `+ 0.2` keeps standing on top of the spikes hurting: feet == top
+        // `+ 0.2` keeps standing on top of spikes hurting: feet == top
         // is still touch, while a real jump clears it.
         if head > bottom && feet < top + 0.2 {
-            return Some(shape.damage);
+            return Some(piece.trigger);
         }
     }
     None
+}
+
+/// Damage of the first trigger overlapping `(pos, feet)`, if any. Kept as the
+/// narrow query so gameplay code and tests do not need to unpack the trigger.
+#[allow(dead_code)] // exercised by tests; live code uses `trigger_at`.
+pub(crate) fn hazard_at(pos: Vec2, feet: f32, pieces: &[Piece]) -> Option<f32> {
+    trigger_at(pos, feet, pieces).map(|trigger| trigger.damage)
+}
+
+/// Apply one trigger's effects to the character. Today this is only damage;
+/// add new `Trigger` fields here as extra lines (heal, bounce, ...).
+pub(crate) fn apply_trigger(character: &mut Character, trigger: model::Trigger) {
+    character.health.damage(trigger.damage);
+    // Future effects land here, e.g.: `character.health.heal(trigger.heal);`
 }
 
 pub(super) fn hazard_damage(
@@ -72,13 +92,13 @@ pub(super) fn hazard_damage(
     if snapshot.health.is_dead() {
         return;
     }
-    let Some(damage) = hazard_at(snapshot.pos, snapshot.feet, &editor.pieces) else {
+    let Some(trigger) = trigger_at(snapshot.pos, snapshot.feet, &editor.pieces) else {
         return;
     };
     let Some(character) = editor.character.as_mut() else {
         return;
     };
-    character.health.damage(damage);
+    apply_trigger(character, trigger);
     clock.last = now;
     editor.note = "ouch!";
 }
@@ -98,6 +118,7 @@ mod tests {
             roll: 0.0,
             elevation,
             dynamic: false,
+            trigger: crate::model::Trigger::damaging(crate::model::SPIKE_DAMAGE),
         }
     }
 
@@ -111,6 +132,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         }
     }
 
@@ -168,5 +190,52 @@ mod tests {
         assert!(!damage_ready(0.5, 0.0));
         assert!(damage_ready(1.0, 0.0));
         assert!(damage_ready(2.5, 1.0));
+    }
+
+    #[test]
+    fn any_piece_can_deal_custom_damage() {
+        let mut block = floor_piece(1);
+        block.shape = model::shape_index("block").unwrap();
+        block.trigger = model::Trigger::damaging(5.0);
+        let pieces = vec![block];
+        assert_eq!(hazard_at(Vec2::ZERO, 0.0, &pieces), Some(5.0));
+        assert_eq!(
+            trigger_at(Vec2::ZERO, 0.0, &pieces),
+            Some(model::Trigger::damaging(5.0))
+        );
+    }
+
+    #[test]
+    fn zeroed_spikes_are_harmless() {
+        let mut spikes = spikes_piece(1, Vec2::ZERO, 0.0);
+        spikes.trigger = model::Trigger::harmless();
+        assert_eq!(hazard_at(Vec2::ZERO, 0.0, &[spikes]), None);
+    }
+
+    #[test]
+    fn edited_spike_damage_is_used_verbatim() {
+        let mut spikes = spikes_piece(1, Vec2::ZERO, 0.0);
+        spikes.trigger.set_damage(25.0);
+        assert_eq!(hazard_at(Vec2::ZERO, 0.0, &[spikes]), Some(25.0));
+    }
+
+    #[test]
+    fn apply_trigger_damages_but_never_heals() {
+        let character = |hp: f32| Character {
+            pos: Vec2::ZERO,
+            feet: 0.0,
+            yaw: 0.0,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            health: crate::statuses::Health::new(hp, 100.0),
+        };
+        let mut hurt = character(100.0);
+        apply_trigger(&mut hurt, model::Trigger::damaging(30.0));
+        assert_eq!(hurt.health.current, 70.0);
+        let mut harmless = character(80.0);
+        apply_trigger(&mut harmless, model::Trigger::harmless());
+        assert_eq!(harmless.health.current, 80.0);
     }
 }

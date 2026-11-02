@@ -247,6 +247,49 @@ pub enum Style {
 /// Damage dealt on touch. Hard-coded to 10 for spikes; everything else is 0.
 pub const SPIKE_DAMAGE: f32 = 10.0;
 
+/// Collision-trigger effects attached to a single placed piece.
+///
+/// A trigger fires while the character overlaps the piece's solid (see
+/// `hazards::hazard_at`). Today the only effect is [`Trigger::damage`];
+/// add new fields here (heal, bounce, message, teleport, ...) and handle
+/// them in `hazards::apply_triggers` — `Piece` stays `Copy` and old saves
+/// keep loading because every new field gets a `#[serde(default)]` entry in
+/// `SavedPiece`.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct Trigger {
+    /// Touch damage per hit. Zero means harmless.
+    pub damage: f32,
+}
+
+impl Trigger {
+    /// A trigger with no effects.
+    pub fn harmless() -> Self {
+        Self { damage: 0.0 }
+    }
+
+    /// A damaging trigger, clamped to `>= 0`. Non-finite amounts are ignored.
+    pub fn damaging(amount: f32) -> Self {
+        Self {
+            damage: if amount.is_finite() && amount > 0.0 {
+                amount
+            } else {
+                0.0
+            },
+        }
+    }
+
+    pub fn is_harmless(self) -> bool {
+        self.damage <= 0.0
+    }
+
+    /// Set damage, clamping negatives to zero and ignoring non-finite input.
+    pub fn set_damage(&mut self, amount: f32) {
+        if amount.is_finite() {
+            self.damage = amount.max(0.0);
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Shape {
     pub id: &'static str,
@@ -717,6 +760,10 @@ pub struct Piece {
     pub elevation: f32,
     /// True when Avian drives this piece with gravity and collisions.
     pub dynamic: bool,
+    /// Collision-trigger effects for this instance. Defaults to the catalogue
+    /// value (`Shape::damage`) when the piece is placed; editing it never
+    /// changes other pieces of the same shape.
+    pub trigger: Trigger,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -966,6 +1013,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let ghost = Piece {
             id: 2,
@@ -976,6 +1024,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
 
         let snap = anchor_snap(&ghost, wall, &[a], SNAP_THRESHOLD).expect("anchor snap");
@@ -996,6 +1045,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         // Rotate the ghost by 60° and place its left anchor exactly on a's right anchor.
         let off = Vec2::from_angle(std::f32::consts::PI / 3.0) * Vec2::new(-edge_len() / 2.0, 0.0);
@@ -1008,6 +1058,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         assert!(anchor_snap(&ghost, wall, &[a], SNAP_THRESHOLD).is_none());
     }
@@ -1024,6 +1075,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let ghost = Piece {
             id: 2,
@@ -1034,6 +1086,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let snap = anchor_snap(&ghost, crate_shape, &[a], SNAP_THRESHOLD).expect("crate snap");
         near(snap.pos.x, 1.2, 0.01);
@@ -1054,6 +1107,7 @@ mod tests {
                 roll: 0.0,
                 elevation: 0.0,
                 dynamic: false,
+                trigger: crate::model::Trigger::harmless(),
             },
             wall,
         );
@@ -1071,6 +1125,7 @@ mod tests {
                 roll: 0.0,
                 elevation: 0.0,
                 dynamic: false,
+                trigger: crate::model::Trigger::harmless(),
             },
             crate_shape,
         );
@@ -1090,6 +1145,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         assert!(hit_test(crate_shape, &p, Vec2::ZERO, 0.0));
         assert!(!hit_test(crate_shape, &p, Vec2::new(2.0, 0.0), HIT_PAD));
@@ -1124,6 +1180,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let a = world_anchors(&p, crate_shape);
         near(a[0].pos.x, 0.2, 0.01);
@@ -1179,6 +1236,7 @@ mod tests {
                 roll,
                 elevation: 0.0,
                 dynamic: false,
+                trigger: crate::model::Trigger::harmless(),
             };
             let before = piece_quat(&piece);
             set_piece_quat(&mut piece, before);
@@ -1201,8 +1259,28 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let expected = bevy::math::Quat::from_rotation_y(-0.7);
         assert!(piece_quat(&piece).dot(expected).abs() > 0.99999);
+    }
+
+    #[test]
+    fn triggers_default_to_harmless_and_clamp_damage() {
+        assert!(Trigger::default().is_harmless());
+        assert!(Trigger::harmless().is_harmless());
+        assert_eq!(Trigger::damaging(10.0).damage, 10.0);
+        assert!(Trigger::damaging(0.0).is_harmless());
+        assert!(Trigger::damaging(-5.0).is_harmless());
+        assert!(Trigger::damaging(f32::NAN).is_harmless());
+        assert!(Trigger::damaging(f32::INFINITY).is_harmless());
+
+        let mut trigger = Trigger::damaging(5.0);
+        trigger.set_damage(12.5);
+        assert_eq!(trigger.damage, 12.5);
+        trigger.set_damage(-3.0);
+        assert_eq!(trigger.damage, 0.0, "negatives clamp to harmless");
+        trigger.set_damage(f32::NAN);
+        assert_eq!(trigger.damage, 0.0, "NaN input is ignored");
     }
 }

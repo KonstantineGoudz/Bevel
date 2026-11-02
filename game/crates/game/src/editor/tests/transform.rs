@@ -16,6 +16,72 @@ fn cursor_looking_at(eye: Vec3, target: Vec3) -> Cursor {
 }
 
 #[test]
+fn selecting_a_piece_without_moving_keeps_its_position() {
+    let wall = model::shape_index("wall").unwrap();
+    let anchor = Piece {
+        id: 1,
+        shape: wall,
+        pos: Vec2::ZERO,
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
+    };
+    // Within anchor range, but not yet snapped: a bare selection must not
+    // pull it into place.
+    let start_pos = Vec2::new(model::edge_len() - 0.05, 0.02);
+    let piece = Piece {
+        id: 2,
+        shape: wall,
+        pos: start_pos,
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
+    };
+    let mut editor = Editor::default();
+    editor.pieces.push(anchor);
+    editor.pieces.push(piece);
+    assert!(editor.snap, "snap is on by default");
+    let drag = Drag {
+        id: 2,
+        offset: Vec2::ZERO,
+        plane: 0.0,
+        moved: false,
+    };
+    editor.drag = Some(drag);
+
+    // No pointer travel: base + offset is the piece's current position.
+    apply_body_drag(&mut editor, drag, start_pos);
+    let kept = editor.pieces.iter().find(|p| p.id == 2).unwrap();
+    assert!(
+        (kept.pos - start_pos).length_squared() < 1e-10,
+        "selecting snapped the piece to {:?}",
+        kept.pos
+    );
+    assert!(
+        !editor.drag.expect("drag").moved,
+        "a pure selection must not count as a move"
+    );
+
+    // Actually dragging does move (and snap) the piece.
+    apply_body_drag(&mut editor, drag, start_pos + Vec2::new(0.05, 0.0));
+    let moved_piece = editor.pieces.iter().find(|p| p.id == 2).unwrap();
+    assert!(
+        (moved_piece.pos - start_pos).length_squared() > 1e-10,
+        "a real drag should move the piece"
+    );
+    assert!(
+        editor.drag.expect("drag").moved,
+        "a real drag should flag the move"
+    );
+}
+
+#[test]
 fn g_then_x_locks_to_world_x_and_enter_confirms() {
     let mut editor = Editor::default();
     editor.pieces.push(test_piece(1));

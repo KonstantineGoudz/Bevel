@@ -1,12 +1,17 @@
 //! Saved-map snapshots: the versioned JSON shape kept in browser storage.
 
+use std::collections::{HashMap, HashSet};
+
 use serde::{Deserialize, Serialize};
 
 use bevy::math::{Vec2, Vec3};
 use bevy::prelude::Resource;
 
 use crate::{
-    editor::{Character, Orbit, ViewMode},
+    editor::{
+        Character, LevelState, Orbit, ViewMode,
+        outline::{Group, SceneOutline, clean_label},
+    },
     model::{self, Piece},
     statuses::Health,
 };
@@ -49,10 +54,13 @@ pub struct Snapshot {
     pub character: Option<SavedCharacter>,
     #[serde(default, deserialize_with = "deserialize_optional")]
     pub camera: Option<SavedCamera>,
+    /// Named groups. Missing on older saves.
+    #[serde(default)]
+    pub groups: Vec<SavedGroup>,
     #[serde(default, deserialize_with = "deserialize_history")]
-    pub undo: Vec<Vec<SavedPiece>>,
+    pub undo: Vec<SavedLevel>,
     #[serde(default, deserialize_with = "deserialize_history")]
-    pub redo: Vec<Vec<SavedPiece>>,
+    pub redo: Vec<SavedLevel>,
     /// Moving-platform paths, keyed by piece id. Missing on older saves.
     #[serde(default)]
     pub platforms: Vec<SavedPlatform>,
@@ -67,7 +75,7 @@ where
     Ok(serde_json::from_value::<Option<T>>(value).ok().flatten())
 }
 
-fn deserialize_history<'de, D>(deserializer: D) -> Result<Vec<Vec<SavedPiece>>, D::Error>
+fn deserialize_history<'de, D>(deserializer: D) -> Result<Vec<SavedLevel>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -75,10 +83,22 @@ where
     let Ok(entries) = serde_json::from_value::<Vec<serde_json::Value>>(value) else {
         return Ok(Vec::new());
     };
-    Ok(entries
-        .into_iter()
-        .filter_map(|entry| serde_json::from_value(entry).ok())
-        .collect())
+    Ok(entries.into_iter().filter_map(parse_saved_level).collect())
+}
+
+/// History entries used to be a bare piece array. Accept both that and the
+/// newer `{ pieces, groups }` object so old autosaves keep loading.
+fn parse_saved_level(value: serde_json::Value) -> Option<SavedLevel> {
+    if value.is_array() {
+        serde_json::from_value::<Vec<SavedPiece>>(value)
+            .ok()
+            .map(|pieces| SavedLevel {
+                pieces,
+                groups: Vec::new(),
+            })
+    } else {
+        serde_json::from_value::<SavedLevel>(value).ok()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -100,6 +120,65 @@ pub struct SavedPiece {
     /// Physics-driven pieces fall and collide. Missing on older levels.
     #[serde(default)]
     pub dynamic: bool,
+    /// Per-piece collision-trigger damage. Missing on older saves, which use
+    /// the catalogue default (`Shape::damage`); `None` on new saves also
+    /// means "use the catalogue default" so untouched pieces stay small.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage: Option<f32>,
+    /// User label. Missing means "use the shape name".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Owning group id. Missing means the scene root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<u32>,
+}
+
+/// A named group in the object graph. Groups nest through `parent`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedGroup {
+    pub id: u32,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub parent: Option<u32>,
+    #[serde(default)]
+    pub collapsed: bool,
+}
+
+/// One undo step. The object shape (rather than a bare array) lets groups and
+/// labels travel with the pieces they describe.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedLevel {
+    #[serde(default)]
+    pub pieces: Vec<SavedPiece>,
+    #[serde(default)]
+    pub groups: Vec<SavedGroup>,
+}
+
+impl From<&Group> for SavedGroup {
+    fn from(group: &Group) -> Self {
+        Self {
+            id: group.id,
+            name: group.name.clone(),
+            parent: group.parent,
+            collapsed: group.collapsed,
+        }
+    }
+}
+
+impl From<&LevelState> for SavedLevel {
+    fn from(state: &LevelState) -> Self {
+        Self {
+            pieces: state
+                .pieces
+                .iter()
+                .map(|piece| SavedPiece::from_piece(piece, &state.outline))
+                .collect(),
+            groups: state.outline.groups.iter().map(SavedGroup::from).collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -157,6 +236,17 @@ pub struct SavedPlatform {
 
 impl From<&Piece> for SavedPiece {
     fn from(piece: &Piece) -> Self {
+        // Omit damage when it matches the catalogue default so untouched
+        // maps keep their old (smaller) JSON; any real edit persists.
+        let default = model::shapes()
+            .get(piece.shape)
+            .map(|shape| shape.damage)
+            .unwrap_or(0.0);
+        let damage = if (piece.trigger.damage - default).abs() < 1e-6 {
+            None
+        } else {
+            Some(piece.trigger.damage)
+        };
         Self {
             id: piece.id,
             shape: model::shapes()[piece.shape].id.to_owned(),
@@ -167,6 +257,20 @@ impl From<&Piece> for SavedPiece {
             pitch_deg: piece.pitch.to_degrees(),
             roll_deg: piece.roll.to_degrees(),
             dynamic: piece.dynamic,
+            damage,
+            name: None,
+            group: None,
+        }
+    }
+}
+
+impl SavedPiece {
+    /// Serialize a piece together with the outliner metadata for it.
+    pub fn from_piece(piece: &Piece, outline: &SceneOutline) -> Self {
+        Self {
+            name: outline.labels.get(&piece.id).cloned(),
+            group: outline.membership.get(&piece.id).copied(),
+            ..Self::from(piece)
         }
     }
 }
@@ -215,12 +319,37 @@ impl Snapshot {
             return Err(LoadError::UnsupportedVersion(self.version));
         }
 
-        let pieces = self
-            .pieces
-            .into_iter()
-            .map(validate_piece)
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut highest_id = pieces.iter().map(|piece| piece.id).max().unwrap_or(0);
+        let mut outline = SceneOutline::default();
+        let mut pieces = Vec::new();
+        for saved in self.pieces {
+            let name = saved
+                .name
+                .clone()
+                .map(|name| clean_label(&name))
+                .filter(|name| !name.is_empty());
+            let group = saved.group;
+            let piece = validate_piece(saved)?;
+            if let Some(name) = name {
+                outline.labels.insert(piece.id, name);
+            }
+            if let Some(group) = group {
+                outline.membership.insert(piece.id, group);
+            }
+            pieces.push(piece);
+        }
+        outline.groups = validate_groups(self.groups, &pieces);
+        let group_ids: HashSet<u32> = outline.groups.iter().map(|group| group.id).collect();
+        outline
+            .membership
+            .retain(|_, group| group_ids.contains(group));
+        outline.bump();
+
+        let mut highest_id = pieces
+            .iter()
+            .map(|piece| piece.id)
+            .chain(outline.groups.iter().map(|group| group.id))
+            .max()
+            .unwrap_or(0);
 
         let undo = validate_history(self.undo, &mut highest_id);
         let redo = validate_history(self.redo, &mut highest_id);
@@ -255,6 +384,8 @@ impl Snapshot {
                     feet: saved.feet,
                     yaw: saved.yaw_deg.to_radians(),
                     vy: 0.0,
+                    hv: Vec2::ZERO,
+                    ride_vel: Vec2::ZERO,
                     grounded: false,
                     health,
                 })
@@ -296,6 +427,7 @@ impl Snapshot {
 
         Ok(Loaded {
             pieces,
+            outline,
             character,
             camera,
             undo,
@@ -346,6 +478,22 @@ pub fn parse_session_id(query: &str) -> Option<String> {
 pub struct Boot {
     pub id: Option<String>,
     pub loaded: Option<Loaded>,
+    /// True when the app should open the Rust/Bevy glTF viewer instead of the
+    /// level editor (`viewer-bevy.html?viewer`, or `--viewer` on native).
+    pub viewer: bool,
+}
+
+/// The viewer is a separate Bevy path: `viewer-bevy.html?viewer` (or any query
+/// string containing a `viewer` flag). Pure so it can be unit-tested.
+pub fn is_viewer_query(query: &str) -> bool {
+    query
+        .strip_prefix('?')
+        .unwrap_or(query)
+        .split('&')
+        .any(|pair| {
+            let key = pair.split('=').next().unwrap_or("");
+            key == "viewer" || key == "view"
+        })
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -356,6 +504,12 @@ pub fn boot() -> Result<Boot, String> {
         .location()
         .search()
         .map_err(|_| "Could not read the browser URL.".to_owned())?;
+    if is_viewer_query(&search) {
+        return Ok(Boot {
+            viewer: true,
+            ..Default::default()
+        });
+    }
     let id = parse_session_id(&search)
         .ok_or_else(|| "Choose a map from the maps page before opening the editor.".to_owned())?;
     let store = LocalStore::new()
@@ -370,12 +524,17 @@ pub fn boot() -> Result<Boot, String> {
     Ok(Boot {
         id: Some(id),
         loaded: Some(loaded),
+        viewer: false,
     })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn boot() -> Result<Boot, String> {
-    Ok(Boot::default())
+    let viewer = std::env::args().any(|arg| arg == "--viewer" || arg == "--view");
+    Ok(Boot {
+        viewer,
+        ..Default::default()
+    })
 }
 
 fn load_error_message(error: LoadError) -> String {
@@ -561,12 +720,83 @@ impl Store for MemoryStore {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Loaded {
     pub pieces: Vec<Piece>,
+    pub outline: SceneOutline,
     pub character: Option<Character>,
     pub camera: Option<Orbit>,
-    pub undo: Vec<Vec<Piece>>,
-    pub redo: Vec<Vec<Piece>>,
+    pub undo: Vec<LevelState>,
+    pub redo: Vec<LevelState>,
     pub next_id: u32,
     pub platforms: Vec<SavedPlatform>,
+}
+
+/// Accept as many saved groups as possible: duplicate/zero/conflicting ids and
+/// missing parents are dropped, and a parent cycle is broken rather than
+/// refusing the whole map.
+fn validate_groups(saved: Vec<SavedGroup>, pieces: &[Piece]) -> Vec<Group> {
+    let piece_ids: HashSet<u32> = pieces.iter().map(|piece| piece.id).collect();
+    let mut seen = HashSet::new();
+    let mut groups: Vec<Group> = Vec::new();
+    for group in saved {
+        if group.id == 0 || piece_ids.contains(&group.id) || !seen.insert(group.id) {
+            continue;
+        }
+        groups.push(Group {
+            id: group.id,
+            name: clean_label(&group.name),
+            parent: group.parent,
+            collapsed: group.collapsed,
+        });
+    }
+    let ids: HashSet<u32> = groups.iter().map(|group| group.id).collect();
+    for group in &mut groups {
+        if group.parent.is_some_and(|parent| !ids.contains(&parent)) {
+            group.parent = None;
+        }
+    }
+    let parents: HashMap<u32, Option<u32>> = groups
+        .iter()
+        .map(|group| (group.id, group.parent))
+        .collect();
+    for group in &mut groups {
+        let mut chain = HashSet::new();
+        let mut current = group.parent;
+        while let Some(id) = current {
+            if !chain.insert(id) {
+                group.parent = None;
+                break;
+            }
+            current = parents.get(&id).copied().flatten();
+        }
+    }
+    groups
+}
+
+fn validate_level(level: SavedLevel) -> Option<LevelState> {
+    let mut outline = SceneOutline::default();
+    let mut pieces = Vec::new();
+    for saved in level.pieces {
+        let name = saved
+            .name
+            .clone()
+            .map(|name| clean_label(&name))
+            .filter(|name| !name.is_empty());
+        let group = saved.group;
+        let piece = validate_piece(saved).ok()?;
+        if let Some(name) = name {
+            outline.labels.insert(piece.id, name);
+        }
+        if let Some(group) = group {
+            outline.membership.insert(piece.id, group);
+        }
+        pieces.push(piece);
+    }
+    outline.groups = validate_groups(level.groups, &pieces);
+    let group_ids: HashSet<u32> = outline.groups.iter().map(|group| group.id).collect();
+    outline
+        .membership
+        .retain(|_, group| group_ids.contains(group));
+    outline.bump();
+    Some(LevelState { pieces, outline })
 }
 
 fn validate_platform(saved: &SavedPlatform) -> Option<SavedPlatform> {
@@ -592,8 +822,12 @@ fn validate_platform(saved: &SavedPlatform) -> Option<SavedPlatform> {
 }
 
 fn validate_piece(saved: SavedPiece) -> Result<Piece, LoadError> {
-    let shape = model::shape_index(&saved.shape)
+    let shape_index = model::shape_index(&saved.shape)
         .ok_or_else(|| LoadError::UnknownShape(saved.shape.clone()))?;
+    let shape_default = model::shapes()
+        .get(shape_index)
+        .map(|shape| shape.damage)
+        .unwrap_or(0.0);
     for (value, name) in [
         (saved.x, "piece x"),
         (saved.z, "piece z"),
@@ -606,30 +840,41 @@ fn validate_piece(saved: SavedPiece) -> Result<Piece, LoadError> {
             return Err(LoadError::NonFinite(name));
         }
     }
+    if let Some(damage) = saved.damage
+        && (!damage.is_finite() || damage < 0.0 || damage > 10000.0)
+    {
+        return Err(LoadError::NonFinite("piece damage"));
+    }
+    let damage = saved.damage.unwrap_or(shape_default);
 
     Ok(Piece {
         id: saved.id,
-        shape,
+        shape: shape_index,
         pos: Vec2::new(saved.x, saved.z),
         rot: saved.rot_deg.to_radians(),
         pitch: saved.pitch_deg.to_radians(),
         roll: saved.roll_deg.to_radians(),
         elevation: saved.elevation,
         dynamic: saved.dynamic,
+        trigger: model::Trigger::damaging(damage),
     })
 }
 
-fn validate_history(history: Vec<Vec<SavedPiece>>, highest_id: &mut u32) -> Vec<Vec<Piece>> {
+fn validate_history(history: Vec<SavedLevel>, highest_id: &mut u32) -> Vec<LevelState> {
     let mut valid = Vec::new();
     for entry in history {
-        let pieces = entry
-            .into_iter()
-            .map(validate_piece)
-            .collect::<Result<Vec<_>, _>>();
-        if let Ok(pieces) = pieces {
-            *highest_id = (*highest_id).max(pieces.iter().map(|piece| piece.id).max().unwrap_or(0));
-            valid.push(pieces);
-        }
+        let Some(state) = validate_level(entry) else {
+            continue;
+        };
+        let highest = state
+            .pieces
+            .iter()
+            .map(|piece| piece.id)
+            .chain(state.outline.groups.iter().map(|group| group.id))
+            .max()
+            .unwrap_or(0);
+        *highest_id = (*highest_id).max(highest);
+        valid.push(state);
     }
     if valid.len() > MAX_HISTORY {
         valid.drain(..valid.len() - MAX_HISTORY);
@@ -653,6 +898,16 @@ mod tests {
         assert_eq!(parse_session_id("?Session=abc"), None);
     }
 
+    #[test]
+    fn the_viewer_flag_is_read_from_the_query_string() {
+        assert!(is_viewer_query("?viewer"));
+        assert!(is_viewer_query("?viewer=1"));
+        assert!(is_viewer_query("?session=abc&viewer"));
+        assert!(is_viewer_query("?view=models"));
+        assert!(!is_viewer_query("?session=abc"));
+        assert!(!is_viewer_query(""));
+    }
+
     fn piece() -> SavedPiece {
         SavedPiece {
             id: 3,
@@ -661,6 +916,9 @@ mod tests {
             z: -2.0,
             elevation: 0.5,
             dynamic: true,
+            damage: None,
+            name: None,
+            group: None,
             rot_deg: 30.0,
             pitch_deg: -15.0,
             roll_deg: 10.0,
@@ -690,8 +948,12 @@ mod tests {
                 distance: 7.5,
                 mode: "third".into(),
             }),
-            undo: vec![vec![]],
-            redo: vec![vec![piece()]],
+            groups: vec![],
+            undo: vec![SavedLevel::default()],
+            redo: vec![SavedLevel {
+                pieces: vec![piece()],
+                groups: vec![],
+            }],
             platforms: vec![],
         };
         let json = snapshot.to_json();
@@ -812,8 +1074,8 @@ mod tests {
 
         let loaded = snapshot.validate().unwrap();
         assert_eq!(loaded.undo.len(), 2);
-        assert_eq!(loaded.undo[0][0].id, 2);
-        assert_eq!(loaded.undo[1][0].id, 3);
+        assert_eq!(loaded.undo[0].pieces[0].id, 2);
+        assert_eq!(loaded.undo[1].pieces[0].id, 3);
     }
 
     fn saved(id: u32, shape: &str, x: f32, z: f32) -> SavedPiece {
@@ -824,6 +1086,9 @@ mod tests {
             z,
             elevation: 0.0,
             dynamic: false,
+            damage: None,
+            name: None,
+            group: None,
             rot_deg: 0.0,
             pitch_deg: 0.0,
             roll_deg: 0.0,
@@ -943,13 +1208,25 @@ mod tests {
         let snapshot = Snapshot {
             version: 1,
             pieces: vec![saved(1, "block", 0.0, 0.0)],
-            undo: vec![vec![saved(2, "block", 0.0, 0.0)], vec![bad]],
-            redo: vec![vec![saved(3, "block", 0.0, 0.0)]],
+            undo: vec![
+                SavedLevel {
+                    pieces: vec![saved(2, "block", 0.0, 0.0)],
+                    groups: vec![],
+                },
+                SavedLevel {
+                    pieces: vec![bad],
+                    groups: vec![],
+                },
+            ],
+            redo: vec![SavedLevel {
+                pieces: vec![saved(3, "block", 0.0, 0.0)],
+                groups: vec![],
+            }],
             ..Default::default()
         };
         let loaded = snapshot.validate().unwrap();
         assert_eq!(loaded.undo.len(), 1);
-        assert_eq!(loaded.undo[0][0].id, 2);
+        assert_eq!(loaded.undo[0].pieces[0].id, 2);
         assert_eq!(loaded.redo.len(), 1);
     }
 
@@ -959,8 +1236,14 @@ mod tests {
             version: 1,
             next_id: Some(5),
             pieces: vec![saved(2, "block", 0.0, 0.0)],
-            undo: vec![vec![saved(7, "block", 0.0, 0.0)]],
-            redo: vec![vec![saved(9, "block", 0.0, 0.0)]],
+            undo: vec![SavedLevel {
+                pieces: vec![saved(7, "block", 0.0, 0.0)],
+                groups: vec![],
+            }],
+            redo: vec![SavedLevel {
+                pieces: vec![saved(9, "block", 0.0, 0.0)],
+                groups: vec![],
+            }],
             ..Default::default()
         };
         assert_eq!(snapshot.validate().unwrap().next_id, 10);
@@ -969,7 +1252,10 @@ mod tests {
     #[test]
     fn history_is_trimmed_to_the_newest_sixty() {
         let undo = (0..70)
-            .map(|i| vec![saved(i + 1, "block", 0.0, 0.0)])
+            .map(|i| SavedLevel {
+                pieces: vec![saved(i + 1, "block", 0.0, 0.0)],
+                groups: vec![],
+            })
             .collect();
         let loaded = Snapshot {
             version: 1,
@@ -979,8 +1265,8 @@ mod tests {
         .validate()
         .unwrap();
         assert_eq!(loaded.undo.len(), 60);
-        assert_eq!(loaded.undo[0][0].id, 11);
-        assert_eq!(loaded.undo[59][0].id, 70);
+        assert_eq!(loaded.undo[0].pieces[0].id, 11);
+        assert_eq!(loaded.undo[59].pieces[0].id, 70);
     }
 
     #[test]
@@ -1130,6 +1416,189 @@ mod tests {
         assert_eq!(
             read_session(&store, "nope").unwrap_err(),
             LoadError::NotFound
+        );
+    }
+
+    #[test]
+    fn per_piece_damage_round_trips_through_json() {
+        let mut damaged = saved(1, "block", 0.0, 0.0);
+        damaged.damage = Some(7.5);
+        let snapshot = Snapshot {
+            version: 1,
+            pieces: vec![damaged],
+            ..Default::default()
+        };
+        let json = snapshot.to_json();
+        assert!(json.contains("\"damage\":7.5"), "{json}");
+        let loaded = Snapshot::from_json(&json).unwrap().validate().unwrap();
+        assert!((loaded.pieces[0].trigger.damage - 7.5).abs() < 1e-5);
+        // Saving again omits nothing: a real edit persists.
+        let resaved = SavedPiece::from(&loaded.pieces[0]);
+        assert_eq!(resaved.damage, Some(7.5));
+    }
+
+    #[test]
+    fn unedited_pieces_omit_damage_and_reload_with_the_catalogue_default() {
+        let block = SavedPiece {
+            damage: None,
+            ..saved(1, "block", 0.0, 0.0)
+        };
+        let json = Snapshot {
+            version: 1,
+            pieces: vec![block],
+            ..Default::default()
+        }
+        .to_json();
+        assert!(!json.contains("damage"), "{json}");
+        let loaded = Snapshot::from_json(&json).unwrap().validate().unwrap();
+        assert_eq!(loaded.pieces[0].trigger.damage, 0.0);
+
+        // Old saves without a damage key: spikes hurt, blocks do not.
+        let old_spikes = Snapshot::from_json(
+            r#"{"version":1,"pieces":[{"id":1,"shape":"spikes","x":0,"z":0,"elevation":0,"rotDeg":0}]}"#,
+        )
+        .unwrap()
+        .validate()
+        .unwrap();
+        assert!((old_spikes.pieces[0].trigger.damage - 10.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn labels_groups_and_membership_round_trip() {
+        let snapshot = Snapshot {
+            version: 1,
+            pieces: vec![
+                SavedPiece {
+                    name: Some("North wall".into()),
+                    group: Some(10),
+                    ..saved(1, "wall", 0.0, 0.0)
+                },
+                SavedPiece {
+                    group: Some(11),
+                    ..saved(2, "crate", 1.0, 0.0)
+                },
+            ],
+            groups: vec![
+                SavedGroup {
+                    id: 10,
+                    name: "Rooms".into(),
+                    parent: None,
+                    collapsed: false,
+                },
+                SavedGroup {
+                    id: 11,
+                    name: "Props".into(),
+                    parent: Some(10),
+                    collapsed: true,
+                },
+            ],
+            ..Default::default()
+        };
+        let json = snapshot.to_json();
+        assert!(json.contains("\"name\":\"North wall\""), "{json}");
+        assert!(json.contains("\"groups\""), "{json}");
+
+        let loaded = snapshot.validate().unwrap();
+        assert_eq!(
+            loaded.outline.labels.get(&1).map(String::as_str),
+            Some("North wall")
+        );
+        assert_eq!(loaded.outline.piece_parent(1), Some(10));
+        assert_eq!(loaded.outline.piece_parent(2), Some(11));
+        assert_eq!(loaded.outline.group(11).unwrap().parent, Some(10));
+        assert!(loaded.outline.group(11).unwrap().collapsed);
+        assert_eq!(loaded.next_id, 12);
+    }
+
+    #[test]
+    fn broken_group_links_are_repaired_instead_of_refusing_the_map() {
+        let snapshot = Snapshot {
+            version: 1,
+            pieces: vec![SavedPiece {
+                group: Some(99),
+                ..saved(1, "block", 0.0, 0.0)
+            }],
+            groups: vec![
+                SavedGroup {
+                    id: 20,
+                    name: "A".into(),
+                    parent: Some(21),
+                    collapsed: false,
+                },
+                SavedGroup {
+                    id: 21,
+                    name: "B".into(),
+                    parent: Some(20),
+                    collapsed: false,
+                },
+                SavedGroup {
+                    id: 22,
+                    name: "C".into(),
+                    parent: Some(999),
+                    collapsed: false,
+                },
+                SavedGroup {
+                    id: 1,
+                    name: "collides with a piece".into(),
+                    parent: None,
+                    collapsed: false,
+                },
+            ],
+            ..Default::default()
+        };
+        let loaded = snapshot.validate().unwrap();
+        assert_eq!(loaded.outline.piece_parent(1), None);
+        assert!(loaded.outline.group(20).is_some());
+        assert!(loaded.outline.group(21).is_some());
+        assert_eq!(loaded.outline.group(20).unwrap().parent, None);
+        assert_eq!(loaded.outline.group(21).unwrap().parent, None);
+        assert_eq!(loaded.outline.group(22).unwrap().parent, None);
+        // A group id that collides with a piece id is dropped, not merged.
+        assert!(loaded.outline.group(1).is_none());
+    }
+
+    #[test]
+    fn old_array_history_still_loads_with_labels_and_groups() {
+        let snapshot = Snapshot::from_json(
+            r#"{
+                "version": 1,
+                "groups": [{"id": 4, "name": "Old room"}],
+                "undo": [
+                    [{"id": 1, "shape": "block", "x": 0, "z": 0, "elevation": 0, "rotDeg": 0}]
+                ]
+            }"#,
+        )
+        .unwrap();
+        let loaded = snapshot.validate().unwrap();
+        assert_eq!(loaded.undo.len(), 1);
+        assert_eq!(loaded.undo[0].pieces.len(), 1);
+        assert!(loaded.undo[0].outline.groups.is_empty());
+        assert_eq!(loaded.outline.group(4).unwrap().name, "Old room");
+    }
+
+    #[test]
+    fn bad_damage_refuses_the_map() {
+        let mut bad = saved(1, "block", 0.0, 0.0);
+        bad.damage = Some(-5.0);
+        let snapshot = Snapshot {
+            version: 1,
+            pieces: vec![bad],
+            ..Default::default()
+        };
+        assert_eq!(
+            snapshot.validate().unwrap_err(),
+            LoadError::NonFinite("piece damage")
+        );
+        let mut nan = saved(1, "block", 0.0, 0.0);
+        nan.damage = Some(f32::NAN);
+        let snapshot = Snapshot {
+            version: 1,
+            pieces: vec![nan],
+            ..Default::default()
+        };
+        assert_eq!(
+            snapshot.validate().unwrap_err(),
+            LoadError::NonFinite("piece damage")
         );
     }
 }

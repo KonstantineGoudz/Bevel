@@ -8,7 +8,7 @@ use bevy::ui_widgets::TextInput;
 
 pub(super) const PROPERTIES_WIDTH: f32 = 230.0;
 pub(super) const PROPERTIES_MARGIN: f32 = 12.0;
-pub(super) const PROPERTIES_HEIGHT: f32 = 430.0;
+pub(super) const PROPERTIES_HEIGHT: f32 = 490.0;
 
 #[derive(Component)]
 pub(super) struct PlatformSection;
@@ -40,6 +40,12 @@ pub(super) struct PlatformSpeedLabel;
 #[derive(Component)]
 pub(super) struct PlatformStaticLabel;
 
+#[derive(Component)]
+pub(super) struct PlatformEditButton;
+
+#[derive(Component)]
+pub(super) struct PlatformEditLabel;
+
 /// Whether a logical screen point is over the floating property panel.
 pub(super) fn over_properties_panel(screen: Vec2, size: Vec2, selected: bool) -> bool {
     selected
@@ -68,6 +74,9 @@ pub(super) enum PropertyField {
     RotX,
     RotY,
     RotZ,
+    /// Per-piece collision-trigger damage. Any piece can hurt; 0 is harmless.
+    /// Adding more trigger effects later means adding more variants here.
+    Damage,
 }
 
 impl PropertyField {
@@ -76,6 +85,7 @@ impl PropertyField {
             Self::PosX | Self::RotX => "X",
             Self::PosY | Self::RotY => "Y",
             Self::PosZ | Self::RotZ => "Z",
+            Self::Damage => "D",
         }
     }
 
@@ -91,6 +101,7 @@ impl PropertyField {
             Self::RotX => piece.pitch.to_degrees(),
             Self::RotY => piece.rot.to_degrees(),
             Self::RotZ => piece.roll.to_degrees(),
+            Self::Damage => piece.trigger.damage,
         }
     }
 
@@ -102,12 +113,17 @@ impl PropertyField {
             Self::RotX => piece.pitch = value.to_radians(),
             Self::RotY => piece.rot = value.to_radians(),
             Self::RotZ => piece.roll = value.to_radians(),
+            // Damage is clamped to >= 0; non-finite input never reaches here
+            // (`parse` filters it).
+            Self::Damage => piece.trigger.set_damage(value),
         }
     }
 
     pub(super) fn format(self, piece: &Piece) -> String {
         let value = self.get(piece);
         let text = if self.rotation() {
+            format!("{:.1}", value)
+        } else if matches!(self, Self::Damage) {
             format!("{:.1}", value)
         } else {
             format!("{:.3}", value)
@@ -220,6 +236,12 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
         let row = property_row(commands, field, index + 3);
         commands.entity(panel).add_child(row);
     }
+    // Collision trigger: per-piece damage. Any object can hurt; 0 is
+    // harmless. Future trigger effects get their own rows here.
+    let damage_label = section_label(commands, "TRIGGER (DAMAGE PER HIT)");
+    commands.entity(panel).add_child(damage_label);
+    let damage_row = property_row(commands, PropertyField::Damage, 6);
+    commands.entity(panel).add_child(damage_row);
 
     let toggle = commands
         .spawn((
@@ -265,7 +287,20 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
         .id();
     let motion_label = section_label(commands, "MOTION (PLATFORM PATH)");
     commands.entity(motion).add_child(motion_label);
-    let mode = platform_button(commands, PlatformModeButton, PlatformModeLabel, "Mode: none");
+    let edit = platform_button(
+        commands,
+        PlatformEditButton,
+        PlatformEditLabel,
+        "Edit path: off",
+    );
+    commands.entity(edit).observe(on_platform_edit);
+    commands.entity(motion).add_child(edit);
+    let mode = platform_button(
+        commands,
+        PlatformModeButton,
+        PlatformModeLabel,
+        "Mode: none",
+    );
     commands.entity(mode).observe(on_platform_mode);
     commands.entity(motion).add_child(mode);
     let pause = platform_button(
@@ -285,12 +320,7 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
             ..default()
         })
         .id();
-    let slower = platform_button(
-        commands,
-        PlatformSlowerButton,
-        PlatformStaticLabel,
-        "-",
-    );
+    let slower = platform_button(commands, PlatformSlowerButton, PlatformStaticLabel, "-");
     commands.entity(slower).observe(on_platform_slower);
     let speed_label = commands
         .spawn((
@@ -308,12 +338,7 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
             },
         ))
         .id();
-    let faster = platform_button(
-        commands,
-        PlatformFasterButton,
-        PlatformStaticLabel,
-        "+",
-    );
+    let faster = platform_button(commands, PlatformFasterButton, PlatformStaticLabel, "+");
     commands.entity(faster).observe(on_platform_faster);
     commands
         .entity(speed_row)
@@ -494,6 +519,8 @@ pub(super) fn on_platform_mode(
         crate::platforms::PlatformMode::Loop => crate::platforms::PlatformMode::OneShot,
         crate::platforms::PlatformMode::OneShot => crate::platforms::PlatformMode::PingPong,
     };
+    // Loop opens/closes the circuit, so the track must be rebuilt.
+    mover.rebuild();
     editor.hard_dirty = true;
     editor.note = "motion mode updated";
 }
@@ -552,6 +579,33 @@ fn bump_platform_speed(editor: &mut Editor, movers: &mut Movers, delta: f32) {
     let mover = movers.mover_mut(id, start);
     mover.speed = (mover.speed + delta).clamp(0.5, 8.0);
     editor.hard_dirty = true;
+}
+
+pub(super) fn on_platform_edit(
+    event: On<Activate>,
+    buttons: Query<&PlatformEditButton>,
+    mut editor: ResMut<Editor>,
+) {
+    if buttons.get(event.entity).is_err() {
+        return;
+    }
+    if editor.selected.is_none() {
+        editor.note = "select a piece first, then edit motion";
+        return;
+    }
+    let entering = editor.actor_tool != Some(ActorTool::Platform);
+    editor.actor_tool = if entering {
+        Some(ActorTool::Platform)
+    } else {
+        None
+    };
+    editor.tool = None;
+    editor.ghost = None;
+    editor.note = if entering {
+        "motion: click to add points, drag handles to reshape"
+    } else {
+        "motion editing off"
+    };
 }
 
 pub(super) fn on_platform_slower(
@@ -687,6 +741,7 @@ pub(super) fn sync_properties_panel(
             Without<PlatformModeLabel>,
             Without<PlatformPauseLabel>,
             Without<PlatformSpeedLabel>,
+            Without<PlatformEditLabel>,
         ),
     >,
     mut toggle_label: Single<
@@ -697,6 +752,7 @@ pub(super) fn sync_properties_panel(
             Without<PlatformModeLabel>,
             Without<PlatformPauseLabel>,
             Without<PlatformSpeedLabel>,
+            Without<PlatformEditLabel>,
         ),
     >,
     mut mode_label: Single<
@@ -707,6 +763,7 @@ pub(super) fn sync_properties_panel(
             Without<PhysicsToggleLabel>,
             Without<PlatformPauseLabel>,
             Without<PlatformSpeedLabel>,
+            Without<PlatformEditLabel>,
         ),
     >,
     mut pause_label: Single<
@@ -717,6 +774,7 @@ pub(super) fn sync_properties_panel(
             Without<PhysicsToggleLabel>,
             Without<PlatformModeLabel>,
             Without<PlatformSpeedLabel>,
+            Without<PlatformEditLabel>,
         ),
     >,
     mut speed_label: Single<
@@ -727,6 +785,18 @@ pub(super) fn sync_properties_panel(
             Without<PhysicsToggleLabel>,
             Without<PlatformModeLabel>,
             Without<PlatformPauseLabel>,
+            Without<PlatformEditLabel>,
+        ),
+    >,
+    mut edit_label: Single<
+        &mut Text,
+        (
+            With<PlatformEditLabel>,
+            Without<PropertyShapeLabel>,
+            Without<PhysicsToggleLabel>,
+            Without<PlatformModeLabel>,
+            Without<PlatformPauseLabel>,
+            Without<PlatformSpeedLabel>,
         ),
     >,
 ) {
@@ -774,11 +844,19 @@ pub(super) fn sync_properties_panel(
             }
         }
     }
-    shape_label.0 = shapes()[piece.shape].name.to_string();
+    shape_label.0 = match editor.outline.label(piece.id) {
+        Some(label) => format!("{} ({})", label, shapes()[piece.shape].name),
+        None => shapes()[piece.shape].name.to_string(),
+    };
     toggle_label.0 = if piece.dynamic {
         "Physics: Dynamic".to_string()
     } else {
         "Physics: Static".to_string()
+    };
+    edit_label.0 = if editor.actor_tool == Some(ActorTool::Platform) {
+        "Edit path: on".to_string()
+    } else {
+        "Edit path: off".to_string()
     };
     if let Some(mover) = editor.selected.and_then(|id| movers.map.get(&id)) {
         mode_label.0 = format!(

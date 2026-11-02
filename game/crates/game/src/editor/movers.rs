@@ -16,6 +16,8 @@ pub const DEFAULT_PLATFORM_SPEED: f32 = 1.5;
 #[derive(Clone, Debug)]
 pub struct Mover {
     pub waypoints: Vec<PlatformWaypoint>,
+    /// Selected waypoint index for handle dragging and Delete.
+    pub selected: Option<usize>,
     pub track: Option<path::Track>,
     pub mode: PlatformMode,
     pub speed: f32,
@@ -28,6 +30,7 @@ impl Mover {
     pub fn new(start: Vec2) -> Self {
         Self {
             waypoints: vec![PlatformWaypoint::new(start)],
+            selected: None,
             track: None,
             mode: PlatformMode::default(),
             speed: DEFAULT_PLATFORM_SPEED,
@@ -39,7 +42,10 @@ impl Mover {
 
     pub fn rebuild(&mut self) {
         if self.waypoints.len() >= 2 {
-            self.track = Some(platforms::build_platform_track(&self.waypoints));
+            // Loop mode is a true closed circuit: the end connects back to
+            // the start so the platform never jumps.
+            let closed = self.mode == PlatformMode::Loop;
+            self.track = Some(platforms::build_platform_track(&self.waypoints, closed));
             // Keep progress in range after edits.
             let total = self.track.as_ref().map(|t| t.total()).unwrap_or(0.0);
             self.distance = self.distance.clamp(0.0, total);
@@ -59,14 +65,8 @@ impl Mover {
         if total <= 0.0 {
             return None;
         }
-        let (distance, dir) = platforms::advance_platform(
-            self.distance,
-            self.dir,
-            total,
-            self.speed,
-            dt,
-            self.mode,
-        );
+        let (distance, dir) =
+            platforms::advance_platform(self.distance, self.dir, total, self.speed, dt, self.mode);
         self.distance = distance;
         self.dir = dir;
         Some(track.at(distance).0)
@@ -119,11 +119,7 @@ pub(crate) fn to_saved(piece_id: u32, mover: &Mover) -> session::SavedPlatform {
     }
 }
 
-pub(crate) fn apply_saved(
-    movers: &mut Movers,
-    pieces: &[Piece],
-    saved: &[session::SavedPlatform],
-) {
+pub(crate) fn apply_saved(movers: &mut Movers, pieces: &[Piece], saved: &[session::SavedPlatform]) {
     movers.map.clear();
     for entry in saved {
         let Some(piece) = pieces.iter().find(|p| p.id == entry.piece) else {
@@ -144,7 +140,10 @@ pub(crate) fn apply_saved(
         let mut mover = Mover::new(piece.pos);
         mover.waypoints = waypoints;
         mover.mode = PlatformMode::parse(&entry.mode).unwrap_or_default();
-        mover.speed = entry.speed.unwrap_or(DEFAULT_PLATFORM_SPEED).clamp(0.5, 8.0);
+        mover.speed = entry
+            .speed
+            .unwrap_or(DEFAULT_PLATFORM_SPEED)
+            .clamp(0.5, 8.0);
         mover.paused = entry.paused;
         mover.distance = 0.0;
         mover.dir = 1.0;
@@ -164,18 +163,97 @@ pub(super) fn flush_platform_requests(mut editor: ResMut<Editor>, mut movers: Re
     };
     let mover = movers.mover_mut(id, piece.pos);
     mover.waypoints.push(PlatformWaypoint::new(pos));
+    mover.selected = Some(mover.waypoints.len() - 1);
     mover.rebuild();
     editor.hard_dirty = true;
     editor.note = "motion waypoint added";
 }
 
+/// Delete the selected waypoint of the selected piece's path, if any.
+/// Returns true when something was removed.
+pub(super) fn delete_selected_mover_waypoint(editor: &mut Editor, movers: &mut Movers) -> bool {
+    let Some(id) = editor.selected else {
+        return false;
+    };
+    let Some(mover) = movers.map.get_mut(&id) else {
+        return false;
+    };
+    let Some(index) = mover.selected else {
+        return false;
+    };
+    if index >= mover.waypoints.len() {
+        mover.selected = None;
+        return false;
+    }
+    mover.waypoints.remove(index);
+    mover.selected = None;
+    mover.rebuild();
+    editor.hard_dirty = true;
+    editor.note = "motion waypoint deleted";
+    true
+}
+
+/// Apply one pointer update to a mover handle: drag the waypoint itself, or
+/// reshape the curve through a tangent handle. Ground-plane raycast, like
+/// the click that appends waypoints, so handles track the pointer exactly.
+pub(super) fn apply_mover_drag(
+    editor: &mut Editor,
+    movers: &mut Movers,
+    drag: PathDrag,
+    screen: Vec2,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+) -> bool {
+    let Some(id) = editor.selected else {
+        return false;
+    };
+    let Some(mover) = movers.map.get_mut(&id) else {
+        return false;
+    };
+    let Ok(ray) = camera.viewport_to_world(camera_transform, screen) else {
+        return false;
+    };
+    let Some(point) = ray.plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))
+    else {
+        return false;
+    };
+    let pos = Vec2::new(point.x, point.z);
+    match drag.handle {
+        PathHandle::Waypoint(raw) => {
+            let index = raw as usize;
+            if index >= mover.waypoints.len() {
+                return false;
+            }
+            mover.waypoints[index].pos = pos;
+            mover.selected = Some(index);
+        }
+        PathHandle::Tangent { waypoint, side } => {
+            let index = waypoint as usize;
+            let Some(entry) = mover.waypoints.get_mut(index) else {
+                return false;
+            };
+            match side {
+                TangentSide::Incoming => entry.incoming = Some(pos),
+                TangentSide::Outgoing => entry.outgoing = Some(pos),
+            }
+            mover.selected = Some(index);
+        }
+    }
+    mover.rebuild();
+    editor.hard_dirty = true;
+    true
+}
+
 /// Move every platform along its track, carrying a standing rider by the
 /// same delta (full carry, including vertical when we add height later).
 /// Runs before `character_move` so physics sees the carried position.
+/// Also stamps the platform velocity underfoot onto `ride_vel` (zero when
+/// not riding) so jumps can inherit the ride's inertia.
 pub(super) fn move_movers(
     time: Res<Time>,
     mut movers: ResMut<Movers>,
     mut editor: ResMut<Editor>,
+    mut orbit: ResMut<Orbit>,
 ) {
     let dt = time.delta_secs().clamp(0.0, 0.25);
     if dt <= 0.0 {
@@ -215,7 +293,25 @@ pub(super) fn move_movers(
             character.pos += carry;
             character.feet += carry_feet;
         }
+        // Third person rides along: shift the orbit centre by the same delta
+        // so the camera follows a standing rider. A delta (not a snap) keeps
+        // a manual pan offset intact.
+        if orbit.mode == ViewMode::Third {
+            orbit.target.x += carry.x;
+            orbit.target.z += carry.y;
+        }
         editor.soft_dirty = true;
+    }
+    // Stamp the ride velocity every frame: the platform's world velocity
+    // while carried, zero otherwise. `character_move` folds this into `hv`
+    // on takeoff so jumps inherit the ride, and back out on landing so
+    // repeated hops cannot stack speed.
+    if let Some(character) = editor.character.as_mut() {
+        character.ride_vel = if carry != Vec2::ZERO {
+            carry / dt
+        } else {
+            Vec2::ZERO
+        };
     }
 }
 
@@ -233,6 +329,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         }
     }
 
@@ -270,11 +367,7 @@ mod tests {
 
         let pieces = vec![block_piece(7, Vec2::ZERO)];
         let mut movers = Movers::default();
-        apply_saved(
-            &mut movers,
-            &pieces,
-            std::slice::from_ref(&saved),
-        );
+        apply_saved(&mut movers, &pieces, std::slice::from_ref(&saved));
         let restored = movers.map.get(&7).expect("restored mover");
         assert_eq!(restored.waypoints.len(), 2);
         assert_eq!(restored.mode, PlatformMode::Loop);

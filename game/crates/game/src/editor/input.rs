@@ -91,22 +91,6 @@ pub(super) fn on_palette_activate(
                 focus_character(&mut orbit, editor.character);
             }
         }
-        PaletteAction::Platform => {
-            let entering = editor.actor_tool != Some(ActorTool::Platform);
-            editor.actor_tool = if entering {
-                Some(ActorTool::Platform)
-            } else {
-                None
-            };
-            editor.tool = None;
-            if entering {
-                editor.note = if editor.selected.is_some() {
-                    "motion: click to add path points"
-                } else {
-                    "select a piece first, then add motion"
-                };
-            }
-        }
         PaletteAction::Walk => {
             if editor.actor_tool == Some(ActorTool::Plan) {
                 walk_from_plan(&mut editor, &nav, &spatial_query, &filter);
@@ -273,7 +257,7 @@ pub(super) fn interact(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
-    mut clipboard: ResMut<Clipboard>,
+    mut movers: ResMut<Movers>,
 ) {
     let (camera, camera_transform) = *camera;
     let camera_global = GlobalTransform::from(*camera_transform);
@@ -370,15 +354,23 @@ pub(super) fn interact(
     }
 
     if !playing && (keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::Backspace)) {
-        let waypoint_selected = editor.actor_tool == Some(ActorTool::Plan)
-            && editor
-                .plan
-                .as_ref()
-                .is_some_and(|plan| plan.selected.is_some());
-        if waypoint_selected {
-            delete_waypoint(&mut editor, &nav, &spatial_query, &surface_filter);
+        // Motion waypoints win while the Motion tool is armed; otherwise the
+        // whole piece goes.
+        if editor.actor_tool == Some(ActorTool::Platform)
+            && delete_selected_mover_waypoint(&mut editor, &mut movers)
+        {
+            // Waypoint removed; the piece survives.
         } else {
-            delete_piece(&mut editor);
+            let waypoint_selected = editor.actor_tool == Some(ActorTool::Plan)
+                && editor
+                    .plan
+                    .as_ref()
+                    .is_some_and(|plan| plan.selected.is_some());
+            if waypoint_selected {
+                delete_waypoint(&mut editor, &nav, &spatial_query, &surface_filter);
+            } else {
+                delete_piece(&mut editor);
+            }
         }
     }
 
@@ -412,6 +404,9 @@ pub(super) fn interact(
         && !touch.enabled
         && over_properties_panel(screen, cursor.screen_size, editor.selected.is_some())
     {
+        return;
+    }
+    if !playing && !touch.enabled && over_outliner_panel(screen, cursor.screen_size) {
         return;
     }
 
@@ -466,6 +461,7 @@ pub(super) fn interact(
 
     if let Some(tool) = editor.tool {
         let shape = &shapes()[tool];
+        let default_trigger = crate::model::Trigger::damaging(shape.damage);
         let raw = Piece {
             id: 0,
             shape: tool,
@@ -475,6 +471,7 @@ pub(super) fn interact(
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: default_trigger,
         };
         let snap = model::snap_piece(
             &raw,
@@ -503,6 +500,7 @@ pub(super) fn interact(
                 roll: 0.0,
                 elevation: 0.0,
                 dynamic: false,
+                trigger: default_trigger,
             });
             editor.selected = Some(id);
             editor.note = match snap.kind {
@@ -522,6 +520,8 @@ pub(super) fn interact(
                 feet: 0.0,
                 yaw: orbit.yaw,
                 vy: 0.0,
+                hv: Vec2::ZERO,
+                ride_vel: Vec2::ZERO,
                 grounded: true,
                 health: crate::statuses::Health::default(),
             };
@@ -591,15 +591,21 @@ pub(super) fn interact(
 
     if editor.actor_tool == Some(ActorTool::Platform) {
         if clicked {
-            let Some(id) = editor.selected else {
-                editor.note = "select a piece first, then add motion";
-                return;
+            let id = match editor.selected {
+                Some(id) if editor.pieces.iter().any(|p| p.id == id) => id,
+                _ => {
+                    // No valid selection: a click on a piece selects it so
+                    // the following clicks can lay down its path.
+                    if let Some(hit) = cursor.ray.and_then(|ray| pick(&editor.pieces, ray)) {
+                        editor.selected = Some(hit);
+                        editor.note = "motion: piece selected, click to add path points";
+                    } else {
+                        editor.note = "select a piece first, then add motion";
+                    }
+                    return;
+                }
             };
-            if editor.pieces.iter().any(|p| p.id == id) {
-                editor.platform_request = Some((id, world));
-            } else {
-                editor.note = "select a piece first, then add motion";
-            }
+            editor.platform_request = Some((id, world));
         }
         return;
     }
@@ -634,9 +640,19 @@ pub(super) fn interact(
         } else if let Some(hit) = hit {
             editor.selected = Some(hit);
             if let Some(piece) = editor.pieces.iter().find(|p| p.id == hit) {
+                // Grab in the piece's own horizontal plane, not on the
+                // ground: clicking the face of a tall or elevated piece
+                // projects far behind its base on y = 0, which made the
+                // piece feel offset from the cursor as soon as it moved.
+                let plane = piece.elevation;
+                let grab = cursor
+                    .ray
+                    .and_then(|ray| drag_plane_point(ray, plane))
+                    .unwrap_or(world);
                 editor.drag = Some(Drag {
                     id: hit,
-                    offset: piece.pos - world,
+                    offset: piece.pos - grab,
+                    plane,
                     moved: false,
                 });
             }
@@ -649,33 +665,11 @@ pub(super) fn interact(
 
     if !playing && mouse.pressed(MouseButton::Left) {
         if let Some(drag) = editor.drag {
-            if let Some((index, piece)) = editor
-                .pieces
-                .iter()
-                .enumerate()
-                .find(|(_, p)| p.id == drag.id)
-                .map(|(i, p)| (i, *p))
-            {
-                let shape = &shapes()[piece.shape];
-                let raw = Piece {
-                    pos: world + drag.offset,
-                    ..piece
-                };
-                let snap = model::snap_piece(
-                    &raw,
-                    shape,
-                    &editor.pieces,
-                    editor.snap,
-                    editor.snap,
-                    SNAP_THRESHOLD,
-                );
-                let target = &mut editor.pieces[index];
-                target.pos = snap.pos;
-                target.rot = snap.rot;
-                if let Some(d) = editor.drag.as_mut() {
-                    d.moved = true;
-                }
-            }
+            let base = cursor
+                .ray
+                .and_then(|ray| drag_plane_point(ray, drag.plane))
+                .unwrap_or(world);
+            apply_body_drag(&mut editor, drag, base);
         }
     }
 
@@ -692,4 +686,68 @@ pub(super) fn interact(
         }
         editor.drag = None;
     }
+}
+
+/// Advance a body drag to the pointer's current ground-plane projection.
+/// A click that only selects the piece (no pointer travel yet) must not move
+/// it, even when it sits within anchor range of a neighbour. This mirrors
+/// `apply_gizmo_drag`, which keeps the last elevation until the pointer moves.
+pub(super) fn apply_body_drag(editor: &mut Editor, drag: Drag, base: Vec2) {
+    let Some((index, piece)) = editor
+        .pieces
+        .iter()
+        .enumerate()
+        .find(|(_, p)| p.id == drag.id)
+        .map(|(i, p)| (i, *p))
+    else {
+        return;
+    };
+    // The pointer has not travelled yet: selecting must not snap.
+    let raw_pos = base + drag.offset;
+    if (raw_pos - piece.pos).length_squared() < 1e-10 {
+        return;
+    }
+    let shape = &shapes()[piece.shape];
+    // Follow the pointer in the grab plane. Anchor-snapping stays magnetic,
+    // but there is no grid snap mid-drag: re-snapping to the nearest
+    // hex/edge every frame is what made pieces jump between cells as soon as
+    // the drag started.
+    let raw = Piece {
+        pos: raw_pos,
+        ..piece
+    };
+    let snap = model::snap_piece(
+        &raw,
+        shape,
+        &editor.pieces,
+        editor.snap,
+        false,
+        SNAP_THRESHOLD,
+    );
+    let target = &mut editor.pieces[index];
+    let changed =
+        (target.pos - snap.pos).length_squared() > 1e-10 || (target.rot - snap.rot).abs() > 1e-6;
+    target.pos = snap.pos;
+    target.rot = snap.rot;
+    if changed {
+        if let Some(d) = editor.drag.as_mut() {
+            d.moved = true;
+        }
+    }
+}
+
+/// Pointer position on the horizontal plane at `height`. Dragging in the
+/// piece's own plane (rather than always on y = 0) keeps the grab point under
+/// the cursor for tall and elevated pieces.
+fn drag_plane_point(ray: Ray3d, height: f32) -> Option<Vec2> {
+    let dir = *ray.direction;
+    if dir.y.abs() < 1e-6 {
+        return None;
+    }
+    let t = (height - ray.origin.y) / dir.y;
+    if t < 0.0 {
+        return None;
+    }
+    let hit = ray.origin + dir * t;
+    Some(Vec2::new(hit.x, hit.z))
 }

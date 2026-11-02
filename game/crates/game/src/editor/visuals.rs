@@ -144,6 +144,7 @@ pub(super) fn sync_visuals(
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         match visuals.map.get(&0) {
             Some(&entity) => {

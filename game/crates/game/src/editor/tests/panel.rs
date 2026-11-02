@@ -24,6 +24,23 @@ fn property_fields_map_to_piece_values() {
 }
 
 #[test]
+fn damage_property_maps_to_trigger_and_clamps() {
+    let mut piece = test_piece(1);
+    assert_eq!(PropertyField::Damage.get(&piece), 0.0);
+
+    PropertyField::Damage.set(&mut piece, 12.5);
+    assert!((piece.trigger.damage - 12.5).abs() < 1e-5);
+    assert_eq!(PropertyField::Damage.format(&piece), "12.5");
+
+    // Negative edits clamp to harmless instead of healing on touch.
+    PropertyField::Damage.set(&mut piece, -4.0);
+    assert_eq!(piece.trigger.damage, 0.0);
+
+    assert_eq!(PropertyField::Damage.parse(" 7.5 "), Some(7.5));
+    assert_eq!(PropertyField::Damage.parse("not a number"), None);
+}
+
+#[test]
 fn the_property_panel_hit_box_matches_its_floating_window() {
     let size = Vec2::new(1000.0, 800.0);
     let inside = Vec2::new(1000.0 - PROPERTIES_WIDTH - 5.0, 40.0);
@@ -51,7 +68,7 @@ fn the_physics_toggle_is_undoable_and_flips_both_ways() {
 }
 
 #[test]
-fn hud_and_panel_systems_have_disjoint_queries() {
+fn status_and_panel_systems_have_disjoint_queries() {
     let mut app = App::new();
     app.init_resource::<Editor>();
     app.init_resource::<Movers>();
@@ -62,16 +79,18 @@ fn hud_and_panel_systems_have_disjoint_queries() {
     app.add_systems(
         Update,
         (
-            update_health_hud,
+            update_character_status,
             sync_properties_panel,
             apply_property_edits,
         ),
     );
 
-    app.world_mut().spawn((HealthHud, Node::default()));
+    app.world_mut().spawn((CharacterStatus, Node::default()));
     app.world_mut()
         .spawn((HealthFill, Node::default(), BackgroundColor::default()));
     app.world_mut().spawn((HealthText, Text::new("")));
+    app.world_mut().spawn((VelocityText, Text::new("")));
+    app.world_mut().spawn((VelocityAxes, Text::new("")));
     app.world_mut().spawn((PropertiesPanel, Node::default()));
     app.world_mut()
         .spawn((PropertyShapeLabel, Text::new("Block")));
@@ -83,6 +102,8 @@ fn hud_and_panel_systems_have_disjoint_queries() {
         .spawn((PlatformPauseLabel, Text::new("Paused: no")));
     app.world_mut()
         .spawn((PlatformSpeedLabel, Text::new("1.5 m/s")));
+    app.world_mut()
+        .spawn((PlatformEditLabel, Text::new("Edit path: off")));
     app.world_mut()
         .spawn((PropertyField::PosX, EditableText::new("0"), Node::default()));
 
@@ -106,4 +127,70 @@ fn visuals_system_has_disjoint_queries() {
     });
     app.add_systems(Update, sync_visuals);
     app.update();
+}
+
+#[test]
+fn the_object_graph_hit_box_matches_its_floating_window() {
+    let size = Vec2::new(1000.0, 800.0);
+    let inside = Vec2::new(PANEL_WIDTH + OUTLINER_MARGIN + 20.0, OUTLINER_TOP + 20.0);
+    assert!(over_outliner_panel(inside, size));
+    assert!(!over_outliner_panel(
+        Vec2::new(PANEL_WIDTH + 2.0, OUTLINER_TOP),
+        size
+    ));
+    assert!(!over_outliner_panel(
+        Vec2::new(
+            PANEL_WIDTH + OUTLINER_MARGIN,
+            OUTLINER_TOP + OUTLINER_HEIGHT + 1.0
+        ),
+        size
+    ));
+}
+
+#[test]
+fn the_object_graph_panel_spawns_and_lists_pieces_and_groups() {
+    fn spawn_panel(mut commands: Commands) {
+        spawn_object_graph(&mut commands);
+    }
+
+    let mut app = App::new();
+    app.init_resource::<Editor>();
+    app.init_resource::<OutlinerState>();
+    app.init_resource::<OutlinerEdit>();
+    app.init_resource::<InputFocus>();
+    app.add_systems(Startup, spawn_panel);
+    app.add_systems(
+        Update,
+        (
+            sync_outliner_selection,
+            apply_outliner_edit,
+            sync_outliner_rows,
+            sync_outliner_fields,
+            update_outliner_rows,
+        ),
+    );
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.pieces.push(test_piece(1));
+        editor.pieces.push(test_piece(2));
+        let group = editor.new_group();
+        assert!(editor.move_node(GraphNode::Piece(1), Some(group)));
+    }
+
+    app.update();
+
+    let list = app
+        .world_mut()
+        .query_filtered::<Entity, With<OutlinerList>>()
+        .single(app.world())
+        .expect("outliner list");
+    let rows: Vec<GraphNode> = {
+        let world = app.world_mut();
+        let mut query = world.query::<&OutlinerRow>();
+        query.iter(world).map(|row| row.0).collect()
+    };
+    assert!(rows.contains(&GraphNode::Piece(1)));
+    assert!(rows.contains(&GraphNode::Piece(2)));
+    assert!(rows.iter().any(|node| matches!(node, GraphNode::Group(_))));
+    assert_eq!(list, list, "the list entity exists");
 }

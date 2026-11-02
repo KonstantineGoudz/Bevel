@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Party Dungeon — model viewer (Bevy)</title>
+    <meta
+      name="description"
+      content="Import and view .glb and .gltf files in the Rust/Bevy model viewer."
+    />
+    <style>
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: #0a0d12;
+        overflow: hidden;
+      }
+      canvas#bevy {
+        display: block;
+        width: 100%;
+        height: 100%;
+        outline: none;
+      }
+      #error {
+        display: none;
+        margin: 24px;
+        padding: 16px;
+        border: 1px solid #4a2a2a;
+        border-radius: 8px;
+        background: #1a1012;
+        color: #ff9a9a;
+        font: 13px/1.5 ui-monospace, Menlo, monospace;
+        white-space: pre-wrap;
+      }
+      #hint {
+        position: fixed;
+        left: 12px;
+        bottom: 10px;
+        color: #5c6b7e;
+        font: 12px/1.5 ui-monospace, Menlo, monospace;
+        user-select: none;
+        pointer-events: none;
+      }
+      #hint a { color: inherit; pointer-events: auto; }
+    </style>
+  </head>
+  <body>
+    <canvas id="bevy"></canvas>
+    <pre id="error"></pre>
+    <div id="hint">Bevy glTF viewer (Rust) &middot; <a href="./">back to maps</a> &middot; Import button is inside the 3D view</div>
+    <a id="back" href="./" hidden>Back to maps</a>
+    <script type="module">
+      import init from "./pkg/party_dungeon.js";
+
+      const showError = (message) => {
+        const box = document.getElementById("error");
+        box.style.display = "block";
+        box.textContent = message;
+        document.getElementById("back").removeAttribute("hidden");
+      };
+
+      // The Rust side checks for `viewer` in the query string and boots the
+      // Bevy viewer instead of the editor. Keep it in the URL so reloads stay
+      // in the viewer.
+      const params = new URLSearchParams(window.location.search);
+      if (!params.has("viewer") && !params.has("view")) {
+        params.set("viewer", "1");
+        window.history.replaceState(null, "", `${window.location.pathname}?${params}`);
+      }
+
+      try {
+        if (typeof localStorage === "undefined") {
+          console.warn("Browser storage is unavailable; the viewer does not need it.");
+        }
+      } catch (error) {
+        console.warn("Browser storage is unavailable; the viewer does not need it.", error);
+      }
+
+      init().catch((err) => {
+        showError(`Failed to start the Bevy viewer build:\n\n${err}`);
+        console.error(err);
+      });
+    </script>
+  </body>
+</html>

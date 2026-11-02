@@ -223,7 +223,7 @@
       </p>
       <div class="actions">
         <button class="primary" id="new-map" type="button">New map</button>
-        <button class="ghost" id="view-model" type="button">Import &amp; view 3D model</button>
+        <button class="ghost" id="view-model" type="button">Import &amp; view 3D model (Bevy)</button>
       </div>
       <section class="maps-section" aria-labelledby="maps-title">
         <div class="section-heading">
@@ -259,7 +259,7 @@
       </form>
     </dialog>
     <footer>
-      <span>v0.1.0 &middot; built for web &middot; <a href="./game.html">editor build</a></span>
+      <span>v0.1.0 &middot; built for web &middot; <a href="./game.html">editor build</a> &middot; <a href="./viewer-bevy.html?viewer=1">model viewer (Bevy)</a></span>
       <span>localhost:8082</span>
     </footer>
     <script type="module">
@@ -543,7 +543,7 @@
 
       document.querySelector("#new-map").addEventListener("click", () => openNameDialog("create"));
       document.querySelector("#view-model").addEventListener("click", () => {
-        window.location.assign("./viewer.html");
+        window.location.assign("./viewer-bevy.html?viewer=1");
       });
       document.querySelector("#name-cancel").addEventListener("click", () => nameDialog.close());
       nameForm.addEventListener("submit", (event) => {

@@ -125,7 +125,17 @@ pub(super) fn camera_control(
         && window
             .cursor_position()
             .is_some_and(|p| over_properties_panel(p, window.size(), editor.selected.is_some()));
-    if editor.keyboard_transform.is_some() || input_focus.get().is_some() || over_properties {
+    let over_outliner = !capture.grabbed
+        && editor.mode == Mode::Build
+        && !touch.enabled
+        && window
+            .cursor_position()
+            .is_some_and(|p| over_outliner_panel(p, window.size()));
+    if editor.keyboard_transform.is_some()
+        || input_focus.get().is_some()
+        || over_properties
+        || over_outliner
+    {
         motion.read().for_each(drop);
         wheel.read().for_each(drop);
         return;

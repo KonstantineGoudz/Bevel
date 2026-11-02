@@ -9,7 +9,10 @@ name = "party_dungeon"
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-bevy = { version = "=0.20.0", features = ["android-game-activity", "system_clipboard"] }
+# `jpeg` is not on by default in Bevy 0.20. glTF only guarantees JPEG and PNG
+# textures, so without it any model with JPEG maps fails at load time with
+# "invalid image mime type: image/jpeg".
+bevy = { version = "=0.20.0", features = ["android-game-activity", "system_clipboard", "jpeg"] }
 avian3d = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -17,4 +20,4 @@ serde_json = "1"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Document", "DomException", "Element", "HtmlDocument", "HtmlElement", "HtmlTextAreaElement", "Location", "Navigator", "Node", "Storage", "Window"] }
+web-sys = { version = "0.3", features = ["Blob", "DataTransfer", "Document", "DragEvent", "DomException", "Element", "Event", "File", "FileList", "FileReader", "HtmlDocument", "HtmlElement", "HtmlInputElement", "HtmlTextAreaElement", "Location", "Navigator", "Node", "Storage", "Window"] }

@@ -263,7 +263,6 @@ pub(super) fn update_touch_buttons(
             TouchAction::Play => false,
             TouchAction::Path => editor.actor_tool == Some(ActorTool::Path),
             TouchAction::Plan => editor.actor_tool == Some(ActorTool::Plan),
-            TouchAction::Platform => editor.actor_tool == Some(ActorTool::Platform),
             TouchAction::Add => touch.append,
             TouchAction::Walk => {
                 editor.actor_tool == Some(ActorTool::Plan)
@@ -335,7 +334,7 @@ pub(super) fn update_touch_status(
 #[allow(dead_code)] // superseded by UI activation; kept for the hit-test test
 pub(super) fn touch_action_at(pos: Vec2, css: Vec2) -> Option<TouchAction> {
     if (8.0..=42.0).contains(&pos.y) {
-        let width = (css.x - 20.0) / 10.0;
+        let width = (css.x - 20.0) / 9.0;
         let index = ((pos.x - 8.0) / (width + 4.0)).floor().max(0.0) as usize;
         return [
             TouchAction::View,
@@ -345,11 +344,10 @@ pub(super) fn touch_action_at(pos: Vec2, css: Vec2) -> Option<TouchAction> {
             TouchAction::Redo,
             TouchAction::Path,
             TouchAction::Plan,
-            TouchAction::Platform,
             TouchAction::Course,
             TouchAction::Play,
         ]
-        .get(index.min(9))
+        .get(index.min(8))
         .copied();
     }
     if (46.0..=84.0).contains(&pos.y) {
@@ -433,22 +431,6 @@ pub(super) fn run_touch_action(
                 orbit.pitch = 1.4;
                 orbit.distance = 13.0;
                 focus_character(orbit, editor.character);
-            }
-        }
-        TouchAction::Platform => {
-            let entering = editor.actor_tool != Some(ActorTool::Platform);
-            editor.actor_tool = if entering {
-                Some(ActorTool::Platform)
-            } else {
-                None
-            };
-            editor.tool = None;
-            if entering {
-                editor.note = if editor.selected.is_some() {
-                    "motion: tap grid to add path points"
-                } else {
-                    "select a piece first, then add motion"
-                };
             }
         }
         TouchAction::Add => touch.append = !touch.append,
@@ -549,6 +531,7 @@ pub(super) fn on_path_press(
     orbit: Res<Orbit>,
     capture: Res<PointerCapture>,
     mut editor: ResMut<Editor>,
+    mut movers: ResMut<Movers>,
     mut gesture: ResMut<PathGesture>,
     mut touch: ResMut<TouchState>,
     focus: Res<InputFocus>,
@@ -581,16 +564,38 @@ pub(super) fn on_path_press(
 
     let (camera, transform) = *camera;
     let global = GlobalTransform::from(*transform);
-    let handle = path_handle_at(&editor, camera, &global, pos, touch.enabled, &orbit);
+    let handle = path_handle_at(
+        &editor,
+        &movers,
+        camera,
+        &global,
+        pos,
+        touch.enabled,
+        &orbit,
+    );
     let now = time.elapsed_secs_f64();
     let drag = gesture.0.press(event.pointer.id, pos, now, handle);
     if let Some(drag) = drag {
-        let waypoint = match drag.handle {
-            PathHandle::Waypoint(id) => id,
-            PathHandle::Tangent { waypoint, .. } => waypoint,
-        };
-        if let Some(plan) = editor.plan.as_mut() {
-            plan.select(Some(waypoint));
+        if editor.actor_tool == Some(ActorTool::Platform) {
+            // A motion handle belongs to the selected piece's path; record
+            // the waypoint so Delete and the panel know what is active.
+            let index = match drag.handle {
+                PathHandle::Waypoint(id) => id as usize,
+                PathHandle::Tangent { waypoint, .. } => waypoint as usize,
+            };
+            if let Some(id) = editor.selected {
+                if let Some(mover) = movers.map.get_mut(&id) {
+                    mover.selected = Some(index);
+                }
+            }
+        } else {
+            let waypoint = match drag.handle {
+                PathHandle::Waypoint(id) => id,
+                PathHandle::Tangent { waypoint, .. } => waypoint,
+            };
+            if let Some(plan) = editor.plan.as_mut() {
+                plan.select(Some(waypoint));
+            }
         }
         touch.path_drag_active = true;
         touch.suppress_until = now + 0.08;
@@ -650,6 +655,7 @@ pub(super) fn on_path_cancel(
 
 pub(super) fn path_drag(
     mut editor: ResMut<Editor>,
+    mut movers: ResMut<Movers>,
     gesture: Res<PathGesture>,
     capture: Res<PointerCapture>,
     camera: Single<(&Camera, &Transform)>,
@@ -673,6 +679,11 @@ pub(super) fn path_drag(
     };
     let (camera, transform) = *camera;
     let global = GlobalTransform::from(*transform);
+    // Motion handles edit the selected piece's path, not the character plan.
+    if editor.actor_tool == Some(ActorTool::Platform) {
+        apply_mover_drag(&mut editor, &mut movers, drag, screen, camera, &global);
+        return;
+    }
     let filter = player
         .iter()
         .next()

@@ -5,6 +5,9 @@
 //! an entry (or pressing Esc) never also places a piece. Typing filters the
 //! 23 catalogue shapes plus the character; Up/Down moves the highlight, Enter
 //! arms it, Esc or Shift+A (when the search is not focused) closes.
+//!
+//! The menu is unavailable in first person: Shift sprints there, so Shift+A
+//! must strafe rather than open the popup.
 
 use super::*;
 use bevy::input_focus::{FocusCause, InputFocus};
@@ -245,6 +248,7 @@ pub(super) fn update_add_menu(
     mouse: Res<ButtonInput<MouseButton>>,
     mut focus: ResMut<InputFocus>,
     mut editor: ResMut<Editor>,
+    orbit: Res<Orbit>,
     touch: Res<TouchState>,
     gesture: Res<PathGesture>,
     mut search_query: Query<(Entity, &mut EditableText), With<AddMenuSearch>>,
@@ -265,6 +269,11 @@ pub(super) fn update_add_menu(
     if editor.keyboard_transform.is_some() {
         return;
     }
+    // Another text field (the object-graph label editor) owns the keyboard.
+    // Shift+A there must type a capital A, not open the Add popup.
+    if focus.get().is_some() && !menu.open {
+        return;
+    }
     // Placing is Build-only; leaving Build dismisses a stale menu.
     if !object_editing_allowed(editor.mode) {
         if menu.open {
@@ -274,6 +283,21 @@ pub(super) fn update_add_menu(
             menu.last_built = None;
             focus.clear();
         }
+        sync_root_visibility(&mut root_query, false);
+        return;
+    }
+    // First person reserves Shift for sprint, so Shift+A must strafe rather
+    // than open the menu. Dismiss a stale menu the same way leaving Build
+    // does.
+    if orbit.mode == ViewMode::First {
+        if menu.open {
+            menu.open = false;
+            menu.query.clear();
+            menu.selected = 0;
+            menu.last_built = None;
+            focus.clear();
+        }
+        sync_root_visibility(&mut root_query, false);
         return;
     }
 
@@ -428,6 +452,7 @@ pub(super) fn on_add_menu_item(
     event: On<Activate>,
     items: Query<&AddMenuItem>,
     mut editor: ResMut<Editor>,
+    orbit: Res<Orbit>,
     mut menu: ResMut<AddMenu>,
     mut focus: ResMut<InputFocus>,
     mut search_query: Query<(Entity, &mut EditableText), With<AddMenuSearch>>,
@@ -441,7 +466,7 @@ pub(super) fn on_add_menu_item(
     let Ok(item) = items.get(event.entity) else {
         return;
     };
-    if !object_editing_allowed(editor.mode) {
+    if !object_editing_allowed(editor.mode) || orbit.mode == ViewMode::First {
         return;
     }
     activate_add_kind(&mut editor, item.0);

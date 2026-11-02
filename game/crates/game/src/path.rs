@@ -729,6 +729,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         }
     }
 
@@ -769,6 +770,7 @@ mod tests {
                 roll: 0.0,
                 elevation: 0.0,
                 dynamic: false,
+                trigger: crate::model::Trigger::harmless(),
             };
             let (edges, _) = blocked(&[piece]);
             assert!(edges.is_empty(), "{id} should not block");
@@ -798,6 +800,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let (_, hexes) = blocked(&[piece]);
         assert!(hexes.contains(&(1, 0)));
@@ -823,6 +826,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let (edges, hexes) = blocked(&[pillar]);
         assert!(!can_step(here, model::hex_center(1, 0), &edges, &hexes));
@@ -839,6 +843,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let (edges, hexes) = blocked(&[block]);
         assert!(hexes.is_empty(), "a block top is a walkable cell");
@@ -857,6 +862,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let (_, hexes) = blocked(&[ramp]);
         assert!(hexes.is_empty());
@@ -873,6 +879,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let ramp = Piece {
             id: 2,
@@ -883,6 +890,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
 
         // Alone, the block cannot be entered from its sides.
@@ -905,6 +913,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let (edges, _) = blocked(&[ramp]);
 
@@ -937,6 +946,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let (edges, hexes) = blocked(&[ramp]);
 
@@ -961,6 +971,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let block = Piece {
             id: 2,
@@ -971,6 +982,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let (edges, hexes) = blocked(&[ramp, block]);
 
@@ -1008,6 +1020,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let first = Piece {
             id: 2,
@@ -1018,6 +1031,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let second = Piece {
             id: 3,
@@ -1028,6 +1042,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
 
         let (edges, hexes) = blocked(&[ramp, first, second]);
@@ -1067,6 +1082,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         // The square corner pokes into the next hex.
         let corner = model::hex_center(2, 1) + Vec2::new(0.9, -0.9);
@@ -1092,6 +1108,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let home = Piece {
             id: 3,
@@ -1102,6 +1119,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let pieces = [ramp, home, block];
         let (edges, hexes) = blocked(&pieces);
@@ -1209,6 +1227,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let first = Piece {
             id: 2,
@@ -1219,6 +1238,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let second = Piece {
             id: 3,
@@ -1229,6 +1249,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let (edges, blocked) = blocked(&[ramp, first, second]);
 
@@ -1516,6 +1537,7 @@ mod tests {
             roll: 0.0,
             elevation: 1.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let ramp = Piece {
             id: 2,
@@ -1526,6 +1548,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let (edges, hexes) = blocked(&[block, ramp]);
         assert_eq!(
@@ -1546,6 +1569,7 @@ mod tests {
             roll: 0.0,
             elevation: 1.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let ramp = Piece {
             id: 2,
@@ -1556,6 +1580,7 @@ mod tests {
             roll: 0.0,
             elevation: 1.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let (edges, hexes) = blocked(&[block, ramp]);
         assert!(
@@ -1575,6 +1600,7 @@ mod tests {
             roll: 0.0,
             elevation: 1.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         assert_eq!(
             cell_under(&[block], model::hex_center(1, 0), 1.9),
@@ -1596,6 +1622,7 @@ mod tests {
             roll: roll.to_radians(),
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let pieces = vec![
             piece(1, "block", -2.078, -0.198, 0.0, 89.8),

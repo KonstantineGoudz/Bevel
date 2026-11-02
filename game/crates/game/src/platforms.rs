@@ -79,7 +79,10 @@ pub fn advance_platform(
     mode: PlatformMode,
 ) -> (f32, f32) {
     if total <= 0.0 || speed <= 0.0 || dt <= 0.0 {
-        return (distance.clamp(0.0, total.max(0.0)), if dir >= 0.0 { 1.0 } else { -1.0 });
+        return (
+            distance.clamp(0.0, total.max(0.0)),
+            if dir >= 0.0 { 1.0 } else { -1.0 },
+        );
     }
     match mode {
         PlatformMode::Loop => {
@@ -113,28 +116,75 @@ pub fn advance_platform(
 
 /// Build a smoothed Bezier track through the waypoints, honouring manual
 /// handles. Needs at least two points; fewer yields an empty track.
-pub fn build_platform_track(waypoints: &[PlatformWaypoint]) -> path::Track {
+///
+/// When `closed` (Loop mode) the last point connects back to the first with
+/// the same smoothing: the point list is wrapped with its neighbours so the
+/// seam gets real tangents instead of a kink, producing a true circuit the
+/// platform can travel forever.
+pub fn build_platform_track(waypoints: &[PlatformWaypoint], closed: bool) -> path::Track {
     let points: Vec<Vec2> = waypoints.iter().map(|w| w.pos).collect();
     if points.len() < 2 {
         return path::Track::new(points);
     }
-    let mut curves = path::smooth(&points);
+    if !closed {
+        let mut curves = path::smooth(&points);
+        apply_handles(waypoints, &points, 0, &mut curves);
+        let sampled = path::sample(&curves, 18);
+        return path::Track::new(sampled);
+    }
+    // Closed circuit: wrap the ends so `smooth` sees across the seam, then
+    // keep exactly the n segments of the circuit.
+    let n = points.len();
+    let mut extended = Vec::with_capacity(n + 3);
+    extended.push(points[n - 1]);
+    extended.extend_from_slice(&points);
+    extended.push(points[0]);
+    if n > 1 {
+        extended.push(points[1]);
+    }
+    let all = path::smooth(&extended);
+    let start = 1;
+    let end = (start + n).min(all.len());
+    let mut curves = all[start..end].to_vec();
+    apply_handles(waypoints, &points, 0, &mut curves);
+    // The closing segment runs points[n-1] -> points[0]; handles index it by
+    // the waypoint pair, so apply the seam pair explicitly.
+    if let Some(waypoint) = waypoints.last()
+        && let Some(control) = waypoint.outgoing
+        && let Some(curve) = curves.last_mut()
+    {
+        curve.p1 = clamp_handle(points[n - 1], points[0], control);
+    }
+    if let Some(control) = waypoints[0].incoming
+        && let Some(curve) = curves.last_mut()
+    {
+        curve.p2 = clamp_handle(points[n - 1], points[0], control);
+    }
+    let sampled = path::sample(&curves, 18);
+    path::Track::new(sampled)
+}
+
+/// Apply manual Bezier handles to the open-chain curves starting at `offset`.
+fn apply_handles(
+    waypoints: &[PlatformWaypoint],
+    points: &[Vec2],
+    offset: usize,
+    curves: &mut [path::Cubic],
+) {
     for (i, waypoint) in waypoints.iter().enumerate() {
         if let Some(control) = waypoint.outgoing
             && let Some(next) = points.get(i + 1).copied()
-            && let Some(curve) = curves.get_mut(i)
+            && let Some(curve) = curves.get_mut(offset + i)
         {
             curve.p1 = clamp_handle(points[i], next, control);
         }
         if let Some(control) = waypoint.incoming
-            && let Some(curve) = curves.get_mut(i.wrapping_sub(1))
             && i > 0
+            && let Some(curve) = curves.get_mut(offset + i - 1)
         {
             curve.p2 = clamp_handle(points[i - 1], points[i], control);
         }
     }
-    let sampled = path::sample(&curves, 18);
-    path::Track::new(sampled)
 }
 
 fn clamp_handle(anchor: Vec2, other: Vec2, control: Vec2) -> Vec2 {
@@ -144,12 +194,7 @@ fn clamp_handle(anchor: Vec2, other: Vec2, control: Vec2) -> Vec2 {
 
 /// True when the character stands on the piece: same footprint plus feet
 /// near the platform top. The tolerance rides through small physics gaps.
-pub fn is_riding(
-    character_pos: Vec2,
-    feet: f32,
-    piece: &Piece,
-    shape: &model::Shape,
-) -> bool {
+pub fn is_riding(character_pos: Vec2, feet: f32, piece: &Piece, shape: &model::Shape) -> bool {
     if !model::hit_test(shape, piece, character_pos, 0.25) {
         return false;
     }
@@ -167,7 +212,10 @@ mod tests {
 
     #[test]
     fn modes_parse_and_label() {
-        assert_eq!(PlatformMode::parse("pingpong"), Some(PlatformMode::PingPong));
+        assert_eq!(
+            PlatformMode::parse("pingpong"),
+            Some(PlatformMode::PingPong)
+        );
         assert_eq!(PlatformMode::parse("loop"), Some(PlatformMode::Loop));
         assert_eq!(PlatformMode::parse("oneshot"), Some(PlatformMode::OneShot));
         assert_eq!(PlatformMode::parse("nope"), None);
@@ -209,27 +257,61 @@ mod tests {
 
     #[test]
     fn a_straight_track_has_the_right_length() {
-        let track =
-            build_platform_track(&[waypoint(0.0), waypoint(4.0), waypoint(8.0)]);
-        assert!((track.total() - 8.0).abs() < 0.05, "total={}", track.total());
+        let track = build_platform_track(&[waypoint(0.0), waypoint(4.0), waypoint(8.0)], false);
+        assert!(
+            (track.total() - 8.0).abs() < 0.05,
+            "total={}",
+            track.total()
+        );
         let (pos, _) = track.at(4.0);
         assert!((pos.x - 4.0).abs() < 0.1, "{pos:?}");
     }
 
     #[test]
     fn manual_handles_reshape_the_curve() {
-        let straight = build_platform_track(&[waypoint(0.0), waypoint(4.0)]);
-        let bent = build_platform_track(&[
-            PlatformWaypoint {
-                pos: Vec2::ZERO,
-                incoming: None,
-                outgoing: Some(Vec2::new(0.0, 3.0)),
-            },
-            waypoint(4.0),
-        ]);
+        let straight = build_platform_track(&[waypoint(0.0), waypoint(4.0)], false);
+        let bent = build_platform_track(
+            &[
+                PlatformWaypoint {
+                    pos: Vec2::ZERO,
+                    incoming: None,
+                    outgoing: Some(Vec2::new(0.0, 3.0)),
+                },
+                waypoint(4.0),
+            ],
+            false,
+        );
         let (a, _) = straight.at(2.0);
         let (b, _) = bent.at(2.0);
-        assert!((b.y - a.y).abs() > 0.2, "handle should bend it: {a:?} vs {b:?}");
+        assert!(
+            (b.y - a.y).abs() > 0.2,
+            "handle should bend it: {a:?} vs {b:?}"
+        );
+    }
+
+    #[test]
+    fn a_closed_loop_returns_to_the_start() {
+        let waypoints = [
+            PlatformWaypoint::new(Vec2::ZERO),
+            PlatformWaypoint::new(Vec2::X * 4.0),
+            PlatformWaypoint::new(Vec2::new(4.0, 4.0)),
+            PlatformWaypoint::new(Vec2::new(0.0, 4.0)),
+        ];
+        let track = build_platform_track(&waypoints, true);
+        // Roughly the 16 m perimeter of the square (smoothing bulges it).
+        assert!(
+            (track.total() - 16.0).abs() < 1.5,
+            "total={}",
+            track.total()
+        );
+        // The end of the track meets the start: no jump when looping.
+        let (start, _) = track.at(0.0);
+        let (end, _) = track.at(track.total());
+        assert!(start.distance(end) < 0.05, "{start:?} vs {end:?}");
+        // An open track through the same points stops at the far corner.
+        let open = build_platform_track(&waypoints, false);
+        let (open_end, _) = open.at(open.total());
+        assert!(open_end.distance(start) > 2.0, "{open_end:?} vs {start:?}");
     }
 
     #[test]
@@ -245,6 +327,7 @@ mod tests {
             roll: 0.0,
             elevation: 0.0,
             dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
         };
         let top = shape.top();
         assert!(is_riding(Vec2::ZERO, top, &piece, shape));
