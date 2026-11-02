@@ -178,5 +178,10 @@ fn test_piece(id: u32) -> Piece {
         elevation: 0.0,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     }
 }

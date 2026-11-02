@@ -26,8 +26,13 @@ pub(super) fn level_json(editor: &Editor) -> String {
                 .piece_parent(p.id)
                 .map(|group| format!(",\"group\":{group}"))
                 .unwrap_or_default();
+            let locked = if editor.outline.is_locked(p.id) {
+                ",\"locked\":true"
+            } else {
+                ""
+            };
             format!(
-                "{{\"id\":{},\"shape\":\"{}\",\"x\":{:.3},\"z\":{:.3},\"y\":{:.3},\"rotDeg\":{:.1},\"pitchDeg\":{:.1},\"rollDeg\":{:.1},\"dynamic\":{},\"damage\":{:.1}{name}{group}}}",
+                "{{\"id\":{},\"shape\":\"{}\",\"x\":{:.3},\"z\":{:.3},\"y\":{:.3},\"rotDeg\":{:.1},\"pitchDeg\":{:.1},\"rollDeg\":{:.1},\"dynamic\":{},\"damage\":{:.1}{name}{group}{locked}}}",
                 p.id,
                 shapes()[p.shape].id,
                 p.pos.x,

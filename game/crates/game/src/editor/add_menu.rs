@@ -1,13 +1,12 @@
-//! Blender-style Add menu (Shift+A): a searchable popup that arms any
+//! Add menu (F3): a searchable popup that arms any
 //! placeable component without scrolling the palette.
 //!
 //! The menu is modal while open: `interact` ignores canvas clicks so choosing
 //! an entry (or pressing Esc) never also places a piece. Typing filters the
 //! 23 catalogue shapes plus the character; Up/Down moves the highlight, Enter
-//! arms it, Esc or Shift+A (when the search is not focused) closes.
+//! arms it, Esc or F3 closes.
 //!
-//! The menu is unavailable in first person: Shift sprints there, so Shift+A
-//! must strafe rather than open the popup.
+//! The menu is unavailable in first person.
 
 use super::*;
 use bevy::input_focus::{FocusCause, InputFocus};
@@ -188,7 +187,7 @@ pub(super) fn spawn_add_menu(commands: &mut Commands) {
         .id();
     let hint = commands
         .spawn((
-            Text::new("Shift+A - / Enter add - Esc close"),
+            Text::new("F3 / Enter add - Esc close"),
             TextFont {
                 font_size: FontSize::Px(11.0),
                 ..default()
@@ -270,7 +269,7 @@ pub(super) fn update_add_menu(
         return;
     }
     // Another text field (the object-graph label editor) owns the keyboard.
-    // Shift+A there must type a capital A, not open the Add popup.
+    // F3 there must not open the Add popup.
     if focus.get().is_some() && !menu.open {
         return;
     }
@@ -286,9 +285,8 @@ pub(super) fn update_add_menu(
         sync_root_visibility(&mut root_query, false);
         return;
     }
-    // First person reserves Shift for sprint, so Shift+A must strafe rather
-    // than open the menu. Dismiss a stale menu the same way leaving Build
-    // does.
+    // Add menu is not available in first person. Dismiss a stale menu the same
+    // way leaving Build does.
     if orbit.mode == ViewMode::First {
         if menu.open {
             menu.open = false;
@@ -304,22 +302,16 @@ pub(super) fn update_add_menu(
     let Ok((search_entity, mut search_text)) = search_query.single_mut() else {
         return;
     };
-    let search_focused = focus.get() == Some(search_entity);
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let command = command_down(&keys);
 
-    // Shift+A toggles. While the search owns focus the same chord must type a
-    // capital A instead of dismissing the menu.
-    if !command && shift && keys.just_pressed(KeyCode::KeyA) && !gesture.0.dragging() {
+    // F3 toggles.
+    if !command && keys.just_pressed(KeyCode::F3) && !gesture.0.dragging() {
         if !menu.open {
             open_menu(&mut menu, search_entity, &mut search_text, &mut focus);
-        } else if !search_focused {
+        } else {
             close_menu(&mut menu, &mut search_text, &mut focus, search_entity);
             sync_root_visibility(&mut root_query, false);
             return;
-        } else {
-            // Let the TextInput insert the character; the query sync below
-            // picks it up next frame.
         }
     }
 

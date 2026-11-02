@@ -20,6 +20,7 @@ fn camera_and_character_changes_are_noticed() {
         hv: Vec2::ZERO,
         ride_vel: Vec2::ZERO,
         grounded: true,
+        sliding: false,
         health: crate::statuses::Health::default(),
     };
     assert!(soft_changed(&seen, &Orbit::default(), Some(character)));
@@ -152,6 +153,104 @@ fn air_strafing_is_limited() {
 }
 
 #[test]
+fn slide_keeps_momentum_and_only_bleeds_speed_slowly() {
+    let dt = 1.0 / 60.0;
+    // No steering: direction is untouched and one frame of slide friction
+    // costs far less than one frame of normal ground braking.
+    let sliding = slide_step(Vec2::new(5.5, 0.0), Vec2::ZERO, dt);
+    assert!(
+        sliding.x > 5.4 && sliding.y == 0.0,
+        "a slide should coast on momentum: {sliding:?}"
+    );
+    let braking = ground_step(Vec2::new(5.5, 0.0), Vec2::ZERO, dt);
+    assert!(
+        sliding.x > braking.x,
+        "slide friction must be lower than ground braking: slide {sliding:?} vs ground {braking:?}"
+    );
+    // A sprint slide is still moving fast a second later, unlike a normal
+    // landing which ground control would have stopped in a few frames.
+    let mut coast = Vec2::new(5.5, 0.0);
+    for _ in 0..60 {
+        coast = slide_step(coast, Vec2::ZERO, dt);
+    }
+    assert!(
+        coast.x > 2.5,
+        "a second of sliding should retain momentum: {coast:?}"
+    );
+    // Steering bends the slide but never speeds it up or snaps it around.
+    let turned = slide_step(Vec2::new(5.5, 0.0), Vec2::new(-1.0, 0.0), dt);
+    assert!(
+        turned.x > 5.0 && turned.length() <= 5.5 + 1e-4,
+        "one frame of opposite steering must not reverse or boost a slide: {turned:?}"
+    );
+    let mut steered = Vec2::new(5.5, 0.0);
+    for _ in 0..40 {
+        steered = slide_step(steered, Vec2::Y, dt);
+    }
+    assert!(
+        steered.y > 1.0,
+        "held steering should eventually bend the slide: {steered:?}"
+    );
+    assert!(
+        steered.length() < 5.5,
+        "steering a slide never adds speed: {steered:?}"
+    );
+}
+
+#[test]
+fn a_slide_only_starts_on_a_landing_with_ctrl_and_momentum() {
+    // The requested case: airborne, then touchdown with Ctrl held.
+    assert!(next_sliding(false, true, true, true, 5.5));
+    // Ctrl pressed while already running on the ground: not a landing.
+    assert!(!next_sliding(false, false, true, true, 5.5));
+    // Landing without Ctrl, or releasing it mid-slide, ends/never starts.
+    assert!(!next_sliding(false, true, false, true, 5.5));
+    assert!(!next_sliding(true, false, false, true, 5.5));
+    // A standing hop has no momentum to slide on.
+    assert!(!next_sliding(false, true, true, true, 0.5));
+    // Leaving the ground ends a slide even with Ctrl still held.
+    assert!(!next_sliding(true, false, true, false, 5.5));
+    // An ongoing slide persists while fast, and ends once it slows.
+    assert!(next_sliding(true, false, true, true, 2.0));
+    assert!(!next_sliding(true, false, true, true, 0.5));
+}
+
+#[test]
+fn a_sliding_capsule_squashes_and_leans_along_its_momentum() {
+    let mut character = Character {
+        pos: Vec2::new(1.0, 2.0),
+        feet: 0.0,
+        yaw: 0.0,
+        vy: 0.0,
+        hv: Vec2::new(5.5, 0.0),
+        ride_vel: Vec2::ZERO,
+        grounded: true,
+        sliding: true,
+        health: crate::statuses::Health::default(),
+    };
+    let (pos, rot, scale) = character_pose(character);
+    assert_eq!(pos.x, 1.0);
+    assert_eq!(pos.z, 2.0);
+    assert!(
+        pos.y < PILL_HALF && pos.y > 0.0,
+        "a sliding capsule sits lower without sinking through the floor: {pos:?}"
+    );
+    assert!(scale.y < 1.0 && scale.x > 1.0, "slide squash: {scale:?}");
+    // The capsule's up axis leans toward +x, the slide direction.
+    let up = rot * Vec3::Y;
+    assert!(
+        up.x > 0.3 && up.y > 0.0 && up.y < 1.0,
+        "the capsule should lean forward along its momentum: {up:?}"
+    );
+
+    character.sliding = false;
+    let (pos, rot, scale) = character_pose(character);
+    assert_eq!(pos.y, PILL_HALF);
+    assert_eq!(rot, Quat::from_rotation_y(character.yaw));
+    assert_eq!(scale, Vec3::ONE);
+}
+
+#[test]
 fn a_slope_counts_as_ground_on_the_way_down() {
     assert_eq!(ground_support(0.0, false, false), (true, None), "standing");
     assert_eq!(
@@ -209,6 +308,7 @@ fn third_person_can_jump_without_a_route() {
             hv: Vec2::ZERO,
             ride_vel: Vec2::ZERO,
             grounded: true,
+            sliding: false,
             health: crate::statuses::Health::default(),
         });
         editor.walk = None;
@@ -240,6 +340,7 @@ fn an_airborne_character_lands_without_a_route() {
             hv: Vec2::ZERO,
             ride_vel: Vec2::ZERO,
             grounded: false,
+            sliding: false,
             health: crate::statuses::Health::default(),
         });
         editor.walk = None;
@@ -276,6 +377,7 @@ fn a_jump_carries_forward_momentum() {
             hv: Vec2::new(5.5, 0.0),
             ride_vel: Vec2::ZERO,
             grounded: true,
+            sliding: false,
             health: crate::statuses::Health::default(),
         });
         editor.walk = None;
@@ -322,6 +424,191 @@ fn a_jump_carries_forward_momentum() {
     );
 }
 
+/// A sprinting character at the origin, ready to jump along +x.
+fn sprint_jumper(app: &mut App, hv: Vec2) {
+    app.world_mut().resource_mut::<Orbit>().yaw = -std::f32::consts::FRAC_PI_2;
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    let mut editor = app.world_mut().resource_mut::<Editor>();
+    editor.character = Some(Character {
+        pos: Vec2::ZERO,
+        feet: 0.0,
+        yaw: -std::f32::consts::FRAC_PI_2,
+        vy: 0.0,
+        hv,
+        ride_vel: Vec2::ZERO,
+        grounded: true,
+        sliding: false,
+        health: crate::statuses::Health::default(),
+    });
+    editor.walk = None;
+}
+
+fn tick_until_grounded(app: &mut App) -> Character {
+    for _ in 0..180 {
+        tick_character(app);
+        let character = app.world().resource::<Editor>().character.unwrap();
+        if character.grounded {
+            return character;
+        }
+    }
+    panic!("character never landed");
+}
+
+#[test]
+fn holding_ctrl_through_a_jump_lands_in_a_momentum_slide() {
+    let mut app = physics_app();
+    sprint_jumper(&mut app, Vec2::new(5.5, 0.0));
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Space);
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::ControlLeft);
+
+    tick_character(&mut app);
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(!character.grounded, "should be airborne after jumping");
+    assert!(!character.sliding, "no slide while still in the air");
+
+    // Keep Ctrl held, let go of Space so the landing does not re-jump.
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .release(KeyCode::Space);
+    let landed = tick_until_grounded(&mut app);
+    assert!(
+        landed.sliding,
+        "landing with Left Ctrl held after a jump should start a slide, hv={:?}",
+        landed.hv
+    );
+    assert!(
+        landed.hv.x > 3.5,
+        "the slide should start on jump momentum, hv={:?}",
+        landed.hv
+    );
+
+    // No steering at all: momentum alone carries the slide, bleeding speed
+    // far slower than normal ground braking would.
+    let before = landed.pos.x;
+    for _ in 0..30 {
+        tick_character(&mut app);
+    }
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        character.pos.x - before > 1.5,
+        "the slide should coast forward with no input, moved {}",
+        character.pos.x - before
+    );
+    assert!(
+        character.sliding && character.hv.x > 3.0,
+        "the slide should still be alive half a second in, hv={:?} sliding={}",
+        character.hv,
+        character.sliding
+    );
+
+    // Releasing Ctrl ends the slide; normal ground control takes over.
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .release(KeyCode::ControlLeft);
+    tick_character(&mut app);
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(!character.sliding, "releasing Ctrl should end the slide");
+}
+
+#[test]
+fn landing_a_jump_without_ctrl_does_not_slide() {
+    let mut app = physics_app();
+    sprint_jumper(&mut app, Vec2::new(5.5, 0.0));
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Space);
+    tick_character(&mut app);
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .release(KeyCode::Space);
+
+    let landed = tick_until_grounded(&mut app);
+    assert!(!landed.sliding, "a plain landing must not slide");
+
+    // Normal landing braking scrubs the sprint within a few frames.
+    for _ in 0..30 {
+        tick_character(&mut app);
+    }
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        !character.sliding && character.hv.x < 1.0,
+        "without a slide, ground control should stop the landing run, hv={:?}",
+        character.hv
+    );
+}
+
+#[test]
+fn ctrl_on_the_ground_without_a_jump_does_not_slide() {
+    let mut app = physics_app();
+    sprint_jumper(&mut app, Vec2::new(5.5, 0.0));
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::ControlLeft);
+    for _ in 0..10 {
+        tick_character(&mut app);
+        let character = app.world().resource::<Editor>().character.unwrap();
+        assert!(
+            !character.sliding,
+            "Ctrl alone on the ground must never start a slide"
+        );
+    }
+}
+
+#[test]
+fn a_standing_hop_landing_with_ctrl_does_not_slide() {
+    let mut app = physics_app();
+    sprint_jumper(&mut app, Vec2::ZERO);
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Space);
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::ControlLeft);
+    tick_character(&mut app);
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .release(KeyCode::Space);
+
+    let landed = tick_until_grounded(&mut app);
+    assert!(
+        !landed.sliding,
+        "a hop with no horizontal momentum has nothing to slide on, hv={:?}",
+        landed.hv
+    );
+}
+
+#[test]
+fn jumping_out_of_a_slide_cancels_it() {
+    let mut app = physics_app();
+    sprint_jumper(&mut app, Vec2::new(5.5, 0.0));
+    app.world_mut()
+        .resource_mut::<Editor>()
+        .character
+        .as_mut()
+        .unwrap()
+        .sliding = true;
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::ControlLeft);
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Space);
+
+    tick_character(&mut app);
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(!character.grounded, "should be airborne after slide-jump");
+    assert!(!character.sliding, "the jump should cancel the slide");
+    assert!(
+        character.hv.x > 4.5,
+        "the slide-jump should keep slide momentum, hv={:?}",
+        character.hv
+    );
+}
+
 #[test]
 fn air_steering_cannot_snap_momentum_around() {
     let mut app = physics_app();
@@ -338,6 +625,7 @@ fn air_steering_cannot_snap_momentum_around() {
             hv: Vec2::new(2.8, 0.0),
             ride_vel: Vec2::ZERO,
             grounded: false,
+            sliding: false,
             health: crate::statuses::Health::default(),
         });
         editor.walk = None;
@@ -370,6 +658,11 @@ fn riding_setup(app: &mut App) {
         elevation: 0.0,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     };
     app.world_mut().resource_mut::<Editor>().pieces.push(piece);
     let mut movers = Movers::default();
@@ -401,6 +694,7 @@ fn riding_character() -> Character {
         hv: Vec2::ZERO,
         ride_vel: Vec2::ZERO,
         grounded: true,
+        sliding: false,
         health: crate::statuses::Health::default(),
     }
 }
@@ -555,6 +849,7 @@ fn walking_off_a_tile_mounts_the_next_ramp() {
             hv: Vec2::ZERO,
             ride_vel: Vec2::ZERO,
             grounded: true,
+            sliding: false,
             health: crate::statuses::Health::default(),
         });
         editor.walk = None;
@@ -582,6 +877,248 @@ fn walking_off_a_tile_mounts_the_next_ramp() {
     assert!(
         peak > 0.5,
         "should ride up the ramp slope on the way, peak={peak}"
+    );
+}
+
+/// Repro: a character parked right before a ramp's low edge, then pressing W.
+/// The first step from a standing start barely moves, which once tripped the
+/// step-up assist: it read the ramp slope a half metre ahead as a ledge and
+/// teleported the capsule forward onto it. A flush ramp has no vertical face to
+/// step over, so the first frames must accelerate in place and only climb once
+/// the capsule actually reaches and slides up the slope.
+#[test]
+fn a_standing_start_does_not_teleport_onto_a_ramp() {
+    let mut app = physics_app();
+    let (pieces, _) = crate::editor::editing::course();
+    for piece in &pieces {
+        let shape = &shapes()[piece.shape];
+        let rot = model::piece_quat(piece);
+        app.world_mut().spawn((
+            RigidBody::Static,
+            piece_collider(shape).unwrap(),
+            Position::from_xyz(piece.pos.x, piece.elevation, piece.pos.y),
+            Rotation(rot),
+        ));
+    }
+    app.update();
+    app.update();
+
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    app.world_mut().resource_mut::<Orbit>().yaw = -std::f32::consts::FRAC_PI_2;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        // Stand just short of the ramp's low edge (x ~ 1.078) with no run-up.
+        let mut character = crate::editor::editing::course().1;
+        character.pos = Vec2::new(0.72, 0.0);
+        character.grounded = true;
+        editor.character = Some(character);
+        editor.walk = None;
+    }
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyW);
+
+    let mut max_step = 0.0f32;
+    let mut prev: Option<Vec2> = None;
+    let mut climbed = false;
+    for _ in 0..180 {
+        tick_character(&mut app);
+        let character = app.world().resource::<Editor>().character.unwrap();
+        if let Some(p) = prev {
+            max_step = max_step.max(character.pos.distance(p));
+        }
+        prev = Some(character.pos);
+        if character.feet > 0.5 {
+            climbed = true;
+        }
+    }
+
+    assert!(
+        max_step < 0.2,
+        "a standing start must accelerate, not teleport onto the ramp, max single-frame step={max_step}"
+    );
+    assert!(
+        climbed,
+        "the capsule should still ride up the ramp once it reaches it"
+    );
+}
+
+/// One ramp, no neighbours: spawn it alone so the climb itself is isolated.
+fn ramp_only_app() -> App {
+    let mut app = physics_app();
+    let ramp = &shapes()[model::shape_index("ramp").unwrap()];
+    app.world_mut().spawn((
+        RigidBody::Static,
+        piece_collider(ramp).unwrap(),
+        Position::from_xyz(2.0, 0.0, 0.0),
+        Rotation(Quat::from_rotation_y(-std::f32::consts::PI * 1.5)),
+    ));
+    app.update();
+    app.update();
+    app
+}
+
+fn place_character(app: &mut App, pos: Vec2, feet: f32, yaw: f32) {
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    app.world_mut().resource_mut::<Orbit>().yaw = yaw;
+    let mut editor = app.world_mut().resource_mut::<Editor>();
+    editor.character = Some(Character {
+        pos,
+        feet,
+        yaw,
+        vy: 0.0,
+        hv: Vec2::ZERO,
+        ride_vel: Vec2::ZERO,
+        grounded: true,
+        sliding: false,
+        health: crate::statuses::Health::default(),
+    });
+    editor.walk = None;
+}
+
+/// Largest single-frame 3D displacement over frames that *start*
+/// grounded. A grounded frame may never reposition the capsule by more
+/// than the wish travel plus the terrain rise over that travel; anything
+/// larger is a teleport or a depenetration fling, whatever its source.
+fn max_grounded_frame_step(app: &mut App, frames: usize) -> (f32, f32) {
+    let mut worst = 0.0f32;
+    let mut peak = 0.0f32;
+    let mut prev: Option<(Vec3, bool)> = None;
+    for _ in 0..frames {
+        tick_character(app);
+        let c = app.world().resource::<Editor>().character.unwrap();
+        let at = Vec3::new(c.pos.x, c.feet, c.pos.y);
+        peak = peak.max(c.feet);
+        if let Some((p, was_grounded)) = prev
+            && was_grounded
+        {
+            worst = worst.max(at.distance(p));
+        }
+        prev = Some((at, c.grounded));
+    }
+    (worst, peak)
+}
+
+/// Sprint straight up a ramp: the capsule must stay grounded the whole
+/// climb and every grounded frame must move by no more than the sprint
+/// travel plus the slope rise over it — no entry pop, no mid-slope fling.
+#[test]
+fn sprinting_up_a_ramp_stays_grounded_and_never_pops() {
+    let mut app = ramp_only_app();
+    place_character(
+        &mut app,
+        Vec2::new(0.5, 0.0),
+        0.0,
+        -std::f32::consts::FRAC_PI_2,
+    );
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyW);
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::ShiftLeft);
+
+    // Stop counting at the ridge (x ~ 3.0); walking off it is a fall.
+    let mut worst = 0.0f32;
+    let mut peak = 0.0f32;
+    let mut prev: Option<(Vec3, bool)> = None;
+    for _ in 0..90 {
+        tick_character(&mut app);
+        let c = app.world().resource::<Editor>().character.unwrap();
+        if c.pos.x > 3.0 {
+            break;
+        }
+        assert!(
+            c.grounded,
+            "sprinting up a ramp must stay grounded, pos={:?} feet={} vy={}",
+            c.pos, c.feet, c.vy
+        );
+        let at = Vec3::new(c.pos.x, c.feet, c.pos.y);
+        peak = peak.max(c.feet);
+        if let Some((p, was_grounded)) = prev
+            && was_grounded
+        {
+            worst = worst.max(at.distance(p));
+        }
+        prev = Some((at, c.grounded));
+    }
+    assert!(peak > 0.8, "should sprint to the ramp top, peak={peak}");
+    assert!(
+        worst < 0.12,
+        "grounded sprint frames must follow the slope, worst frame={worst}"
+    );
+}
+
+/// Enter the same ramp at 30 degrees to its rise: the climb crosses the
+/// slope diagonally, which used to catch the wedge's side features and
+/// pop the capsule. Grounded frames still may not jump.
+#[test]
+fn entering_a_ramp_at_an_angle_does_not_pop() {
+    let mut app = ramp_only_app();
+    // Yaw giving wish direction (0.866, 0.5): 30 degrees off the rise.
+    place_character(&mut app, Vec2::new(0.5, -0.4), 0.0, -2.094);
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyW);
+
+    let (worst, peak) = max_grounded_frame_step(&mut app, 110);
+    assert!(
+        peak > 0.4,
+        "the diagonal entry should still climb the slope, peak={peak}"
+    );
+    assert!(
+        worst < 0.08,
+        "grounded frames must follow the slope diagonally, worst frame={worst}"
+    );
+}
+
+/// Stop halfway up a ramp, stand there, then walk on: standing must not
+/// drift or sink, and the restart must not pop.
+#[test]
+fn stopping_and_restarting_on_a_ramp_does_not_drift_or_pop() {
+    let mut app = ramp_only_app();
+    place_character(
+        &mut app,
+        Vec2::new(0.5, 0.0),
+        0.0,
+        -std::f32::consts::FRAC_PI_2,
+    );
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyW);
+    for _ in 0..35 {
+        tick_character(&mut app);
+    }
+    let settled = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        (0.2..0.75).contains(&settled.feet),
+        "should be parked mid-ramp, feet={}",
+        settled.feet
+    );
+
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .release(KeyCode::KeyW);
+    for _ in 0..30 {
+        tick_character(&mut app);
+    }
+    let rested = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        (rested.pos - settled.pos).length() < 0.01 && (rested.feet - settled.feet).abs() < 0.01,
+        "standing on a ramp must not drift, {:?} -> {:?}",
+        settled.pos,
+        rested.pos
+    );
+    assert!(rested.grounded, "standing on a ramp stays grounded");
+
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyW);
+    let (worst, peak) = max_grounded_frame_step(&mut app, 90);
+    assert!(peak > 0.8, "should climb on to the top, peak={peak}");
+    assert!(
+        worst < 0.08,
+        "restarting on a ramp must not pop, worst frame={worst}"
     );
 }
 
@@ -623,6 +1160,7 @@ fn walking_up_a_ramp_steps_onto_the_next_block() {
             hv: Vec2::ZERO,
             ride_vel: Vec2::ZERO,
             grounded: true,
+            sliding: false,
             health: crate::statuses::Health::default(),
         });
         editor.walk = None;
@@ -706,6 +1244,7 @@ fn route_walk_crosses_the_full_course_without_pops() {
             hv: Vec2::ZERO,
             ride_vel: Vec2::ZERO,
             grounded: true,
+            sliding: false,
             health: crate::statuses::Health::default(),
         });
         editor.route = Some(Route {
@@ -796,6 +1335,7 @@ fn walking_off_a_block_mounts_the_ramp_on_it() {
             hv: Vec2::ZERO,
             ride_vel: Vec2::ZERO,
             grounded: true,
+            sliding: false,
             health: crate::statuses::Health::default(),
         });
         editor.walk = None;
@@ -853,6 +1393,7 @@ fn a_small_lip_at_the_ramp_base_is_stepped_over() {
                 hv: Vec2::ZERO,
                 ride_vel: Vec2::ZERO,
                 grounded: true,
+                sliding: false,
                 health: crate::statuses::Health::default(),
             });
             editor.walk = None;
@@ -922,6 +1463,7 @@ fn step_up_refuses_a_destination_inside_the_next_block() {
             hv: Vec2::ZERO,
             ride_vel: Vec2::ZERO,
             grounded: true,
+            sliding: false,
             health: crate::statuses::Health::default(),
         });
         editor.walk = None;
@@ -987,6 +1529,7 @@ fn a_tall_lip_still_blocks() {
             hv: Vec2::ZERO,
             ride_vel: Vec2::ZERO,
             grounded: true,
+            sliding: false,
             health: crate::statuses::Health::default(),
         });
         editor.walk = None;
@@ -1039,6 +1582,7 @@ fn route_following_mounts_a_lipped_ramp() {
             hv: Vec2::ZERO,
             ride_vel: Vec2::ZERO,
             grounded: true,
+            sliding: false,
             health: crate::statuses::Health::default(),
         });
         editor.route = Some(Route {
@@ -1114,6 +1658,7 @@ fn can_jump_while_climbing_a_ramp() {
             hv: Vec2::ZERO,
             ride_vel: Vec2::ZERO,
             grounded: true,
+            sliding: false,
             health: crate::statuses::Health::default(),
         });
         editor.walk = None;
@@ -1171,6 +1716,7 @@ fn can_jump_while_descending_a_ramp() {
             hv: Vec2::ZERO,
             ride_vel: Vec2::ZERO,
             grounded: true,
+            sliding: false,
             health: crate::statuses::Health::default(),
         });
         editor.walk = None;
@@ -1219,6 +1765,11 @@ fn clicking_empty_ground_selects_nothing() {
         elevation: 0.0,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     }];
     assert_eq!(pick(&pieces, ray_towards(Vec3::new(5.0, 0.0, 5.0))), None);
 }
@@ -1236,6 +1787,7 @@ fn a_session_captures_and_restores_pieces_camera_character_and_history() {
         hv: Vec2::ZERO,
         ride_vel: Vec2::ZERO,
         grounded: false,
+        sliding: false,
         health: crate::statuses::Health::default(),
     });
     editor.undo = vec![LevelState {
@@ -1339,6 +1891,7 @@ fn walking_into_a_dynamic_crate_shoves_it() {
             hv: Vec2::ZERO,
             ride_vel: Vec2::ZERO,
             grounded: true,
+            sliding: false,
             health: crate::statuses::Health::default(),
         });
         editor.walk = None;
@@ -1388,6 +1941,7 @@ fn walking_into_a_static_wall_shoves_nothing() {
             hv: Vec2::ZERO,
             ride_vel: Vec2::ZERO,
             grounded: true,
+            sliding: false,
             health: crate::statuses::Health::default(),
         });
         editor.walk = None;

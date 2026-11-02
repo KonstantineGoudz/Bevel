@@ -100,6 +100,11 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         },
         // 270 deg makes the ramp rise along +x.
         Piece {
@@ -112,6 +117,11 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         },
         Piece {
             id: 3,
@@ -123,6 +133,11 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         },
         Piece {
             id: 4,
@@ -134,6 +149,11 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         },
     ];
 
@@ -146,6 +166,7 @@ pub(super) fn course() -> (Vec<Piece>, Character) {
         hv: Vec2::ZERO,
         ride_vel: Vec2::ZERO,
         grounded: true,
+        sliding: false,
         health: crate::statuses::Health::default(),
     };
 

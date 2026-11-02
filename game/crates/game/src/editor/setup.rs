@@ -37,8 +37,41 @@ pub(super) fn load_session(
         return;
     };
     if let (Some(id), Some(loaded)) = (&boot.id, boot.loaded.clone()) {
+        let had_camera = loaded.camera.is_some();
         editor.session = Some(id.clone());
         editor.apply_loaded(&mut orbit, &mut movers, loaded);
+        // If the saved camera was missing or looks at empty space, frame the
+        // level so a newly opened map doesn't start on a black void. The user
+        // described a black screen that only cleared after a right-drag, which
+        // matches an orbit target far from any piece.
+        if !had_camera || editor.pieces.is_empty() {
+            // No correction needed; default orbit already looks at origin.
+        } else {
+            let target2 = Vec2::new(orbit.target.x, orbit.target.z);
+            let mut closest = f32::MAX;
+            let mut sum = Vec2::ZERO;
+            for piece in &editor.pieces {
+                let d = piece.pos.distance(target2);
+                if d < closest {
+                    closest = d;
+                }
+                sum += piece.pos;
+            }
+            // If the saved target is more than ~2× the viewing distance away
+            // from every piece, it likely points at void (e.g. an older save
+            // or a map moved in the index). Frame the content instead.
+            if closest > orbit.distance * 2.0 + 10.0 {
+                if let Some(character) = editor.character {
+                    orbit.target = Vec3::new(character.pos.x, 0.0, character.pos.y);
+                    orbit.yaw = character.yaw;
+                } else {
+                    let center = sum / editor.pieces.len() as f32;
+                    orbit.target = Vec3::new(center.x, 0.0, center.y);
+                }
+                // Pull back enough to see a scattered map.
+                orbit.distance = orbit.distance.max(12.0).min(30.0);
+            }
+        }
     }
 }
 
@@ -112,7 +145,14 @@ pub(super) fn setup(
             ..default()
         }));
         let mut made = Vec::new();
-        if let model::Geometry::Wedge { w, d, h } = &shape.geom {
+        if shape.is_trigger {
+            let mesh: Mesh = match shape.trigger_shape {
+                model::TriggerShape::Box => Cuboid::new(1.0, 1.0, 1.0).into(),
+                model::TriggerShape::Sphere => Sphere::new(0.5).mesh().ico(4).unwrap().into(),
+                model::TriggerShape::Cylinder => Cylinder::new(0.5, 1.0).into(),
+            };
+            made.push((meshes.add(mesh), 0));
+        } else if let model::Geometry::Wedge { w, d, h } = &shape.geom {
             made.push((meshes.add(wedge(*w, *d, *h)), 0));
         } else {
             for (outline, base, height, slot) in solid_parts(shape) {
@@ -302,7 +342,7 @@ pub(super) fn setup(
     let hint_text = commands
         .spawn((
             Text::new(
-                "LMB place / select / drag  |  Y lifts, plane squares slide  |  rings pitch / yaw / roll  |  Ctrl+C / Ctrl+V copy & paste  |  Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo  |  Path: click route, Shift append  |  Enter walk  |  drag waypoints / curve handles  |  RMB orbit (selection in Build)  |  MMB pan  |  wheel zoom  |  V view  |  Tab mouse  |  P play / build  |  C character  |  Shift+A add menu (not first person)  |  G move / R rotate  |  X Y Z lock axis  |  Enter / LMB confirm  |  Esc / RMB cancel  |  Shift+R 30 deg  |  S save  |  Shift+S copy JSON",
+                "LMB place / select / drag  |  Y lifts, plane squares slide  |  rings pitch / yaw / roll  |  Ctrl+C / Ctrl+V copy & paste  |  Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo  |  Path: click route, Shift append  |  Enter walk  |  drag waypoints / curve handles  |  RMB orbit (selection in Build)  |  MMB pan  |  wheel zoom  |  V view  |  Tab mouse  |  P play / build  |  C character  |  F3 add menu (not first person)  |  G move / R rotate  |  X Y Z lock axis  |  Enter / LMB confirm  |  Esc / RMB cancel  |  Shift+R 30 deg  |  S save  |  Shift+S copy JSON",
             ),
             TextFont { font_size: FontSize::Px(11.0), ..default() },
             TextColor(Color::srgb_u8(0x6b, 0x7d, 0x93)),

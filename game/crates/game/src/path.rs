@@ -201,6 +201,9 @@ pub fn blocked(pieces: &[Piece]) -> (HashSet<Edge>, HashSet<Hex>) {
         let Some(shape) = shapes().get(piece.shape) else {
             continue;
         };
+        if shape.is_trigger {
+            continue;
+        }
         let here = piece_cell(piece, shape, pieces);
         match &shape.geom {
             model::Geometry::Bar { .. } => {
@@ -730,6 +733,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         }
     }
 
@@ -771,6 +779,11 @@ mod tests {
                 elevation: 0.0,
                 dynamic: false,
                 trigger: crate::model::Trigger::harmless(),
+                trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+                trigger_shape_override: crate::model::TriggerShape::Box,
+                trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+                trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+                trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
             };
             let (edges, _) = blocked(&[piece]);
             assert!(edges.is_empty(), "{id} should not block");
@@ -801,6 +814,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let (_, hexes) = blocked(&[piece]);
         assert!(hexes.contains(&(1, 0)));
@@ -827,6 +845,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let (edges, hexes) = blocked(&[pillar]);
         assert!(!can_step(here, model::hex_center(1, 0), &edges, &hexes));
@@ -844,6 +867,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let (edges, hexes) = blocked(&[block]);
         assert!(hexes.is_empty(), "a block top is a walkable cell");
@@ -863,6 +891,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let (_, hexes) = blocked(&[ramp]);
         assert!(hexes.is_empty());
@@ -880,6 +913,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let ramp = Piece {
             id: 2,
@@ -891,6 +929,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
 
         // Alone, the block cannot be entered from its sides.
@@ -914,6 +957,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let (edges, _) = blocked(&[ramp]);
 
@@ -947,6 +995,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let (edges, hexes) = blocked(&[ramp]);
 
@@ -972,6 +1025,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let block = Piece {
             id: 2,
@@ -983,6 +1041,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let (edges, hexes) = blocked(&[ramp, block]);
 
@@ -1021,6 +1084,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let first = Piece {
             id: 2,
@@ -1032,6 +1100,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let second = Piece {
             id: 3,
@@ -1043,6 +1116,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
 
         let (edges, hexes) = blocked(&[ramp, first, second]);
@@ -1083,6 +1161,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         // The square corner pokes into the next hex.
         let corner = model::hex_center(2, 1) + Vec2::new(0.9, -0.9);
@@ -1109,6 +1192,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let home = Piece {
             id: 3,
@@ -1120,6 +1208,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let pieces = [ramp, home, block];
         let (edges, hexes) = blocked(&pieces);
@@ -1228,6 +1321,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let first = Piece {
             id: 2,
@@ -1239,6 +1337,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let second = Piece {
             id: 3,
@@ -1250,6 +1353,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let (edges, blocked) = blocked(&[ramp, first, second]);
 
@@ -1538,6 +1646,11 @@ mod tests {
             elevation: 1.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let ramp = Piece {
             id: 2,
@@ -1549,6 +1662,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let (edges, hexes) = blocked(&[block, ramp]);
         assert_eq!(
@@ -1570,6 +1688,11 @@ mod tests {
             elevation: 1.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let ramp = Piece {
             id: 2,
@@ -1581,6 +1704,11 @@ mod tests {
             elevation: 1.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let (edges, hexes) = blocked(&[block, ramp]);
         assert!(
@@ -1601,6 +1729,11 @@ mod tests {
             elevation: 1.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         assert_eq!(
             cell_under(&[block], model::hex_center(1, 0), 1.9),
@@ -1623,6 +1756,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let pieces = vec![
             piece(1, "block", -2.078, -0.198, 0.0, 89.8),

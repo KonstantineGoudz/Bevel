@@ -15,20 +15,28 @@ use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::input_focus::FocusCause;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::text::{EditableText, TextCursorStyle};
+use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::TextInput;
 
 pub(super) const OUTLINER_WIDTH: f32 = 250.0;
 pub(super) const OUTLINER_MARGIN: f32 = 8.0;
 pub(super) const OUTLINER_TOP: f32 = 38.0;
 pub(super) const OUTLINER_HEIGHT: f32 = 350.0;
+/// Height of the title bar when the graph is collapsed to just its header.
+pub(super) const OUTLINER_COLLAPSED_HEIGHT: f32 = 34.0;
 
 /// Whether a logical screen point is over the floating object graph.
-pub(super) fn over_outliner_panel(screen: Vec2, _size: Vec2) -> bool {
+pub(super) fn over_outliner_panel(screen: Vec2, _size: Vec2, collapsed: bool) -> bool {
+    let height = if collapsed {
+        OUTLINER_COLLAPSED_HEIGHT
+    } else {
+        OUTLINER_HEIGHT
+    };
     let left = PANEL_WIDTH + OUTLINER_MARGIN;
     screen.x >= left
         && screen.x <= left + OUTLINER_WIDTH
         && screen.y >= OUTLINER_TOP
-        && screen.y <= OUTLINER_TOP + OUTLINER_HEIGHT
+        && screen.y <= OUTLINER_TOP + height
 }
 
 #[derive(Component)]
@@ -36,6 +44,16 @@ pub(super) struct OutlinerPanel;
 
 #[derive(Component)]
 pub(super) struct OutlinerList;
+
+/// The collapsible half of the panel (toolbar, label field, tree, hint).
+#[derive(Component)]
+pub(super) struct OutlinerBody;
+
+#[derive(Component)]
+pub(super) struct OutlinerCollapseButton;
+
+#[derive(Component)]
+pub(super) struct OutlinerCollapseLabel;
 
 #[derive(Component)]
 pub(super) struct OutlinerCount;
@@ -52,6 +70,11 @@ pub(super) struct OutlinerRow(pub(super) GraphNode);
 #[derive(Component)]
 pub(super) struct OutlinerToggle(pub(super) u32);
 
+/// Per-piece padlock badge. Clicking it flips viewport-selectability without
+/// selecting the row.
+#[derive(Component)]
+pub(super) struct OutlinerLockButton(pub(super) u32);
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum OutlinerAction {
     NewGroup,
@@ -67,7 +90,12 @@ pub(super) struct OutlinerActionButton(pub(super) OutlinerAction);
 #[derive(Resource, Default)]
 pub(super) struct OutlinerState {
     pub(super) selection: GraphNode,
+    /// True when the panel is rolled up to its title bar.
+    pub(super) collapsed: bool,
     drag: Option<GraphNode>,
+    /// Pointer position at the start of a row drag. A release without enough
+    /// travel is a click, never a reparent.
+    drag_start: Option<Vec2>,
     last_revision: u64,
     last_piece_ids: Vec<u32>,
     last_has_character: bool,
@@ -113,14 +141,43 @@ pub(super) fn spawn_object_graph(commands: &mut Commands) {
         .spawn(Node {
             width: percent(100),
             flex_direction: FlexDirection::Row,
-            justify_content: JustifyContent::SpaceBetween,
             align_items: AlignItems::Center,
+            column_gap: px(6),
             ..default()
         })
         .id();
+    let collapse = commands
+        .spawn((
+            Button,
+            OutlinerCollapseButton,
+            Node {
+                width: px(16),
+                height: px(16),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(4)),
+                ..default()
+            },
+            BackgroundColor(BUTTON_BG),
+            BorderColor::all(BORDER),
+            children![(
+                OutlinerCollapseLabel,
+                Text::new("v"),
+                TextFont {
+                    font_size: FontSize::Px(10.0),
+                    ..default()
+                },
+                TextColor(MUTED),
+                TextLayout::no_wrap(),
+            )],
+        ))
+        .id();
+    commands.entity(collapse).observe(on_outliner_collapse);
     let title = commands
         .spawn((
             Text::new("OBJECT GRAPH"),
+            TextLayout::no_wrap(),
             TextFont {
                 font_size: FontSize::Px(12.0),
                 ..default()
@@ -132,6 +189,7 @@ pub(super) fn spawn_object_graph(commands: &mut Commands) {
         .spawn((
             OutlinerCount,
             Text::new("0 items"),
+            TextLayout::no_wrap(),
             TextFont {
                 font_size: FontSize::Px(11.0),
                 ..default()
@@ -139,7 +197,15 @@ pub(super) fn spawn_object_graph(commands: &mut Commands) {
             TextColor(Color::srgb_u8(0x6b, 0x7d, 0x93)),
         ))
         .id();
-    commands.entity(header).add_children(&[title, count]);
+    let header_spacer = commands
+        .spawn(Node {
+            flex_grow: 1.0,
+            ..default()
+        })
+        .id();
+    commands
+        .entity(header)
+        .add_children(&[collapse, title, header_spacer, count]);
 
     let toolbar = commands
         .spawn(Node {
@@ -241,7 +307,7 @@ pub(super) fn spawn_object_graph(commands: &mut Commands) {
 
     let hint = commands
         .spawn((
-            Text::new("Click to select - drag rows into a group"),
+            Text::new("Click select - drag to group - padlock locks"),
             TextFont {
                 font_size: FontSize::Px(9.0),
                 ..default()
@@ -255,9 +321,72 @@ pub(super) fn spawn_object_graph(commands: &mut Commands) {
         ))
         .id();
 
+    let body = commands
+        .spawn((
+            OutlinerBody,
+            Node {
+                width: percent(100),
+                flex_grow: 1.0,
+                flex_direction: FlexDirection::Column,
+                row_gap: px(5),
+                ..default()
+            },
+        ))
+        .id();
     commands
-        .entity(panel)
-        .add_children(&[header, toolbar, label_row, list, hint]);
+        .entity(body)
+        .add_children(&[toolbar, label_row, list, hint]);
+    commands.entity(panel).add_children(&[header, body]);
+}
+
+pub(super) fn sync_outliner_panel(
+    state: Res<OutlinerState>,
+    mut panels: Query<&mut Node, (With<OutlinerPanel>, Without<OutlinerBody>)>,
+    mut bodies: Query<&mut Node, (With<OutlinerBody>, Without<OutlinerPanel>)>,
+    mut labels: Query<&mut Text, With<OutlinerCollapseLabel>>,
+) {
+    let height = if state.collapsed {
+        OUTLINER_COLLAPSED_HEIGHT
+    } else {
+        OUTLINER_HEIGHT
+    };
+    for mut panel in &mut panels {
+        if panel.height != px(height) {
+            panel.height = px(height);
+        }
+    }
+    for mut body in &mut bodies {
+        let display = if state.collapsed {
+            Display::None
+        } else {
+            Display::Flex
+        };
+        if body.display != display {
+            body.display = display;
+        }
+    }
+    let glyph = if state.collapsed { ">" } else { "v" };
+    for mut label in &mut labels {
+        if label.0.as_str() != glyph {
+            label.0 = glyph.to_owned();
+        }
+    }
+}
+
+pub(super) fn on_outliner_collapse(
+    event: On<Activate>,
+    buttons: Query<&OutlinerCollapseButton>,
+    mut state: ResMut<OutlinerState>,
+    mut focus: ResMut<InputFocus>,
+) {
+    if buttons.get(event.entity).is_ok() {
+        state.collapsed = !state.collapsed;
+        state.drag = None;
+        state.drag_start = None;
+        if focus.get().is_some() {
+            focus.clear();
+        }
+    }
 }
 
 fn outliner_action_button(commands: &mut Commands, action: OutlinerAction, text: &str) -> Entity {
@@ -392,6 +521,7 @@ fn spawn_row(
                 flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Center,
                 padding: UiRect::left(px(4.0 + depth as f32 * 12.0)),
+                column_gap: px(3),
                 border: UiRect::all(px(1)),
                 border_radius: BorderRadius::all(px(4)),
                 ..default()
@@ -438,10 +568,12 @@ fn spawn_row(
         commands.entity(row).add_child(spacer);
     }
 
+    let locked = editor.node_locked(node);
     let colour = match node {
         GraphNode::Root => MUTED,
         GraphNode::Group(_) => AMBER,
         GraphNode::Character => PILL_COLOR,
+        GraphNode::Piece(_) if locked => MUTED,
         GraphNode::Piece(_) => Color::srgb_u8(0xc3, 0xd0, 0xdf),
     };
     let label = commands
@@ -481,17 +613,76 @@ fn spawn_row(
             .id();
         commands.entity(row).add_child(text);
     }
+
+    if let GraphNode::Piece(id) = node {
+        let locked = editor.outline.is_locked(id);
+        let icon = if locked {
+            AMBER
+        } else {
+            Color::srgb_u8(0x62, 0x74, 0x89)
+        };
+        let lock = commands
+            .spawn((
+                OutlinerLockButton(id),
+                Node {
+                    width: px(16),
+                    height: px(18),
+                    position_type: PositionType::Relative,
+                    ..default()
+                },
+                BackgroundColor(if locked { BUTTON_ON } else { Color::NONE }),
+            ))
+            .id();
+        // Two tiny nodes make a padlock without depending on a glyph in the
+        // default font: a rounded shackle above a solid body.
+        let shackle = commands
+            .spawn((
+                Pickable::IGNORE,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(5),
+                    top: px(3),
+                    width: px(6),
+                    height: px(6),
+                    border: UiRect::all(px(1)),
+                    border_radius: BorderRadius::all(px(3)),
+                    ..default()
+                },
+                BorderColor::all(icon),
+            ))
+            .id();
+        let body = commands
+            .spawn((
+                Pickable::IGNORE,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(3),
+                    bottom: px(2),
+                    width: px(10),
+                    height: px(7),
+                    border_radius: BorderRadius::all(px(1)),
+                    ..default()
+                },
+                BackgroundColor(icon),
+            ))
+            .id();
+        commands.entity(lock).add_children(&[shackle, body]);
+        commands.entity(row).add_child(lock);
+    }
     row
 }
 
 pub(super) fn sync_outliner_fields(
+    mut commands: Commands,
     editor: Res<Editor>,
     state: Res<OutlinerState>,
     mut edit: ResMut<OutlinerEdit>,
     mut focus: ResMut<InputFocus>,
     mut counts: Query<&mut Text, With<OutlinerCount>>,
-    mut label_rows: Query<&mut Node, With<OutlinerLabelRow>>,
-    mut inputs: Query<(Entity, &mut EditableText), With<OutlinerNameInput>>,
+    mut inputs: Query<
+        (Entity, &mut EditableText, Has<InteractionDisabled>),
+        With<OutlinerNameInput>,
+    >,
     mut buttons: Query<(
         &OutlinerActionButton,
         &mut BackgroundColor,
@@ -510,23 +701,24 @@ pub(super) fn sync_outliner_fields(
     }
 
     let renamable = editor.node_renamable(state.selection);
-    for mut row in &mut label_rows {
-        row.display = if renamable {
-            Display::Flex
-        } else {
-            Display::None
-        };
-    }
-
-    let Ok((entity, mut text)) = inputs.single_mut() else {
+    let Ok((entity, mut text, disabled)) = inputs.single_mut() else {
         return;
     };
+    if disabled == renamable {
+        if renamable {
+            commands.entity(entity).remove::<InteractionDisabled>();
+        } else {
+            commands.entity(entity).insert(InteractionDisabled);
+        }
+    }
     if !renamable {
         edit.selected = state.selection;
         edit.last_text.clear();
         edit.committed = false;
         if focus.get() == Some(entity) {
             focus.clear();
+        } else if !text.value().to_string().is_empty() {
+            text.editor_mut().set_text("");
         }
     } else {
         let forced = edit.selected != state.selection;
@@ -627,6 +819,50 @@ pub(super) fn update_outliner_rows(
     }
 }
 
+/// What a pointer press landed on inside the graph.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum OutlinerHit {
+    Lock(u32),
+    Toggle(u32),
+    Row(GraphNode),
+    Empty,
+}
+
+/// Resolve the row or collapse toggle from the entity Bevy actually picked.
+/// UI text picking targets the `Text` node (or one of its spans), not the row
+/// that contains it, so every hit is walked up the `ChildOf` chain until a
+/// marker component is found. Reaching the list itself means empty space.
+fn outliner_hit(
+    start: Entity,
+    list: Entity,
+    rows: &Query<&OutlinerRow>,
+    toggles: &Query<&OutlinerToggle>,
+    locks: &Query<&OutlinerLockButton>,
+    parents: &Query<&ChildOf>,
+) -> Option<OutlinerHit> {
+    let mut current = start;
+    for _ in 0..64 {
+        if let Ok(lock) = locks.get(current) {
+            return Some(OutlinerHit::Lock(lock.0));
+        }
+        if let Ok(toggle) = toggles.get(current) {
+            return Some(OutlinerHit::Toggle(toggle.0));
+        }
+        if let Ok(row) = rows.get(current) {
+            return Some(OutlinerHit::Row(row.0));
+        }
+        if current == list {
+            return Some(OutlinerHit::Empty);
+        }
+        let Ok(parent) = parents.get(current) else {
+            return None;
+        };
+        current = parent.parent();
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn on_outliner_press(
     event: On<PointerPress>,
     mut editor: ResMut<Editor>,
@@ -634,7 +870,9 @@ pub(super) fn on_outliner_press(
     mut state: ResMut<OutlinerState>,
     mut focus: ResMut<InputFocus>,
     toggles: Query<&OutlinerToggle>,
+    locks: Query<&OutlinerLockButton>,
     rows: Query<&OutlinerRow>,
+    parents: Query<&ChildOf>,
     list: Single<Entity, With<OutlinerList>>,
 ) {
     if event.button != PointerButton::Primary {
@@ -644,54 +882,76 @@ pub(super) fn on_outliner_press(
         return;
     }
     state.drag = None;
-    if let Ok(toggle) = toggles.get(event.entity) {
-        if let Some(group) = editor.outline.group_mut(toggle.0) {
-            group.collapsed = !group.collapsed;
-        }
-        editor.outline.bump();
-        // Collapse state is view state, not a level edit, but persisting it
-        // means reopening a map keeps the same branches closed.
-        editor.soft_dirty = true;
-        if focus.get().is_some() {
-            focus.clear();
-        }
+    state.drag_start = None;
+    // Pointer events rewrite `event.entity` as they bubble, so by the time this
+    // observer on the list runs the target is the list itself. The original
+    // target is the text node / toggle / row that was actually clicked.
+    let Some(hit) = outliner_hit(
+        event.original_event_target(),
+        *list,
+        &rows,
+        &toggles,
+        &locks,
+        &parents,
+    ) else {
         return;
-    }
-    let Ok(row) = rows.get(event.entity) else {
-        if event.entity == *list {
+    };
+    match hit {
+        OutlinerHit::Lock(id) => {
+            editor.toggle_lock(id);
+            if focus.get().is_some() {
+                focus.clear();
+            }
+        }
+        OutlinerHit::Toggle(id) => {
+            if let Some(group) = editor.outline.group_mut(id) {
+                group.collapsed = !group.collapsed;
+            }
+            editor.outline.bump();
+            // Collapse state is view state, not a level edit, but persisting it
+            // means reopening a map keeps the same branches closed.
+            editor.soft_dirty = true;
+            if focus.get().is_some() {
+                focus.clear();
+            }
+        }
+        OutlinerHit::Empty => {
             state.selection = GraphNode::Root;
             editor.selected = None;
             if focus.get().is_some() {
                 focus.clear();
             }
         }
-        return;
-    };
-    if focus.get().is_some() {
-        focus.clear();
-    }
-    state.selection = row.0;
-    // Selecting in the graph is an object action: holster a shape placer so
-    // the next canvas click selects or drags instead of dropping a new block.
-    editor.tool = None;
-    editor.ghost = None;
-    match row.0 {
-        GraphNode::Piece(id) => {
-            editor.selected = Some(id);
+        OutlinerHit::Row(node) => {
+            if focus.get().is_some() {
+                focus.clear();
+            }
+            state.selection = node;
+            // Selecting in the graph is an object action: holster a shape
+            // placer so the next canvas click selects or drags instead of
+            // dropping a new block.
+            editor.tool = None;
+            editor.ghost = None;
+            match node {
+                GraphNode::Piece(id) => {
+                    editor.selected = Some(id);
+                }
+                GraphNode::Group(_) => {
+                    editor.selected = None;
+                }
+                GraphNode::Character => {
+                    editor.selected = None;
+                    focus_character(&mut orbit, editor.character);
+                }
+                GraphNode::Root => {
+                    editor.selected = None;
+                }
+            }
+            if node.is_object() {
+                state.drag = Some(node);
+                state.drag_start = Some(event.pointer.position);
+            }
         }
-        GraphNode::Group(_) => {
-            editor.selected = None;
-        }
-        GraphNode::Character => {
-            editor.selected = None;
-            focus_character(&mut orbit, editor.character);
-        }
-        GraphNode::Root => {
-            editor.selected = None;
-        }
-    }
-    if row.0.is_object() {
-        state.drag = Some(row.0);
     }
 }
 
@@ -701,19 +961,37 @@ pub(super) fn on_outliner_release(
     mut state: ResMut<OutlinerState>,
     rows: Query<&OutlinerRow>,
     toggles: Query<&OutlinerToggle>,
+    locks: Query<&OutlinerLockButton>,
+    parents: Query<&ChildOf>,
+    list: Single<Entity, With<OutlinerList>>,
 ) {
     if event.button != PointerButton::Primary {
         return;
     }
+    let Some(start) = state.drag_start.take() else {
+        state.drag = None;
+        return;
+    };
     let Some(drag) = state.drag.take() else {
         return;
     };
-    let target = if let Ok(row) = rows.get(event.entity) {
-        row.0
-    } else if let Ok(toggle) = toggles.get(event.entity) {
-        GraphNode::Group(toggle.0)
-    } else {
+    // Selecting the row can change the panel layout (for example the label
+    // field becomes active), which can move a different row under a still
+    // pointer. Only a deliberate drag may reparent anything.
+    if event.pointer.position.distance(start) < 4.0 {
         return;
+    }
+    let target = match outliner_hit(
+        event.original_event_target(),
+        *list,
+        &rows,
+        &toggles,
+        &locks,
+        &parents,
+    ) {
+        Some(OutlinerHit::Toggle(id)) => GraphNode::Group(id),
+        Some(OutlinerHit::Row(node)) => node,
+        Some(OutlinerHit::Lock(_)) | Some(OutlinerHit::Empty) | None => return,
     };
     if target == drag {
         return;
@@ -737,6 +1015,7 @@ pub(super) fn on_outliner_release(
 
 pub(super) fn on_outliner_cancel(_event: On<PointerCancel>, mut state: ResMut<OutlinerState>) {
     state.drag = None;
+    state.drag_start = None;
 }
 
 pub(super) fn on_outliner_action(
@@ -750,6 +1029,7 @@ pub(super) fn on_outliner_action(
         return;
     };
     state.drag = None;
+    state.drag_start = None;
     if focus.get().is_some() {
         focus.clear();
     }
@@ -792,6 +1072,7 @@ pub(super) fn outliner_shortcuts(
     if keys.just_pressed(KeyCode::Escape) {
         state.selection = GraphNode::Root;
         state.drag = None;
+        state.drag_start = None;
         return;
     }
     let command = command_down(&keys);
@@ -809,6 +1090,7 @@ pub(super) fn outliner_shortcuts(
         return;
     }
     if keys.just_pressed(KeyCode::F2)
+        && !state.collapsed
         && editor.node_renamable(state.selection)
         && let Ok(input) = inputs.single()
     {
@@ -822,6 +1104,7 @@ pub(super) fn outliner_scroll(
     mut list: Query<(&mut ScrollPosition, &ComputedNode), With<OutlinerList>>,
     touch: Res<TouchState>,
     editor: Res<Editor>,
+    state: Res<OutlinerState>,
 ) {
     let raw: f32 = wheel
         .read()
@@ -830,13 +1113,13 @@ pub(super) fn outliner_scroll(
             MouseScrollUnit::Pixel => wheel.y,
         })
         .sum();
-    if touch.enabled || editor.mode != Mode::Build || raw == 0.0 {
+    if touch.enabled || state.collapsed || editor.mode != Mode::Build || raw == 0.0 {
         return;
     }
     let Some(cursor) = window.cursor_position() else {
         return;
     };
-    if !over_outliner_panel(cursor, window.size()) {
+    if !over_outliner_panel(cursor, window.size(), state.collapsed) {
         return;
     }
     let Ok((mut position, computed)) = list.single_mut() else {

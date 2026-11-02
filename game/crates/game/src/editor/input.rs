@@ -196,7 +196,7 @@ pub(super) fn set_mode(editor: &mut Editor, mode: Mode) {
             editor.drag = None;
             editor.gizmo_drag = None;
             editor.note = if editor.character.is_some() {
-                "playing: WASD / stick moves the capsule"
+                "playing: WASD / stick moves, Space jumps, hold Left Ctrl in the air to slide on landing"
             } else {
                 "playing: place a character to control one"
             };
@@ -251,6 +251,7 @@ pub(super) fn interact(
     gesture: Res<PathGesture>,
     nav: Res<Nav>,
     menu: Res<AddMenu>,
+    outliner: Res<OutlinerState>,
     camera: Single<(&Camera, &Transform)>,
     spatial_query: SpatialQuery,
     player: Query<Entity, With<CharacterVisual>>,
@@ -406,7 +407,10 @@ pub(super) fn interact(
     {
         return;
     }
-    if !playing && !touch.enabled && over_outliner_panel(screen, cursor.screen_size) {
+    if !playing
+        && !touch.enabled
+        && over_outliner_panel(screen, cursor.screen_size, outliner.collapsed)
+    {
         return;
     }
 
@@ -472,6 +476,11 @@ pub(super) fn interact(
             elevation: 0.0,
             dynamic: false,
             trigger: default_trigger,
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let snap = model::snap_piece(
             &raw,
@@ -501,6 +510,11 @@ pub(super) fn interact(
                 elevation: 0.0,
                 dynamic: false,
                 trigger: default_trigger,
+                trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+                trigger_shape_override: crate::model::TriggerShape::Box,
+                trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+                trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+                trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
             });
             editor.selected = Some(id);
             editor.note = match snap.kind {
@@ -523,6 +537,7 @@ pub(super) fn interact(
                 hv: Vec2::ZERO,
                 ride_vel: Vec2::ZERO,
                 grounded: true,
+                sliding: false,
                 health: crate::statuses::Health::default(),
             };
             editor.character = Some(character);
@@ -596,7 +611,10 @@ pub(super) fn interact(
                 _ => {
                     // No valid selection: a click on a piece selects it so
                     // the following clicks can lay down its path.
-                    if let Some(hit) = cursor.ray.and_then(|ray| pick(&editor.pieces, ray)) {
+                    if let Some(hit) = cursor
+                        .ray
+                        .and_then(|ray| pick_unlocked(&editor.pieces, ray, &editor.outline.locked))
+                    {
                         editor.selected = Some(hit);
                         editor.note = "motion: piece selected, click to add path points";
                     } else {
@@ -611,7 +629,9 @@ pub(super) fn interact(
     }
 
     if clicked {
-        let hit = cursor.ray.and_then(|ray| pick(&editor.pieces, ray));
+        let hit = cursor
+            .ray
+            .and_then(|ray| pick_unlocked(&editor.pieces, ray, &editor.outline.locked));
 
         // Play routes the capsule with plain clicks, including clicks on a
         // block or ramp (their tops are the surface the user means). Build

@@ -4,11 +4,12 @@ use super::*;
 use bevy::input_focus::InputFocus;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::text::{EditableText, TextCursorStyle};
+use bevy::ui::RelativeCursorPosition;
 use bevy::ui_widgets::TextInput;
 
 pub(super) const PROPERTIES_WIDTH: f32 = 230.0;
 pub(super) const PROPERTIES_MARGIN: f32 = 12.0;
-pub(super) const PROPERTIES_HEIGHT: f32 = 490.0;
+pub(super) const PROPERTIES_HEIGHT: f32 = 850.0;
 
 #[derive(Component)]
 pub(super) struct PlatformSection;
@@ -66,6 +67,30 @@ pub(super) struct PhysicsToggle;
 #[derive(Component)]
 pub(super) struct PhysicsToggleLabel;
 
+#[derive(Component)]
+pub(super) struct TriggerShapeButton;
+
+#[derive(Component)]
+pub(super) struct TriggerShapeLabel;
+
+#[derive(Component)]
+pub(super) struct TransparencySlider;
+
+#[derive(Component)]
+pub(super) struct TransparencySliderFill;
+
+#[derive(Component)]
+pub(super) struct TransparencyValueLabel;
+
+#[derive(Component)]
+pub(super) struct TriggerColorButton(pub u32);
+
+#[derive(Component)]
+pub(super) struct TriggerVisibleButton;
+
+#[derive(Component)]
+pub(super) struct TriggerVisibleLabel;
+
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PropertyField {
     PosX,
@@ -77,6 +102,10 @@ pub(super) enum PropertyField {
     /// Per-piece collision-trigger damage. Any piece can hurt; 0 is harmless.
     /// Adding more trigger effects later means adding more variants here.
     Damage,
+    TriggerWidth,
+    TriggerHeight,
+    TriggerLength,
+    TriggerAlpha,
 }
 
 impl PropertyField {
@@ -86,6 +115,10 @@ impl PropertyField {
             Self::PosY | Self::RotY => "Y",
             Self::PosZ | Self::RotZ => "Z",
             Self::Damage => "D",
+            Self::TriggerWidth => "W",
+            Self::TriggerHeight => "H",
+            Self::TriggerLength => "L",
+            Self::TriggerAlpha => "A",
         }
     }
 
@@ -102,6 +135,10 @@ impl PropertyField {
             Self::RotY => piece.rot.to_degrees(),
             Self::RotZ => piece.roll.to_degrees(),
             Self::Damage => piece.trigger.damage,
+            Self::TriggerWidth => piece.trigger_size.x,
+            Self::TriggerHeight => piece.trigger_size.y,
+            Self::TriggerLength => piece.trigger_size.z,
+            Self::TriggerAlpha => piece.trigger_alpha,
         }
     }
 
@@ -116,6 +153,15 @@ impl PropertyField {
             // Damage is clamped to >= 0; non-finite input never reaches here
             // (`parse` filters it).
             Self::Damage => piece.trigger.set_damage(value),
+            Self::TriggerWidth => piece.trigger_size.x = value.max(crate::model::TRIGGER_MIN_SIZE),
+            Self::TriggerHeight => piece.trigger_size.y = value.max(crate::model::TRIGGER_MIN_SIZE),
+            Self::TriggerLength => piece.trigger_size.z = value.max(crate::model::TRIGGER_MIN_SIZE),
+            Self::TriggerAlpha => {
+                piece.trigger_alpha = value.clamp(
+                    crate::model::TRIGGER_MIN_ALPHA,
+                    crate::model::TRIGGER_MAX_ALPHA,
+                )
+            }
         }
     }
 
@@ -242,6 +288,194 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
     commands.entity(panel).add_child(damage_label);
     let damage_row = property_row(commands, PropertyField::Damage, 6);
     commands.entity(panel).add_child(damage_row);
+
+    // Parametric trigger volume (only meaningful for trigger shapes, but shown
+    // for any selection to keep the panel layout stable; values are ignored
+    // for non-triggers).
+    let trigger_vol_label = section_label(commands, "TRIGGER VOLUME (W / H / L)");
+    commands.entity(panel).add_child(trigger_vol_label);
+    for (offset, field) in [
+        PropertyField::TriggerWidth,
+        PropertyField::TriggerHeight,
+        PropertyField::TriggerLength,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let row = property_row(commands, field, 7 + offset);
+        commands.entity(panel).add_child(row);
+    }
+    let shape_toggle = commands
+        .spawn((
+            Button,
+            TriggerShapeButton,
+            Node {
+                width: percent(100),
+                height: px(24),
+                margin: UiRect::top(px(4)),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(BUTTON_BG),
+            BorderColor::all(BORDER),
+            children![(
+                TriggerShapeLabel,
+                Text::new("Shape: Box"),
+                TextFont {
+                    font_size: FontSize::Px(12.0),
+                    ..default()
+                },
+                TextColor(Color::srgb_u8(0xc3, 0xd0, 0xdf)),
+            )],
+        ))
+        .id();
+    commands.entity(shape_toggle).observe(on_trigger_shape);
+    commands.entity(panel).add_child(shape_toggle);
+
+    // Transparency slider for trigger zones.
+    let transp_label = section_label(commands, "TRANSPARENCY");
+    commands.entity(panel).add_child(transp_label);
+    let alpha_row = property_row(commands, PropertyField::TriggerAlpha, 10);
+    commands.entity(panel).add_child(alpha_row);
+    // Visual slider: track + fill + value label.
+    let slider_row = commands
+        .spawn(Node {
+            width: percent(100),
+            height: px(22),
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: px(6),
+            ..default()
+        })
+        .id();
+    let slider_caption = commands
+        .spawn((
+            Text::new("T"),
+            TextFont {
+                font_size: FontSize::Px(12.0),
+                ..default()
+            },
+            TextColor(MUTED),
+            Node {
+                width: px(16),
+                ..default()
+            },
+        ))
+        .id();
+    let slider_track = commands
+        .spawn((
+            TransparencySlider,
+            Button,
+            RelativeCursorPosition::default(),
+            Node {
+                width: px(120),
+                height: px(12),
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(BUTTON_BG),
+            BorderColor::all(BORDER),
+        ))
+        .id();
+    let slider_fill = commands
+        .spawn((
+            TransparencySliderFill,
+            Node {
+                width: percent(35.0),
+                height: percent(100),
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(Color::srgb_u8(0x3f, 0xd0, 0xb0)),
+        ))
+        .id();
+    commands.entity(slider_track).add_child(slider_fill);
+    let slider_value = commands
+        .spawn((
+            TransparencyValueLabel,
+            Text::new("35%"),
+            TextFont {
+                font_size: FontSize::Px(12.0),
+                ..default()
+            },
+            TextColor(Color::srgb_u8(0xc3, 0xd0, 0xdf)),
+            Node {
+                width: px(40),
+                ..default()
+            },
+        ))
+        .id();
+    commands
+        .entity(slider_row)
+        .add_children(&[slider_caption, slider_track, slider_value]);
+    commands.entity(panel).add_child(slider_row);
+
+    // Trigger color: preset swatches for quick assignment.
+    let color_label = section_label(commands, "TRIGGER COLOR");
+    commands.entity(panel).add_child(color_label);
+    let color_row = commands
+        .spawn(Node {
+            width: percent(100),
+            flex_direction: FlexDirection::Row,
+            column_gap: px(4),
+            ..default()
+        })
+        .id();
+    for &preset in &crate::model::TRIGGER_COLOR_PRESETS {
+        let btn = commands
+            .spawn((
+                Button,
+                TriggerColorButton(preset),
+                Node {
+                    width: px(22),
+                    height: px(22),
+                    border: UiRect::all(px(1)),
+                    border_radius: BorderRadius::all(px(4)),
+                    ..default()
+                },
+                BackgroundColor(crate::model::trigger_color_to_bevy(preset)),
+                BorderColor::all(BORDER),
+            ))
+            .id();
+        commands.entity(btn).observe(on_trigger_color);
+        commands.entity(color_row).add_child(btn);
+    }
+    commands.entity(panel).add_child(color_row);
+
+    // Visibility toggle for edit mode (always selectable via scene graph).
+    let visible_toggle = commands
+        .spawn((
+            Button,
+            TriggerVisibleButton,
+            Node {
+                width: percent(100),
+                height: px(24),
+                margin: UiRect::top(px(4)),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(BUTTON_BG),
+            BorderColor::all(BORDER),
+            children![(
+                TriggerVisibleLabel,
+                Text::new("Show in Edit: Yes"),
+                TextFont {
+                    font_size: FontSize::Px(12.0),
+                    ..default()
+                },
+                TextColor(Color::srgb_u8(0xc3, 0xd0, 0xdf)),
+            )],
+        ))
+        .id();
+    commands.entity(visible_toggle).observe(on_trigger_visible);
+    commands.entity(panel).add_child(visible_toggle);
 
     let toggle = commands
         .spawn((
@@ -489,6 +723,116 @@ pub(super) fn toggle_selected_physics(editor: &mut Editor) {
         "physics: dynamic"
     } else {
         "physics: static"
+    };
+}
+
+pub(super) fn on_trigger_shape(
+    event: On<Activate>,
+    buttons: Query<&TriggerShapeButton>,
+    mut editor: ResMut<Editor>,
+) {
+    if buttons.get(event.entity).is_err() {
+        return;
+    }
+    let Some(id) = editor.selected else {
+        return;
+    };
+    let Some(index) = editor.pieces.iter().position(|p| p.id == id) else {
+        return;
+    };
+    let shape_opt = shapes().get(editor.pieces[index].shape);
+    let is_trigger = shape_opt.is_some_and(|s| s.is_trigger);
+    if !is_trigger {
+        editor.note = "only triggers have a shape";
+        return;
+    }
+    editor.commit();
+    let piece = &mut editor.pieces[index];
+    let current = if shape_opt.unwrap().id == "trigger" {
+        piece.trigger_shape_override
+    } else {
+        shape_opt.unwrap().trigger_shape
+    };
+    let next = match current {
+        crate::model::TriggerShape::Box => crate::model::TriggerShape::Sphere,
+        crate::model::TriggerShape::Sphere => crate::model::TriggerShape::Cylinder,
+        crate::model::TriggerShape::Cylinder => crate::model::TriggerShape::Box,
+    };
+    // For generic trigger, store override; for specific triggers, switch the piece's shape to the matching specific shape.
+    if shape_opt.unwrap().id == "trigger" {
+        piece.trigger_shape_override = next;
+        editor.note = "trigger shape updated";
+    } else {
+        let target_id = match next {
+            crate::model::TriggerShape::Box => "trigger_box",
+            crate::model::TriggerShape::Sphere => "trigger_sphere",
+            crate::model::TriggerShape::Cylinder => "trigger_cylinder",
+        };
+        if let Some(new_idx) = model::shape_index(target_id) {
+            piece.shape = new_idx;
+            // Keep override in sync for consistency.
+            piece.trigger_shape_override = next;
+            editor.note = "trigger shape updated";
+        }
+    }
+    editor.hard_dirty = true;
+}
+
+pub(super) fn on_trigger_color(
+    event: On<Activate>,
+    buttons: Query<&TriggerColorButton>,
+    mut editor: ResMut<Editor>,
+) {
+    let Ok(btn) = buttons.get(event.entity) else {
+        return;
+    };
+    let Some(id) = editor.selected else {
+        return;
+    };
+    let Some(index) = editor.pieces.iter().position(|p| p.id == id) else {
+        return;
+    };
+    if !shapes()
+        .get(editor.pieces[index].shape)
+        .is_some_and(|s| s.is_trigger)
+    {
+        editor.note = "only triggers have a color";
+        return;
+    }
+    editor.commit();
+    editor.pieces[index].trigger_color = btn.0;
+    editor.hard_dirty = true;
+    editor.note = "trigger color updated";
+}
+
+pub(super) fn on_trigger_visible(
+    event: On<Activate>,
+    buttons: Query<&TriggerVisibleButton>,
+    mut editor: ResMut<Editor>,
+) {
+    if buttons.get(event.entity).is_err() {
+        return;
+    }
+    let Some(id) = editor.selected else {
+        return;
+    };
+    let Some(index) = editor.pieces.iter().position(|p| p.id == id) else {
+        return;
+    };
+    if !shapes()
+        .get(editor.pieces[index].shape)
+        .is_some_and(|s| s.is_trigger)
+    {
+        editor.note = "only triggers have visibility";
+        return;
+    }
+    editor.commit();
+    editor.pieces[index].trigger_visible = !editor.pieces[index].trigger_visible;
+    editor.hard_dirty = true;
+    editor.note = if editor.pieces[index].trigger_visible {
+        "trigger visible in edit"
+    } else {
+        "trigger hidden in edit"
     };
 }
 
@@ -742,6 +1086,7 @@ pub(super) fn sync_properties_panel(
             Without<PlatformPauseLabel>,
             Without<PlatformSpeedLabel>,
             Without<PlatformEditLabel>,
+            Without<TriggerShapeLabel>,
         ),
     >,
     mut toggle_label: Single<
@@ -753,6 +1098,7 @@ pub(super) fn sync_properties_panel(
             Without<PlatformPauseLabel>,
             Without<PlatformSpeedLabel>,
             Without<PlatformEditLabel>,
+            Without<TriggerShapeLabel>,
         ),
     >,
     mut mode_label: Single<
@@ -764,6 +1110,7 @@ pub(super) fn sync_properties_panel(
             Without<PlatformPauseLabel>,
             Without<PlatformSpeedLabel>,
             Without<PlatformEditLabel>,
+            Without<TriggerShapeLabel>,
         ),
     >,
     mut pause_label: Single<
@@ -775,6 +1122,7 @@ pub(super) fn sync_properties_panel(
             Without<PlatformModeLabel>,
             Without<PlatformSpeedLabel>,
             Without<PlatformEditLabel>,
+            Without<TriggerShapeLabel>,
         ),
     >,
     mut speed_label: Single<
@@ -786,6 +1134,7 @@ pub(super) fn sync_properties_panel(
             Without<PlatformModeLabel>,
             Without<PlatformPauseLabel>,
             Without<PlatformEditLabel>,
+            Without<TriggerShapeLabel>,
         ),
     >,
     mut edit_label: Single<
@@ -797,8 +1146,10 @@ pub(super) fn sync_properties_panel(
             Without<PlatformModeLabel>,
             Without<PlatformPauseLabel>,
             Without<PlatformSpeedLabel>,
+            Without<TriggerShapeLabel>,
         ),
     >,
+    mut trigger_shape_label: Single<&mut Text, With<TriggerShapeLabel>>,
 ) {
     let selected = editor
         .selected
@@ -874,5 +1225,115 @@ pub(super) fn sync_properties_panel(
         mode_label.0 = "Mode: none".to_string();
         pause_label.0 = "Paused: no".to_string();
         speed_label.0 = format!("{:.1} m/s", super::movers::DEFAULT_PLATFORM_SPEED);
+    }
+    // Trigger shape label: show current effective shape for triggers, otherwise Box.
+    if let Some(shape) = shapes().get(piece.shape)
+        && shape.is_trigger
+    {
+        let current = model::piece_trigger_shape(&piece, shape);
+        trigger_shape_label.0 = format!("Shape: {}", current.label());
+    } else {
+        trigger_shape_label.0 = "Shape: Box".to_string();
+    }
+}
+
+pub(super) fn sync_transparency_slider(
+    editor: Res<Editor>,
+    mut fill_query: Query<&mut Node, With<TransparencySliderFill>>,
+    mut label_query: Query<&mut Text, With<TransparencyValueLabel>>,
+) {
+    let Some(id) = editor.selected else {
+        return;
+    };
+    let Some(piece) = editor.pieces.iter().find(|p| p.id == id) else {
+        return;
+    };
+    let alpha = model::sanitize_trigger_alpha(piece.trigger_alpha);
+    for mut node in &mut fill_query {
+        node.width = percent(alpha * 100.0);
+    }
+    for mut text in &mut label_query {
+        text.0 = format!("{:.0}%", alpha * 100.0);
+    }
+}
+
+pub(super) fn handle_transparency_slider(
+    mouse: Res<ButtonInput<MouseButton>>,
+    slider_query: Query<(&RelativeCursorPosition, &Interaction), With<TransparencySlider>>,
+    mut editor: ResMut<Editor>,
+    mut committed: Local<bool>,
+) {
+    // Reset commit flag when mouse is released.
+    if !mouse.pressed(MouseButton::Left) {
+        *committed = false;
+        return;
+    }
+    let mut target_alpha: Option<f32> = None;
+    for (pos, interaction) in &slider_query {
+        if *interaction == Interaction::Pressed {
+            if let Some(normalized) = pos.normalized {
+                target_alpha = Some(normalized.x.clamp(0.0, 1.0));
+                break;
+            }
+        }
+    }
+    let Some(new_alpha) = target_alpha else {
+        *committed = false;
+        return;
+    };
+    let Some(id) = editor.selected else {
+        return;
+    };
+    let Some(index) = editor.pieces.iter().position(|p| p.id == id) else {
+        return;
+    };
+    let current = model::sanitize_trigger_alpha(editor.pieces[index].trigger_alpha);
+    if (current - new_alpha).abs() < 1e-3 {
+        return;
+    }
+    if !*committed {
+        editor.commit();
+        *committed = true;
+    }
+    editor.pieces[index].trigger_alpha = new_alpha;
+    editor.hard_dirty = true;
+}
+
+pub(super) fn sync_trigger_color_buttons(
+    editor: Res<Editor>,
+    mut buttons: Query<(&TriggerColorButton, &mut BorderColor)>,
+) {
+    let selected_color = editor
+        .selected
+        .and_then(|id| editor.pieces.iter().find(|p| p.id == id))
+        .map(|p| p.trigger_color)
+        .unwrap_or(crate::model::TRIGGER_DEFAULT_COLOR);
+    let is_trigger = editor
+        .selected
+        .and_then(|id| editor.pieces.iter().find(|p| p.id == id))
+        .and_then(|p| shapes().get(p.shape))
+        .is_some_and(|s| s.is_trigger);
+    for (btn, mut border) in &mut buttons {
+        // Highlight only when selected piece is a trigger and color matches.
+        let is_selected = is_trigger && btn.0 == selected_color;
+        *border = BorderColor::all(if is_selected { BORDER_ON } else { BORDER });
+    }
+}
+
+pub(super) fn sync_trigger_visible_label(
+    editor: Res<Editor>,
+    mut labels: Query<&mut Text, With<TriggerVisibleLabel>>,
+) {
+    let visible = editor
+        .selected
+        .and_then(|id| editor.pieces.iter().find(|p| p.id == id))
+        .map(|p| p.trigger_visible)
+        .unwrap_or(true);
+    for mut text in &mut labels {
+        text.0 = if visible {
+            "Show in Edit: Yes".to_string()
+        } else {
+            "Show in Edit: No".to_string()
+        };
     }
 }

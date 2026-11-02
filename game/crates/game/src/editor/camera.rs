@@ -117,6 +117,7 @@ pub(super) fn camera_control(
     window: Single<&Window, With<PrimaryWindow>>,
     input_focus: Res<InputFocus>,
     menu: Res<AddMenu>,
+    outliner: Res<OutlinerState>,
 ) {
     // The modal transform, a focused property field, or a pointer over the
     // property panel owns the mouse. Drain the deltas so the camera does not
@@ -130,7 +131,7 @@ pub(super) fn camera_control(
         && !touch.enabled
         && window
             .cursor_position()
-            .is_some_and(|p| over_outliner_panel(p, window.size()));
+            .is_some_and(|p| over_outliner_panel(p, window.size(), outliner.collapsed));
     if editor.keyboard_transform.is_some()
         || input_focus.get().is_some()
         || over_properties
@@ -257,7 +258,12 @@ pub(super) fn camera_control(
         if let Some(character) = editor.character {
             let eye = Vec3::new(
                 character.pos.x,
-                character.feet + EYE_HEIGHT,
+                character.feet
+                    + if character.sliding {
+                        EYE_HEIGHT * SLIDE_SCALE_Y
+                    } else {
+                        EYE_HEIGHT
+                    },
                 character.pos.y,
             );
             let look = Vec3::new(

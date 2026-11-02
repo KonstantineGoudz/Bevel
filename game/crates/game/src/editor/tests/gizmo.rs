@@ -37,6 +37,11 @@ fn a_wall_face_is_clickable_at_mid_height() {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         },
         Piece {
             id: 2,
@@ -48,6 +53,11 @@ fn a_wall_face_is_clickable_at_mid_height() {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         },
     ];
     let hit = pick(&pieces, ray_towards(Vec3::new(0.519, 1.4, -0.9)));
@@ -71,6 +81,11 @@ fn a_wall_is_clickable_near_its_top_too() {
         elevation: 0.0,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     }];
     let hit = pick(&pieces, ray_towards(Vec3::new(0.519, 2.6, -0.9)));
     assert_eq!(hit, Some(2), "the upper face of a wall should be clickable");
@@ -89,6 +104,11 @@ fn the_floor_is_clickable() {
         elevation: 0.0,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     }];
     assert_eq!(
         pick(&pieces, ray_towards(Vec3::new(0.2, 0.0, 0.2))),
@@ -109,6 +129,11 @@ fn the_gizmo_is_bigger_than_the_selected_pieces_bounding_box() {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let (reach, ring) = gizmo_frame(&piece, shape);
         let size = bounding_size(&piece, shape);
@@ -155,6 +180,11 @@ fn an_axis_drag_moves_by_the_pointer_delta_not_to_the_pointer() {
         elevation: 0.0,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     };
     // Grabbed far out on the handle, then moved a little. The piece must
     // follow the little movement, not leap out to the pointer.
@@ -181,6 +211,11 @@ fn the_vertical_handle_lifts_and_lowers_a_piece() {
         elevation: 0.5,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     };
     // Grabbed at the top of the vertical handle, not at the piece origin.
     let moved = dragged_piece(
@@ -207,6 +242,11 @@ fn grabbing_the_vertical_handle_without_dragging_keeps_the_height() {
         elevation: 0.1,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     };
     let mut editor = Editor::default();
     editor.pieces.push(start);
@@ -250,6 +290,11 @@ fn a_yaw_drag_keeps_the_grab_offset() {
         elevation: 0.0,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     };
     // Grabbed on the +X side of the ring and dragged a quarter turn to +Z.
     let moved = dragged_piece(
@@ -274,6 +319,11 @@ fn a_pitch_drag_tilts_around_the_world_x_axis() {
         elevation: 0.0,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     };
     let origin = gizmo_origin(&start, &shapes()[start.shape]);
     let angle = 0.6_f32;
@@ -306,6 +356,11 @@ fn a_roll_drag_tilts_around_the_world_z_axis() {
         elevation: 0.0,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     };
     let origin = gizmo_origin(&start, &shapes()[start.shape]);
     let angle = -0.45_f32;
@@ -338,6 +393,11 @@ fn a_plane_handle_moves_in_two_axes_at_once() {
         elevation: 0.0,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     };
     let moved = dragged_piece(
         start,
@@ -363,6 +423,11 @@ fn height_snapping_stacks_a_block_on_the_one_below() {
         elevation: 0.0,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     };
     let moving = Piece {
         id: 2,
@@ -374,6 +439,11 @@ fn height_snapping_stacks_a_block_on_the_one_below() {
         elevation: 0.0,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     };
     let top = shapes()[block].top();
     let snapped = snap_elevation(
@@ -401,6 +471,11 @@ fn height_snapping_leaves_free_heights_alone() {
         elevation: 0.0,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     };
     let shape = &shapes()[crate_index];
     let free = snap_elevation(piece, shape, &[], 0.62, 1.0, true, ELEVATION_SNAP);
@@ -422,6 +497,11 @@ fn height_snapping_releases_a_stacked_piece_immediately() {
         elevation: 0.0,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     };
     let moving = Piece {
         id: 2,
@@ -433,6 +513,11 @@ fn height_snapping_releases_a_stacked_piece_immediately() {
         elevation: shapes()[block].top(),
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     };
     let top = shapes()[block].top();
     let lifted = snap_elevation(
@@ -460,6 +545,11 @@ fn height_snapping_only_captures_surfaces_ahead_of_the_drag() {
         elevation: 0.05,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     };
     let shape = &shapes()[crate_index];
     // Lifting away from the ground is free: it must not be pulled back down.
@@ -483,6 +573,11 @@ fn the_gizmo_offers_a_vertical_and_three_plane_handles() {
         elevation: 0.75,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     };
     let shape = &shapes()[block];
     let origin = gizmo_origin(&piece, shape);
@@ -550,6 +645,11 @@ fn the_build_orbit_target_is_the_selected_piece_centre() {
         elevation: 1.0,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     });
     editor.selected = Some(7);
     let target = selection_center(&editor).expect("selected centre");

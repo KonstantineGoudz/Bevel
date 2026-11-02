@@ -66,6 +66,10 @@ pub struct Snapshot {
     pub platforms: Vec<SavedPlatform>,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn deserialize_optional<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -125,12 +129,35 @@ pub struct SavedPiece {
     /// means "use the catalogue default" so untouched pieces stay small.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub damage: Option<f32>,
+    /// Parametric trigger volume size (width, length, height) for trigger shapes.
+    /// Missing on older saves or non-trigger pieces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_width: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_length: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_height: Option<f32>,
+    /// Trigger volume form: "box", "sphere", "cylinder". Missing means Box.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_shape: Option<String>,
+    /// Transparency for trigger zones (0 transparent .. 1 opaque). Missing means default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_alpha: Option<f32>,
+    /// RGB color for trigger zones as #RRGGBB. Missing means default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_color: Option<String>,
+    /// Whether trigger is rendered in edit mode. Missing means true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_visible: Option<bool>,
     /// User label. Missing means "use the shape name".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Owning group id. Missing means the scene root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<u32>,
+    /// Locked against viewport selection. Missing means unlocked.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub locked: bool,
 }
 
 /// A named group in the object graph. Groups nest through `parent`.
@@ -247,6 +274,64 @@ impl From<&Piece> for SavedPiece {
         } else {
             Some(piece.trigger.damage)
         };
+        let is_trigger = model::shapes()
+            .get(piece.shape)
+            .is_some_and(|s| s.is_trigger);
+        let (
+            trigger_width,
+            trigger_length,
+            trigger_height,
+            trigger_shape,
+            trigger_alpha,
+            trigger_color,
+            trigger_visible,
+        ) = if is_trigger {
+            let size = model::sanitize_trigger_size(piece.trigger_size);
+            let alpha = model::sanitize_trigger_alpha(piece.trigger_alpha);
+            let color = piece.trigger_color;
+            let visible = piece.trigger_visible;
+            let shape_str =
+                model::piece_trigger_shape(piece, model::shapes().get(piece.shape).unwrap())
+                    .id()
+                    .to_owned();
+            // Only persist non-default to keep JSON small; loader defaults handle missing.
+            let is_default = (size - model::TRIGGER_DEFAULT_SIZE).length_squared() < 1e-6
+                && shape_str == "box"
+                && (alpha - model::TRIGGER_DEFAULT_ALPHA).abs() < 1e-6
+                && color == model::TRIGGER_DEFAULT_COLOR
+                && visible == model::TRIGGER_DEFAULT_VISIBLE;
+            if is_default {
+                (None, None, None, None, None, None, None)
+            } else {
+                (
+                    Some(size.x),
+                    Some(size.z),
+                    Some(size.y),
+                    if shape_str == "box" {
+                        None
+                    } else {
+                        Some(shape_str)
+                    },
+                    if (alpha - model::TRIGGER_DEFAULT_ALPHA).abs() < 1e-6 {
+                        None
+                    } else {
+                        Some(alpha)
+                    },
+                    if color == model::TRIGGER_DEFAULT_COLOR {
+                        None
+                    } else {
+                        Some(model::trigger_color_to_hex_string(color))
+                    },
+                    if visible == model::TRIGGER_DEFAULT_VISIBLE {
+                        None
+                    } else {
+                        Some(visible)
+                    },
+                )
+            }
+        } else {
+            (None, None, None, None, None, None, None)
+        };
         Self {
             id: piece.id,
             shape: model::shapes()[piece.shape].id.to_owned(),
@@ -258,8 +343,16 @@ impl From<&Piece> for SavedPiece {
             roll_deg: piece.roll.to_degrees(),
             dynamic: piece.dynamic,
             damage,
+            trigger_width,
+            trigger_length,
+            trigger_height,
+            trigger_shape,
+            trigger_alpha,
+            trigger_color,
+            trigger_visible,
             name: None,
             group: None,
+            locked: false,
         }
     }
 }
@@ -270,6 +363,7 @@ impl SavedPiece {
         Self {
             name: outline.labels.get(&piece.id).cloned(),
             group: outline.membership.get(&piece.id).copied(),
+            locked: outline.is_locked(piece.id),
             ..Self::from(piece)
         }
     }
@@ -328,12 +422,16 @@ impl Snapshot {
                 .map(|name| clean_label(&name))
                 .filter(|name| !name.is_empty());
             let group = saved.group;
+            let locked = saved.locked;
             let piece = validate_piece(saved)?;
             if let Some(name) = name {
                 outline.labels.insert(piece.id, name);
             }
             if let Some(group) = group {
                 outline.membership.insert(piece.id, group);
+            }
+            if locked {
+                outline.locked.insert(piece.id);
             }
             pieces.push(piece);
         }
@@ -387,6 +485,7 @@ impl Snapshot {
                     hv: Vec2::ZERO,
                     ride_vel: Vec2::ZERO,
                     grounded: false,
+                    sliding: false,
                     health,
                 })
         });
@@ -781,12 +880,16 @@ fn validate_level(level: SavedLevel) -> Option<LevelState> {
             .map(|name| clean_label(&name))
             .filter(|name| !name.is_empty());
         let group = saved.group;
+        let locked = saved.locked;
         let piece = validate_piece(saved).ok()?;
         if let Some(name) = name {
             outline.labels.insert(piece.id, name);
         }
         if let Some(group) = group {
             outline.membership.insert(piece.id, group);
+        }
+        if locked {
+            outline.locked.insert(piece.id);
         }
         pieces.push(piece);
     }
@@ -846,6 +949,53 @@ fn validate_piece(saved: SavedPiece) -> Result<Piece, LoadError> {
         return Err(LoadError::NonFinite("piece damage"));
     }
     let damage = saved.damage.unwrap_or(shape_default);
+    // Trigger parametric size: validate if present, else defaults.
+    let mut trigger_size = model::TRIGGER_DEFAULT_SIZE;
+    if let Some(w) = saved.trigger_width {
+        if !w.is_finite() {
+            return Err(LoadError::NonFinite("trigger width"));
+        }
+        trigger_size.x = w.max(model::TRIGGER_MIN_SIZE);
+    }
+    if let Some(l) = saved.trigger_length {
+        if !l.is_finite() {
+            return Err(LoadError::NonFinite("trigger length"));
+        }
+        trigger_size.z = l.max(model::TRIGGER_MIN_SIZE);
+    }
+    if let Some(h) = saved.trigger_height {
+        if !h.is_finite() {
+            return Err(LoadError::NonFinite("trigger height"));
+        }
+        trigger_size.y = h.max(model::TRIGGER_MIN_SIZE);
+    }
+    // Clamp non-finite handled above; also ensure overall finite.
+    if !trigger_size.x.is_finite() || !trigger_size.y.is_finite() || !trigger_size.z.is_finite() {
+        return Err(LoadError::NonFinite("trigger size"));
+    }
+    let trigger_shape_override = saved
+        .trigger_shape
+        .as_deref()
+        .and_then(model::TriggerShape::parse)
+        .unwrap_or(model::TriggerShape::Box);
+    let trigger_alpha = saved
+        .trigger_alpha
+        .map(|v| {
+            if !v.is_finite() {
+                return Err(LoadError::NonFinite("trigger alpha"));
+            }
+            Ok(model::sanitize_trigger_alpha(v))
+        })
+        .transpose()?
+        .unwrap_or(model::TRIGGER_DEFAULT_ALPHA);
+    let trigger_color = saved
+        .trigger_color
+        .as_deref()
+        .and_then(model::trigger_color_parse_hex)
+        .unwrap_or(model::TRIGGER_DEFAULT_COLOR);
+    let trigger_visible = saved
+        .trigger_visible
+        .unwrap_or(model::TRIGGER_DEFAULT_VISIBLE);
 
     Ok(Piece {
         id: saved.id,
@@ -857,6 +1007,11 @@ fn validate_piece(saved: SavedPiece) -> Result<Piece, LoadError> {
         elevation: saved.elevation,
         dynamic: saved.dynamic,
         trigger: model::Trigger::damaging(damage),
+        trigger_size,
+        trigger_shape_override,
+        trigger_alpha,
+        trigger_color,
+        trigger_visible,
     })
 }
 
@@ -917,8 +1072,16 @@ mod tests {
             elevation: 0.5,
             dynamic: true,
             damage: None,
+            trigger_width: None,
+            trigger_length: None,
+            trigger_height: None,
+            trigger_shape: None,
+            trigger_alpha: None,
+            trigger_color: None,
+            trigger_visible: None,
             name: None,
             group: None,
+            locked: false,
             rot_deg: 30.0,
             pitch_deg: -15.0,
             roll_deg: 10.0,
@@ -1087,8 +1250,16 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             damage: None,
+            trigger_width: None,
+            trigger_length: None,
+            trigger_height: None,
+            trigger_shape: None,
+            trigger_alpha: None,
+            trigger_color: None,
+            trigger_visible: None,
             name: None,
             group: None,
+            locked: false,
             rot_deg: 0.0,
             pitch_deg: 0.0,
             roll_deg: 0.0,
@@ -1471,6 +1642,7 @@ mod tests {
                 SavedPiece {
                     name: Some("North wall".into()),
                     group: Some(10),
+                    locked: true,
                     ..saved(1, "wall", 0.0, 0.0)
                 },
                 SavedPiece {
@@ -1497,8 +1669,11 @@ mod tests {
         let json = snapshot.to_json();
         assert!(json.contains("\"name\":\"North wall\""), "{json}");
         assert!(json.contains("\"groups\""), "{json}");
+        assert!(json.contains("\"locked\":true"), "{json}");
 
         let loaded = snapshot.validate().unwrap();
+        assert!(loaded.outline.is_locked(1));
+        assert!(!loaded.outline.is_locked(2));
         assert_eq!(
             loaded.outline.labels.get(&1).map(String::as_str),
             Some("North wall")

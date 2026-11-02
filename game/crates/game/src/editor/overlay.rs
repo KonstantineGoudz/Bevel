@@ -61,11 +61,7 @@ pub(super) fn update_status(
     let hex = if orbit.mode == ViewMode::First {
         editor.character.map(|c| {
             let (q, r) = model::pixel_to_hex(c.pos);
-            format!(
-                "hex {q},{r}  y {:.2} {}",
-                c.feet,
-                if c.grounded { "grounded" } else { "air" }
-            )
+            format!("hex {q},{r}  y {:.2} {}", c.feet, c.locomotion_state())
         })
     } else {
         cursor.world.map(|p| {

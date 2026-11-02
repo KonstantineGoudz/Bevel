@@ -49,6 +49,12 @@ pub(crate) fn trigger_at(pos: Vec2, feet: f32, pieces: &[Piece]) -> Option<model
         if piece.trigger.is_harmless() {
             continue;
         }
+        if shape.is_trigger {
+            if model::trigger_overlaps(piece, shape, pos, feet, head) {
+                return Some(piece.trigger);
+            }
+            continue;
+        }
         if !model::hit_test(shape, piece, pos, PILL_RADIUS + 0.15) {
             continue;
         }
@@ -119,6 +125,11 @@ mod tests {
             elevation,
             dynamic: false,
             trigger: crate::model::Trigger::damaging(crate::model::SPIKE_DAMAGE),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         }
     }
 
@@ -133,6 +144,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         }
     }
 
@@ -229,6 +245,7 @@ mod tests {
             hv: Vec2::ZERO,
             ride_vel: Vec2::ZERO,
             grounded: true,
+            sliding: false,
             health: crate::statuses::Health::new(hp, 100.0),
         };
         let mut hurt = character(100.0);

@@ -17,6 +17,17 @@
         height: 100%;
         outline: none;
       }
+      #loading {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        color: #86a0b8;
+        font: 14px/1.5 ui-monospace, Menlo, monospace;
+        background: #0a0d12;
+        z-index: 2;
+      }
+      #loading[hidden] { display: none; }
       #error {
         display: none;
         margin: 24px;
@@ -31,6 +42,7 @@
     </style>
   </head>
   <body>
+    <div id="loading">Loading map…</div>
     <canvas id="bevy"></canvas>
     <pre id="error"></pre>
     <a id="back" href="./" hidden>Back to maps</a>
@@ -39,6 +51,7 @@
 
       const showError = (message) => {
         const box = document.getElementById("error");
+        document.getElementById("loading")?.setAttribute("hidden", "");
         box.style.display = "block";
         box.textContent = message;
         document.getElementById("back").removeAttribute("hidden");
@@ -58,10 +71,16 @@
         if (hasSession === false) {
           showError("This map is not available in browser storage.");
         } else if (hasSession === true) {
-          init().catch((err) => {
-            showError(`Failed to start the wasm build:\n\n${err}`);
-            console.error(err);
-          });
+          init()
+            .then(() => {
+              document.getElementById("loading")?.setAttribute("hidden", "");
+            })
+            .catch((err) => {
+              showError(`Failed to start the wasm build:\n\n${err}`);
+              console.error(err);
+            });
+          // Fallback: hide after 12s so a stalled build doesn't leave a permanent overlay.
+          setTimeout(() => document.getElementById("loading")?.setAttribute("hidden", ""), 12000);
         }
       }
     </script>

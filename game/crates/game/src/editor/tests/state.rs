@@ -188,10 +188,18 @@ fn play_mode_only_allows_non_authoring_ui_actions() {
 #[test]
 fn every_catalogue_shape_gets_a_collider() {
     for shape in shapes() {
-        assert!(
-            piece_collider(shape).is_some(),
-            "{} has no collider",
-            shape.id
-        );
+        if shape.is_trigger {
+            assert!(
+                piece_collider(shape).is_none(),
+                "{} trigger should have no collider",
+                shape.id
+            );
+        } else {
+            assert!(
+                piece_collider(shape).is_some(),
+                "{} has no collider",
+                shape.id
+            );
+        }
     }
 }

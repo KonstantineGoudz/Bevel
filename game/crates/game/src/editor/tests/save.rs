@@ -39,6 +39,7 @@ fn a_successful_save_refreshes_the_saved_pose_and_clock() {
         hv: Vec2::ZERO,
         ride_vel: Vec2::ZERO,
         grounded: true,
+        sliding: false,
         health: crate::statuses::Health::default(),
     };
     let mut editor = Editor {
@@ -101,6 +102,11 @@ fn saving_writes_each_pieces_height() {
         elevation: 1.25,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     });
     let json = level_json(&editor);
     assert!(json.contains("\"y\":1.250"), "{json}");
@@ -120,6 +126,11 @@ fn saving_writes_each_pieces_full_rotation() {
         elevation: 0.0,
         dynamic: true,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     });
     let json = level_json(&editor);
     assert!(json.contains("\"rotDeg\":30.0"), "{json}");
@@ -141,6 +152,11 @@ fn copying_keeps_the_selected_piece() {
         elevation: 1.5,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     };
     let mut editor = Editor::default();
     editor.pieces.push(piece);
@@ -164,6 +180,11 @@ fn pasting_makes_a_new_selected_copy_at_the_cursor() {
         elevation: 1.5,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     };
     let mut editor = Editor::default();
     editor.snap = false;
@@ -200,6 +221,11 @@ fn pasting_without_a_cursor_lands_beside_the_source() {
         elevation: 0.0,
         dynamic: false,
         trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
     });
     editor.selected = Some(1);
     copy_piece(&mut editor);

@@ -8,7 +8,7 @@
 use std::sync::LazyLock;
 
 use bevy::color::Color;
-use bevy::math::Vec2;
+use bevy::math::{Vec2, Vec3};
 
 /// Circumradius of one hex, in metres. Edge length comes out at ~2.08 m.
 pub const HEX_SIZE: f32 = 1.2;
@@ -290,6 +290,91 @@ impl Trigger {
     }
 }
 
+/// Parametric trigger volume shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TriggerShape {
+    #[default]
+    Box,
+    Sphere,
+    Cylinder,
+}
+
+impl TriggerShape {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Box => "box",
+            Self::Sphere => "sphere",
+            Self::Cylinder => "cylinder",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Box => "Box",
+            Self::Sphere => "Sphere",
+            Self::Cylinder => "Cylinder",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "box" => Some(Self::Box),
+            "sphere" => Some(Self::Sphere),
+            "cylinder" => Some(Self::Cylinder),
+            _ => None,
+        }
+    }
+}
+
+/// Default size for a newly placed trigger, in metres (width, height, length).
+pub const TRIGGER_DEFAULT_SIZE: Vec3 = Vec3::new(2.0, 2.0, 2.0);
+/// Minimum trigger extents, to avoid degenerate volumes.
+pub const TRIGGER_MIN_SIZE: f32 = 0.1;
+/// Default transparency for trigger zones (0 = transparent, 1 = opaque).
+pub const TRIGGER_DEFAULT_ALPHA: f32 = 0.35;
+/// Minimum/maximum alpha for trigger zones.
+pub const TRIGGER_MIN_ALPHA: f32 = 0.0;
+pub const TRIGGER_MAX_ALPHA: f32 = 1.0;
+/// Default RGB color for trigger zones (0xRRGGBB).
+pub const TRIGGER_DEFAULT_COLOR: u32 = 0x6b7d93;
+/// Whether trigger zones are rendered in edit mode by default.
+pub const TRIGGER_DEFAULT_VISIBLE: bool = true;
+/// Preset trigger colors shown in the properties panel.
+pub const TRIGGER_COLOR_PRESETS: [u32; 8] = [
+    0x6b7d93, 0x3fd0b0, 0xe05a52, 0x5a8ce0, 0xf0a63c, 0xb08bf0, 0x62c96b, 0xc0392b,
+];
+
+/// Convert a 0xRRGGBB hex to a Bevy [`Color`].
+pub fn trigger_color_to_bevy(hex: u32) -> Color {
+    Color::srgb_u8(
+        ((hex >> 16) & 0xFF) as u8,
+        ((hex >> 8) & 0xFF) as u8,
+        (hex & 0xFF) as u8,
+    )
+}
+
+/// Format a hex as `#RRGGBB`.
+pub fn trigger_color_to_hex_string(hex: u32) -> String {
+    format!("#{:06x}", hex & 0xFFFFFF)
+}
+
+/// Parse `#RRGGBB` or `RRGGBB` into a hex. Returns `None` on failure.
+pub fn trigger_color_parse_hex(s: &str) -> Option<u32> {
+    let t = s.trim().trim_start_matches('#');
+    if t.len() != 6 {
+        return None;
+    }
+    u32::from_str_radix(t, 16).ok().filter(|&v| v <= 0xFFFFFF)
+}
+
+/// Trigger color combined with alpha.
+pub fn trigger_color_with_alpha(hex: u32, alpha: f32) -> Color {
+    let r = ((hex >> 16) & 0xFF) as f32 / 255.0;
+    let g = ((hex >> 8) & 0xFF) as f32 / 255.0;
+    let b = (hex & 0xFF) as f32 / 255.0;
+    Color::srgba(r, g, b, alpha.clamp(0.0, 1.0))
+}
+
 #[derive(Clone, Debug)]
 pub struct Shape {
     pub id: &'static str,
@@ -306,15 +391,23 @@ pub struct Shape {
     pub base: f32,
     /// Touch damage per hit. Zero means harmless.
     pub damage: f32,
+    /// True for trigger volumes (parametric, invisible in play, non-collidable).
+    pub is_trigger: bool,
+    /// Which trigger form this shape represents. Meaningful only when `is_trigger`.
+    pub trigger_shape: TriggerShape,
 }
 
 impl Shape {
     pub fn top(&self) -> f32 {
         self.base + self.height
     }
+
+    pub fn is_trigger(self: &Shape) -> bool {
+        self.is_trigger
+    }
 }
 
-pub const CATEGORIES: [&str; 8] = [
+pub const CATEGORIES: [&str; 9] = [
     "Surface",
     "Barrier",
     "Traversal",
@@ -323,6 +416,7 @@ pub const CATEGORIES: [&str; 8] = [
     "Resource",
     "Hazard",
     "Marker",
+    "Trigger",
 ];
 
 #[allow(clippy::too_many_arguments)]
@@ -350,6 +444,35 @@ fn shape(
         height,
         base,
         damage: 0.0,
+        is_trigger: false,
+        trigger_shape: TriggerShape::Box,
+    }
+}
+
+fn trigger_shape(
+    id: &'static str,
+    name: &'static str,
+    form: TriggerShape,
+    color: u32,
+    geom: Geometry,
+    height: f32,
+    base: f32,
+    anchors: Vec<Anchor>,
+) -> Shape {
+    Shape {
+        id,
+        name,
+        category: "Trigger",
+        mode: SnapMode::Center,
+        color: Color::srgb_u8((color >> 16) as u8, (color >> 8) as u8, color as u8),
+        geom,
+        style: Style::Plain,
+        anchors,
+        height,
+        base,
+        damage: 0.0,
+        is_trigger: true,
+        trigger_shape: form,
     }
 }
 
@@ -663,6 +786,47 @@ static SHAPES: LazyLock<Vec<Shape>> = LazyLock::new(|| {
             ring_anchors(4, 0.5, 0.0),
             SPIKE_DAMAGE,
         ),
+        // Triggers – parametric volumes, invisible in play, non-collidable, any trigger type.
+        trigger_shape(
+            "trigger",
+            "Trigger",
+            TriggerShape::Box,
+            0x6b7d93,
+            Geometry::Rect { w: 1.0, h: 1.0 },
+            1.0,
+            0.0,
+            ring_anchors(4, 0.6, 0.0),
+        ),
+        trigger_shape(
+            "trigger_box",
+            "Trigger Box",
+            TriggerShape::Box,
+            0x6b7d93,
+            Geometry::Rect { w: 1.0, h: 1.0 },
+            1.0,
+            0.0,
+            ring_anchors(4, 0.6, 0.0),
+        ),
+        trigger_shape(
+            "trigger_sphere",
+            "Trigger Sphere",
+            TriggerShape::Sphere,
+            0x6b7d93,
+            Geometry::Circle { r: 0.5 },
+            1.0,
+            0.0,
+            ring_anchors(4, 0.6, 0.0),
+        ),
+        trigger_shape(
+            "trigger_cylinder",
+            "Trigger Cylinder",
+            TriggerShape::Cylinder,
+            0x6b7d93,
+            Geometry::Circle { r: 0.5 },
+            1.0,
+            0.0,
+            ring_anchors(4, 0.6, 0.0),
+        ),
     ]
 });
 
@@ -764,6 +928,22 @@ pub struct Piece {
     /// value (`Shape::damage`) when the piece is placed; editing it never
     /// changes other pieces of the same shape.
     pub trigger: Trigger,
+    /// Parametric trigger volume extents: width (x), height (y), length (z) in metres.
+    /// Only meaningful when the piece's shape is a trigger (`Shape::is_trigger`).
+    /// Stored for every piece for `Copy` simplicity; ignored otherwise.
+    pub trigger_size: Vec3,
+    /// Which trigger form to use when this piece is a generic `trigger` shape.
+    /// For `trigger_box` / `trigger_sphere` / `trigger_cylinder` the shape's own
+    /// `trigger_shape` wins, but this field still round-trips for persistence.
+    pub trigger_shape_override: TriggerShape,
+    /// Transparency/opacity for trigger zones (0 transparent .. 1 opaque).
+    /// Only meaningful for triggers; stored for all pieces for `Copy`.
+    pub trigger_alpha: f32,
+    /// RGB color for trigger zones as 0xRRGGBB. Only meaningful for triggers.
+    pub trigger_color: u32,
+    /// Whether the trigger zone is rendered in edit mode. When false the zone
+    /// is still pickable via the scene graph/outliner but its mesh is hidden.
+    pub trigger_visible: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -791,6 +971,170 @@ pub fn set_piece_quat(piece: &mut Piece, rotation: bevy::math::Quat) {
     piece.rot = normalize_angle(-yaw);
     piece.pitch = normalize_angle(pitch);
     piece.roll = normalize_angle(roll);
+}
+
+/// Effective trigger shape for a piece, respecting the shape's own kind.
+pub fn piece_trigger_shape(piece: &Piece, shape: &Shape) -> TriggerShape {
+    if shape.is_trigger && shape.id != "trigger" {
+        shape.trigger_shape
+    } else if shape.is_trigger {
+        piece.trigger_shape_override
+    } else {
+        TriggerShape::Box
+    }
+}
+
+/// Clamp trigger extents to at least `TRIGGER_MIN_SIZE` and finite.
+pub fn sanitize_trigger_size(size: Vec3) -> Vec3 {
+    Vec3::new(
+        if size.x.is_finite() {
+            size.x.max(TRIGGER_MIN_SIZE)
+        } else {
+            TRIGGER_DEFAULT_SIZE.x
+        },
+        if size.y.is_finite() {
+            size.y.max(TRIGGER_MIN_SIZE)
+        } else {
+            TRIGGER_DEFAULT_SIZE.y
+        },
+        if size.z.is_finite() {
+            size.z.max(TRIGGER_MIN_SIZE)
+        } else {
+            TRIGGER_DEFAULT_SIZE.z
+        },
+    )
+}
+
+pub fn default_piece_trigger_size() -> Vec3 {
+    TRIGGER_DEFAULT_SIZE
+}
+
+pub fn sanitize_trigger_alpha(alpha: f32) -> f32 {
+    if !alpha.is_finite() {
+        TRIGGER_DEFAULT_ALPHA
+    } else {
+        alpha.clamp(TRIGGER_MIN_ALPHA, TRIGGER_MAX_ALPHA)
+    }
+}
+
+/// Whether a world point (xz `p`, feet `feet`) is inside a trigger volume.
+pub fn trigger_contains(piece: &Piece, shape: &Shape, pos: Vec2, feet: f32) -> bool {
+    if !shape.is_trigger {
+        return false;
+    }
+    let size = sanitize_trigger_size(piece.trigger_size);
+    let form = piece_trigger_shape(piece, shape);
+    // Trigger centre: piece position on ground, elevated by half height.
+    let centre_y = piece.elevation + size.y * 0.5;
+    let half_h = size.y * 0.5;
+    // Horizontal local point (apply yaw).
+    let local = to_local(piece, pos);
+    // Vertical: check overlap between character capsule [feet, feet+~1.9) and trigger [centre_y - half_h, centre_y + half_h].
+    // We reuse the same generous vertical check as hazards: any overlap counts. For parametric triggers we test
+    // the point's feet against the volume; hazards use head/feet range separately, but this is used by trigger_hit_test.
+    // For now, test that feet is within height, plus a small overlap tolerance, or that head overlaps.
+    // The caller `trigger_hit_test` will handle vertical via head/feet; this helper only does 2D shape test.
+    // Keep vertical inclusive here for simple callers.
+    let vertical_ok = feet >= centre_y - half_h - 0.2 && feet <= centre_y + half_h;
+    // Actually vertical handled by caller; we still require roughly inside for sphere/cylinder.
+    // For 3D sphere/ellipsoid we need y distance too.
+    match form {
+        TriggerShape::Box => {
+            let inside_xz =
+                local.x.abs() <= size.x * 0.5 + 1e-5 && local.y.abs() <= size.z * 0.5 + 1e-5;
+            let inside_y = feet >= centre_y - half_h - 0.05
+                && feet + 1.9 > centre_y - half_h
+                && feet < centre_y + half_h + 0.2;
+            inside_xz && inside_y && vertical_ok || (inside_xz && inside_y)
+        }
+        TriggerShape::Sphere => {
+            // Ellipsoid: (x/rx)^2 + (y/ry)^2 + (z/rz)^2 <=1 where y is vertical distance from centre to character's mid.
+            // Use character mid height for test: feet+0.95
+            let mid_y = feet + 0.95;
+            let dy = mid_y - centre_y;
+            let rx = size.x * 0.5;
+            let ry = size.y * 0.5;
+            let rz = size.z * 0.5;
+            if rx < 1e-4 || ry < 1e-4 || rz < 1e-4 {
+                return false;
+            }
+            let nx = local.x / rx;
+            let ny = dy / ry;
+            let nz = local.y / rz;
+            nx * nx + ny * ny + nz * nz <= 1.0 + 1e-5
+        }
+        TriggerShape::Cylinder => {
+            let rx = size.x * 0.5;
+            let rz = size.z * 0.5;
+            if rx < 1e-4 || rz < 1e-4 {
+                return false;
+            }
+            let nx = local.x / rx;
+            let nz = local.y / rz;
+            let inside_xz = nx * nx + nz * nz <= 1.0 + 1e-5;
+            let inside_y = feet >= centre_y - half_h - 0.05
+                && feet + 1.9 > centre_y - half_h
+                && feet < centre_y + half_h + 0.2;
+            inside_xz && inside_y
+        }
+    }
+}
+
+/// Full trigger overlap test used by `hazards::trigger_at`: 2D footprint plus vertical range `feet`..`head`.
+pub fn trigger_overlaps(piece: &Piece, shape: &Shape, pos: Vec2, feet: f32, head: f32) -> bool {
+    if !shape.is_trigger {
+        return false;
+    }
+    let size = sanitize_trigger_size(piece.trigger_size);
+    let form = piece_trigger_shape(piece, shape);
+    let centre_y = piece.elevation + size.y * 0.5;
+    let bottom = piece.elevation;
+    let top = piece.elevation + size.y;
+    // Vertical overlap: same as hazards but using trigger's own height.
+    if head <= bottom || feet >= top + 0.2 {
+        // Check ellipsoid case separately (needs centre)
+        if form != TriggerShape::Sphere {
+            return false;
+        }
+    }
+    let local = to_local(piece, pos);
+    match form {
+        TriggerShape::Box => {
+            if local.x.abs() > size.x * 0.5 + 0.15 || local.y.abs() > size.z * 0.5 + 0.15 {
+                // Pad like hazards
+                return false;
+            }
+            // Pad already applied via 0.15; vertical already checked
+            head > bottom && feet < top + 0.2
+        }
+        TriggerShape::Cylinder => {
+            let rx = size.x * 0.5 + 0.15;
+            let rz = size.z * 0.5 + 0.15;
+            if rx < 1e-4 || rz < 1e-4 {
+                return false;
+            }
+            let nx = local.x / rx;
+            let nz = local.y / rz;
+            // For padded test we inflate rx/rz above; use direct distance
+            let dist2 = (local.x / (size.x * 0.5 + 0.15)).powi(2)
+                + (local.y / (size.z * 0.5 + 0.15)).powi(2);
+            dist2 <= 1.0 && head > bottom && feet < top + 0.2
+        }
+        TriggerShape::Sphere => {
+            let mid_y = (feet + head) * 0.5;
+            let dy = mid_y - centre_y;
+            let rx = size.x * 0.5 + 0.15;
+            let ry = size.y * 0.5 + 0.15;
+            let rz = size.z * 0.5 + 0.15;
+            if rx < 1e-4 || ry < 1e-4 || rz < 1e-4 {
+                return false;
+            }
+            let nx = local.x / rx;
+            let ny = dy / ry;
+            let nz = local.y / rz;
+            nx * nx + ny * ny + nz * nz <= 1.0
+        }
+    }
 }
 
 pub fn world_anchors(piece: &Piece, shape: &Shape) -> Vec<WorldAnchor> {
@@ -1014,6 +1358,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let ghost = Piece {
             id: 2,
@@ -1025,6 +1374,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
 
         let snap = anchor_snap(&ghost, wall, &[a], SNAP_THRESHOLD).expect("anchor snap");
@@ -1046,6 +1400,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         // Rotate the ghost by 60° and place its left anchor exactly on a's right anchor.
         let off = Vec2::from_angle(std::f32::consts::PI / 3.0) * Vec2::new(-edge_len() / 2.0, 0.0);
@@ -1059,6 +1418,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         assert!(anchor_snap(&ghost, wall, &[a], SNAP_THRESHOLD).is_none());
     }
@@ -1076,6 +1440,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let ghost = Piece {
             id: 2,
@@ -1087,6 +1456,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let snap = anchor_snap(&ghost, crate_shape, &[a], SNAP_THRESHOLD).expect("crate snap");
         near(snap.pos.x, 1.2, 0.01);
@@ -1108,6 +1482,11 @@ mod tests {
                 elevation: 0.0,
                 dynamic: false,
                 trigger: crate::model::Trigger::harmless(),
+                trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+                trigger_shape_override: crate::model::TriggerShape::Box,
+                trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+                trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+                trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
             },
             wall,
         );
@@ -1126,6 +1505,11 @@ mod tests {
                 elevation: 0.0,
                 dynamic: false,
                 trigger: crate::model::Trigger::harmless(),
+                trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+                trigger_shape_override: crate::model::TriggerShape::Box,
+                trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+                trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+                trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
             },
             crate_shape,
         );
@@ -1146,6 +1530,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         assert!(hit_test(crate_shape, &p, Vec2::ZERO, 0.0));
         assert!(!hit_test(crate_shape, &p, Vec2::new(2.0, 0.0), HIT_PAD));
@@ -1155,11 +1544,11 @@ mod tests {
 
     #[test]
     fn catalogue_has_every_piece() {
-        assert_eq!(shapes().len(), 23);
+        assert_eq!(shapes().len(), 27);
         let mut ids: Vec<_> = shapes().iter().map(|s| s.id).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 23);
+        assert_eq!(ids.len(), 27);
         for cat in CATEGORIES {
             assert!(shapes().iter().any(|s| s.category == cat), "missing {cat}");
         }
@@ -1181,6 +1570,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let a = world_anchors(&p, crate_shape);
         near(a[0].pos.x, 0.2, 0.01);
@@ -1237,6 +1631,11 @@ mod tests {
                 elevation: 0.0,
                 dynamic: false,
                 trigger: crate::model::Trigger::harmless(),
+                trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+                trigger_shape_override: crate::model::TriggerShape::Box,
+                trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+                trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+                trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
             };
             let before = piece_quat(&piece);
             set_piece_quat(&mut piece, before);
@@ -1260,6 +1659,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let expected = bevy::math::Quat::from_rotation_y(-0.7);
         assert!(piece_quat(&piece).dot(expected).abs() > 0.99999);

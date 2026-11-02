@@ -284,7 +284,11 @@ pub(super) fn update_character_status(
         text.0 = format_speed(character.speed());
     }
     for mut text in &mut axes_labels {
-        text.0 = format_velocity(character.velocity());
+        text.0 = format!(
+            "{}  {}",
+            format_velocity(character.velocity()),
+            character.locomotion_state()
+        );
     }
 }
 
@@ -315,6 +319,7 @@ pub(crate) fn respawn_character(editor: &mut Editor, orbit: &mut Orbit) {
     character.hv = Vec2::ZERO;
     character.ride_vel = Vec2::ZERO;
     character.grounded = false;
+    character.sliding = false;
     editor.walk = None;
     editor.note = "respawned";
     if orbit.mode == ViewMode::Third {
@@ -341,6 +346,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         }
     }
 
@@ -353,6 +363,7 @@ mod tests {
             hv,
             ride_vel: Vec2::ZERO,
             grounded: false,
+            sliding: false,
             health,
         }
     }
@@ -425,7 +436,7 @@ mod tests {
         assert_eq!(app.world().get::<Text>(speed).unwrap().0, "2.50 m/s");
         assert_eq!(
             app.world().get::<Text>(axes).unwrap().0,
-            "x 1.50   y 2.00   z 0.00"
+            "x 1.50   y 2.00   z 0.00  jumping"
         );
         assert_eq!(app.world().get::<Node>(fill).unwrap().width, percent(40));
         assert_eq!(
@@ -453,6 +464,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         };
         let spawn = spawn_piece(2, Vec2::new(3.0, 4.0));
         assert!(find_spawn(&[]).is_none());
@@ -497,6 +513,7 @@ mod tests {
             hv: Vec2::ZERO,
             ride_vel: Vec2::ZERO,
             grounded: true,
+            sliding: false,
             health: Health::new(40.0, 100.0),
         });
         let mut orbit = Orbit::default();

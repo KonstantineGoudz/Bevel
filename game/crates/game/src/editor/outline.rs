@@ -10,7 +10,7 @@
 //! therefore unique across both namespaces, which lets one map key label
 //! either kind of object and makes parent references unambiguous.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::*;
 
@@ -63,6 +63,9 @@ pub(crate) struct SceneOutline {
     pub(crate) membership: BTreeMap<u32, u32>,
     /// Custom piece labels. Missing means "use the shape name".
     pub(crate) labels: BTreeMap<u32, String>,
+    /// Pieces that cannot be picked from the viewport. They remain selectable
+    /// from the object graph so their lock can be released.
+    pub(crate) locked: BTreeSet<u32>,
     /// Monotonic counter the UI uses to know when to rebuild its rows.
     pub(crate) revision: u64,
 }
@@ -114,6 +117,22 @@ impl SceneOutline {
             .get(&piece)
             .map(String::as_str)
             .filter(|label| !label.is_empty())
+    }
+
+    pub(crate) fn is_locked(&self, piece: u32) -> bool {
+        self.locked.contains(&piece)
+    }
+
+    /// Flip a piece's viewport-lock state and return the new value.
+    pub(crate) fn toggle_lock(&mut self, piece: u32) -> bool {
+        let locked = if self.locked.remove(&piece) {
+            false
+        } else {
+            self.locked.insert(piece);
+            true
+        };
+        self.bump();
+        locked
     }
 
     pub(crate) fn set_label(&mut self, piece: u32, label: &str) {
@@ -236,11 +255,13 @@ impl SceneOutline {
         let before = (
             self.membership.len(),
             self.labels.len(),
+            self.locked.len(),
             self.groups.iter().filter(|g| g.parent.is_some()).count(),
         );
         self.membership
             .retain(|piece, group| piece_ids.contains(piece) && group_ids.contains(group));
         self.labels.retain(|piece, _| piece_ids.contains(piece));
+        self.locked.retain(|piece| piece_ids.contains(piece));
         for group in &mut self.groups {
             if group
                 .parent
@@ -252,6 +273,7 @@ impl SceneOutline {
         let after = (
             self.membership.len(),
             self.labels.len(),
+            self.locked.len(),
             self.groups.iter().filter(|g| g.parent.is_some()).count(),
         );
         if before != after {
@@ -450,6 +472,23 @@ impl Editor {
         }
     }
 
+    /// Whether a graph node is locked against viewport selection.
+    pub(crate) fn node_locked(&self, node: GraphNode) -> bool {
+        matches!(node, GraphNode::Piece(id) if self.outline.is_locked(id))
+    }
+
+    /// Toggle viewport-lock for a piece as a single undo step.
+    pub(crate) fn toggle_lock(&mut self, id: u32) -> bool {
+        if self.piece(id).is_none() {
+            return false;
+        }
+        self.commit();
+        let locked = self.outline.toggle_lock(id);
+        self.hard_dirty = true;
+        self.note = if locked { "locked" } else { "unlocked" };
+        locked
+    }
+
     /// Whether a node's label can be edited.
     pub(crate) fn node_renamable(&self, node: GraphNode) -> bool {
         match node {
@@ -605,6 +644,11 @@ mod tests {
             elevation: 0.0,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         }
     }
 
@@ -808,5 +852,36 @@ mod tests {
         assert_eq!(editor.pieces.len(), 1);
         assert_eq!(editor.outline.piece_parent(1), Some(group));
         assert_eq!(editor.outline.label(1), Some("North wall"));
+    }
+
+    #[test]
+    fn viewport_locking_is_undoable_and_prunes_with_the_piece() {
+        let mut editor = Editor::default();
+        editor.pieces.push(piece(1, "wall"));
+
+        assert!(editor.toggle_lock(1));
+        assert!(editor.outline.is_locked(1));
+        assert_eq!(editor.note, "locked");
+        assert_eq!(editor.undo.len(), 1);
+
+        editor.undo();
+        assert!(!editor.outline.is_locked(1));
+        editor.redo();
+        assert!(editor.outline.is_locked(1));
+
+        editor.selected = Some(1);
+        delete_piece(&mut editor);
+        assert!(editor.outline.prune(&editor.pieces));
+        assert!(!editor.outline.is_locked(1));
+    }
+
+    #[test]
+    fn toggling_a_lock_twice_restores_the_open_state() {
+        let mut editor = Editor::default();
+        editor.pieces.push(piece(1, "crate"));
+        assert!(editor.toggle_lock(1));
+        assert!(!editor.toggle_lock(1));
+        assert!(!editor.outline.is_locked(1));
+        assert_eq!(editor.note, "unlocked");
     }
 }

@@ -33,6 +33,7 @@ use crate::model::{
 use crate::path;
 use crate::path_edit::{self, PathDrag, PathHandle, Plan, TangentSide};
 use crate::session;
+use crate::locomotion::{LocomotionInput, LocomotionState};
 use crate::statuses::Health;
 
 const PANEL_BG: Color = Color::srgb_u8(0x10, 0x16, 0x1e);
@@ -169,6 +170,7 @@ impl Plugin for EditorPlugin {
                     sync_outliner_selection,
                     apply_outliner_edit,
                     sync_outliner_rows,
+                    sync_outliner_panel,
                     sync_outliner_fields,
                     update_outliner_rows,
                     outliner_scroll,
@@ -179,7 +181,11 @@ impl Plugin for EditorPlugin {
             .add_systems(
                 Update,
                 (
+                    handle_transparency_slider,
                     sync_properties_panel,
+                    sync_transparency_slider,
+                    sync_trigger_color_buttons,
+                    sync_trigger_visible_label,
                     update_palette,
                     sync_path_actions,
                     update_touch_buttons,
@@ -194,8 +200,7 @@ impl Plugin for EditorPlugin {
             )
             .add_observer(on_palette_activate)
             .add_observer(on_touch_button)
-            .add_observer(on_add_menu_item)
-            .add_observer(on_outliner_action);
+            .add_observer(on_add_menu_item);
     }
 }
 
@@ -330,6 +335,11 @@ pub(crate) struct Character {
     /// ride; landing subtracts it back so repeated hops cannot stack speed.
     pub(crate) ride_vel: Vec2,
     pub(crate) grounded: bool,
+    /// True while the capsule is in a landing slide: it entered on touchdown
+    /// with Left Ctrl held after being airborne, keeps its horizontal
+    /// momentum with only low friction, and ends when Ctrl is released, a
+    /// jump takes off, it leaves the ground, or it slows to a walk.
+    pub(crate) sliding: bool,
     pub(crate) health: Health,
 }
 
@@ -344,6 +354,23 @@ impl Character {
     /// Speed in metres per second, ignoring direction.
     pub(crate) fn speed(self) -> f32 {
         self.velocity().length()
+    }
+
+    /// Snapshot of the physics fields the locomotion state machine reads.
+    pub(crate) fn locomotion_input(self) -> LocomotionInput {
+        LocomotionInput::new(
+            self.grounded,
+            self.sliding,
+            (self.hv + self.ride_vel).length(),
+            self.vy,
+            self.health.is_dead(),
+        )
+    }
+
+    /// What the character is doing right now: stationary, walking, running,
+    /// sliding, jumping, falling, or dead. See [`crate::locomotion`].
+    pub(crate) fn locomotion_state(self) -> LocomotionState {
+        crate::locomotion::classify(self.locomotion_input())
     }
 }
 

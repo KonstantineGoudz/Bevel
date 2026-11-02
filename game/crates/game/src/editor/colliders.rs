@@ -3,6 +3,9 @@
 use super::*;
 
 pub(super) fn piece_collider(shape: &model::Shape) -> Option<Collider> {
+    if shape.is_trigger {
+        return None;
+    }
     let height = shape.height.max(0.02);
     let mid = shape.base + height * 0.5;
 

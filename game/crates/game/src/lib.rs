@@ -14,6 +14,7 @@ mod path_edit;
 mod platforms;
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 mod session;
+pub mod locomotion;
 pub mod statuses;
 mod viewer;
 

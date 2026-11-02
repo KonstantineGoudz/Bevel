@@ -69,6 +69,76 @@ pub(super) fn air_step(current: Vec2, wish_dir: Vec2, wish_speed: f32, dt: f32) 
     }
 }
 
+/// Slide friction, in m/s^2. Far below `GROUND_ACCEL`, so a landing slide
+/// keeps most of its entry momentum and coasts for a second or more instead
+/// of scrubbing to the wish speed in a few frames.
+pub(super) const SLIDE_FRICTION: f32 = 2.4;
+/// How hard steering can bend a slide's direction, in m/s^2. Steering may
+/// turn the slide but never adds speed: the desired velocity is always the
+/// (already decayed) slide speed pointed along the wish direction.
+pub(super) const SLIDE_STEER: f32 = 8.0;
+/// Slowest horizontal landing speed that can enter a slide, in m/s. A
+/// standing hop lands below this and simply stands up again.
+pub(super) const SLIDE_MIN_ENTRY_SPEED: f32 = 1.5;
+/// Speed at which a slide ends and normal ground control resumes, in m/s.
+pub(super) const SLIDE_END_SPEED: f32 = 0.85;
+
+/// One slide step: decay the speed by `SLIDE_FRICTION`, then bend the
+/// remaining velocity toward `wish_dir` by at most `SLIDE_STEER * dt`
+/// without ever increasing its magnitude. With no steering the slide is
+/// pure momentum: direction untouched, speed bleeding off slowly.
+/// Pure helper so the slide feel stays unit-testable without a window.
+pub(super) fn slide_step(current: Vec2, wish_dir: Vec2, dt: f32) -> Vec2 {
+    if dt <= 0.0 {
+        return current;
+    }
+    let speed = current.length();
+    if speed <= 0.0 {
+        return Vec2::ZERO;
+    }
+    let decayed_speed = (speed - SLIDE_FRICTION * dt).max(0.0);
+    if decayed_speed <= 0.0 {
+        return Vec2::ZERO;
+    }
+    let mut next = current / speed * decayed_speed;
+    let dir = wish_dir.normalize_or_zero();
+    if dir != Vec2::ZERO {
+        let desired = dir * decayed_speed;
+        let to_desired = desired - next;
+        let max_step = SLIDE_STEER * dt;
+        let dist = to_desired.length();
+        if dist <= max_step || dist == 0.0 {
+            next = desired;
+        } else {
+            next += to_desired * (max_step / dist);
+            // Bending is a change of direction, not a second brake: restore
+            // the friction-only speed so a steered slide costs no more
+            // momentum than a straight one.
+            next = next.normalize_or_zero() * decayed_speed;
+        }
+    }
+    next
+}
+
+/// Whether the capsule is sliding after a frame. A slide can only be
+/// *entered* on the landing frame itself (airborne last frame, grounded
+/// now) with Left Ctrl held and enough horizontal momentum; pressing Ctrl
+/// while already running on the ground never starts one. An ongoing slide
+/// survives while Ctrl stays held, the capsule stays grounded, and it is
+/// still moving faster than `SLIDE_END_SPEED`.
+pub(super) fn next_sliding(
+    was_sliding: bool,
+    landed: bool,
+    slide_held: bool,
+    grounded: bool,
+    speed: f32,
+) -> bool {
+    if !slide_held || !grounded {
+        return false;
+    }
+    (was_sliding && speed >= SLIDE_END_SPEED) || (landed && speed >= SLIDE_MIN_ENTRY_SPEED)
+}
+
 /// A slope pushes the character upward while it climbs, so a small positive
 /// vertical speed still counts as ground. A real jump rises much faster.
 pub(super) const MAX_GROUNDED_RISE: f32 = JUMP_SPEED * 0.5;
@@ -78,11 +148,12 @@ pub(super) const MAX_GROUNDED_RISE: f32 = JUMP_SPEED * 0.5;
 /// faster than gravity can pull it back, so contact-only support flickers and
 /// jump presses are silently dropped on most frames.
 pub(super) const STEP_DOWN: f32 = 0.35;
-/// Highest ledge the character steps onto without jumping, in metres. Small
-/// lips (tile seams, slightly raised ramp bases) are walked over instead of
-/// blocking forever; full block faces stay walls. The probe lands a little
-/// past the capsule's edge, where a ramp has already risen a touch, so this
-/// clears lips a few centimetres shorter than itself.
+/// Highest terrain rise the grounded walk mounts in one move, in metres.
+/// The surface sampled at the destination may sit at most this far above
+/// the feet: tile seams and slightly raised ramp bases are walked over,
+/// while anything taller is a wall (the wall rays above this height say
+/// so first). A ramp's slope never presents a single rise anywhere near
+/// this — it is climbed continuously, a few centimetres per frame.
 pub(super) const STEP_UP: f32 = 0.4;
 /// Surfaces steeper than this are walls, not ground.
 pub(super) const MIN_GROUND_NORMAL: f32 = 0.4;
@@ -111,88 +182,345 @@ pub(super) fn contact_gap(ray_distance: f32, normal_y: f32) -> f32 {
     ray_distance - PILL_RADIUS / normal_y.max(0.01)
 }
 
-/// Top height of a ledge the character may step onto, or `None` when the way
-/// ahead is a real wall. Probes down just past the capsule's leading edge:
-/// a walkable surface within `STEP_UP` above the feet counts as a step, while
-/// taller faces and missing headroom for the capsule do not. Returns the
-/// surface height and its normal's vertical component, which sizes the
-/// overlap check in [`step_destination`].
-pub(super) fn step_up_top(
+/// The grounded controller never asks physics to push the capsule out of
+/// terrain. While grounded it only ever moves by the frame's wish
+/// displacement, and the feet follow the surface sampled straight down at
+/// the destination — so a ramp is climbed metre by metre at walking pace,
+/// with no depenetration pop at its sharp toe or ridge and no step-up
+/// repositioning. Move-and-slide (and its depenetration) is kept for
+/// airborne motion only, where the capsule is not resting on terrain.
+///
+/// Sample the walkable surface under `at`, returning the foot height the
+/// capsule stands at there plus the surface normal's vertical component.
+/// The ray starts just above the tallest acceptable step, so a wall top
+/// beside the path is never sampled as ground. The standing height is
+/// lifted by `R * (1/ny - 1)`: a capsule resting on a slope touches along
+/// the normal, so its lowest point sits that far above the surface point
+/// directly beneath its centre.
+fn ground_at(
     spatial_query: &SpatialQuery,
     filter: &SpatialQueryFilter,
-    center: Vec3,
+    at: Vec2,
     feet: f32,
-    dir: Vec2,
 ) -> Option<(f32, f32)> {
-    if dir == Vec2::ZERO {
-        return None;
-    }
-    let ahead = Vec2::new(center.x, center.z) + dir * (PILL_RADIUS + 0.15);
-    let plain = Vec3::new(ahead.x, feet + STEP_UP + PILL_RADIUS, ahead.y);
+    let origin_y = feet + STEP_UP + 0.06;
     let hit = spatial_query.cast_ray(
-        plain.real(),
+        Vec3::new(at.x, origin_y, at.y).real(),
         Dir3::NEG_Y,
-        STEP_UP + PILL_RADIUS + 0.05,
+        STEP_UP + 1.6,
         true,
         filter,
     )?;
     if hit.normal.y <= MIN_GROUND_NORMAL {
         return None;
     }
-    let top = plain.y - hit.distance;
-    if top <= feet + 0.02 || top > feet + STEP_UP {
-        return None;
-    }
-    // The step is only usable when the capsule fits above it.
-    let headroom = Vec3::new(ahead.x, top + 0.1, ahead.y).real();
-    if spatial_query
-        .cast_ray(headroom, Dir3::Y, PILL_HALF * 2.0 - 0.2, true, filter)
-        .is_some()
-    {
-        return None;
-    }
-    Some((top, hit.normal.y))
+    let raw = origin_y - hit.distance;
+    let stand = raw + PILL_RADIUS * (1.0 / hit.normal.y - 1.0);
+    Some((stand, hit.normal.y))
 }
 
-/// Capsule centre for mounting the `top` ledge found by [`step_up_top`], or
-/// `None` when the fat capsule would not fit there.
-///
-/// The probe ray is thin: at a crowded border — a lipped ramp backed by a
-/// block, the corner where two pieces meet — the ray can thread past
-/// neighbouring geometry that the 0.32 m capsule radius still overlaps.
-/// Teleporting there anyway embeds the capsule in solid rock, and the next
-/// move-and-slide depenetrates it: the capsule pops up into the air or
-/// flickers between poses for as long as it keeps pushing into the wall.
-/// Refusing the step keeps the character blocked against the obstacle, the
-/// same as against any wall too tall to climb.
-pub(super) fn step_destination(
+/// A wall blocking movement from `pos` along `dir`, if one reaches the
+/// capsule within `reach`. Three rays fan across the capsule's width at
+/// step height: anything taller than a step that stops a ray head-on is a
+/// wall, while a step-able lip (below the rays) and a ramp slope (whose
+/// normal leans up, never head-on) are not. The hit doubles as the push
+/// record for dynamic bodies in the way.
+fn wall_hit(
     spatial_query: &SpatialQuery,
     filter: &SpatialQueryFilter,
+    pos: Vec2,
+    feet: f32,
+    dir: Vec2,
+    reach: f32,
+    velocity: Vec3,
+) -> Option<PushHit> {
+    let len = dir.length();
+    if len <= 0.0 {
+        return None;
+    }
+    let dir = dir / len;
+    let Ok(dir3) = Dir3::new(Vec3::new(dir.x, 0.0, dir.y)) else {
+        return None;
+    };
+    let perp = Vec2::new(-dir.y, dir.x);
+    for offset in [-PILL_RADIUS * 0.75, 0.0, PILL_RADIUS * 0.75] {
+        let base = pos + perp * offset;
+        let origin = Vec3::new(base.x, feet + STEP_UP + 0.05, base.y);
+        let Some(hit) = spatial_query.cast_ray(origin.real(), dir3, reach, true, filter) else {
+            continue;
+        };
+        let facing = Vec2::new(hit.normal.x, hit.normal.z).dot(dir);
+        if hit.normal.y < MIN_GROUND_NORMAL && facing < -0.05 {
+            return Some(PushHit {
+                collider: hit.entity,
+                point: origin + Vec3::new(dir.x, 0.0, dir.y) * hit.distance,
+                normal: hit.normal,
+                character_velocity: velocity,
+            });
+        }
+    }
+    None
+}
+
+/// Whether there is headroom for the capsule standing at `at` on a
+/// surface whose foot height is `stand`. Only a ceiling matters here:
+/// side geometry is already handled by the wall rays, and the capsule
+/// body legitimately grazes the terrain it stands on, so a full overlap
+/// test would refuse every slope approach.
+fn headroom_at(
+    spatial_query: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+    at: Vec2,
+    stand: f32,
+) -> bool {
+    let origin = Vec3::new(at.x, stand + 0.05, at.y).real();
+    spatial_query
+        .cast_ray(origin, Dir3::Y, PILL_HALF * 2.0 - 0.1, true, filter)
+        .is_none()
+}
+
+/// Character motion state carried through one frame of [`step_motion`].
+#[derive(Clone, Copy)]
+struct Motion {
+    pos: Vec2,
+    feet: f32,
+    vy: f32,
+    hv: Vec2,
+    grounded: bool,
+}
+
+/// One grounded substep: move by at most `hv * dt`, following the sampled
+/// terrain. Returns the horizontal distance actually travelled. Nothing
+/// here can move the capsule further than the wish displacement, nor lift
+/// it faster than the terrain under the destination rises.
+#[allow(clippy::too_many_arguments)]
+fn grounded_substep(
+    spatial_query: &SpatialQuery,
+    filter: &SpatialQueryFilter,
+    motion: &mut Motion,
+    target: Vec2,
+    dt: f32,
+    sliding: bool,
+    pushes: &mut Vec<PushHit>,
+) -> f32 {
+    motion.hv = if sliding {
+        slide_step(motion.hv, target.normalize_or_zero(), dt)
+    } else {
+        ground_step(motion.hv, target, dt)
+    };
+    motion.vy = 0.0;
+    let disp = motion.hv * dt;
+    if disp.length_squared() <= 1e-12 {
+        // No wish travel: settle onto whatever is underfoot (a platform
+        // may have carried the capsule) without drifting.
+        if let Some((stand, _)) = ground_at(spatial_query, filter, motion.pos, motion.feet)
+            && (stand - motion.feet).abs() <= STEP_DOWN.max(STEP_UP)
+        {
+            motion.feet = stand;
+        }
+        return 0.0;
+    }
+    // Full displacement first, then the axis-separated slides, so a
+    // diagonal push into a wall still travels along it.
+    let attempts = [disp, Vec2::new(disp.x, 0.0), Vec2::new(0.0, disp.y)];
+    let mut pushed = false;
+    for step in attempts {
+        if step.length_squared() <= 1e-12 {
+            continue;
+        }
+        let cand = motion.pos + step;
+        let velocity = Vec3::new(motion.hv.x, 0.0, motion.hv.y);
+        if let Some(hit) = wall_hit(
+            spatial_query,
+            filter,
+            motion.pos,
+            motion.feet,
+            step,
+            step.length() + PILL_RADIUS + 0.02,
+            velocity,
+        ) {
+            if !pushed {
+                pushes.push(hit);
+                pushed = true;
+            }
+            continue;
+        }
+        let Some((stand, normal_y)) = ground_at(spatial_query, filter, cand, motion.feet) else {
+            // Nothing walkable below within reach: walked off the world.
+            motion.pos = cand;
+            motion.grounded = false;
+            return step.length();
+        };
+        let rise = stand - motion.feet;
+        if rise > STEP_UP {
+            continue;
+        }
+        if rise < -STEP_DOWN {
+            // A ledge drops away — unless walkable ground continues just
+            // past the capsule's centre, which bridges seams and cracks
+            // (ramp ridge onto the next block) instead of dipping in.
+            let ahead = cand + step.normalize_or_zero() * PILL_RADIUS;
+            let bridges = ground_at(spatial_query, filter, ahead, motion.feet)
+                .is_some_and(|(ahead_stand, _)| (ahead_stand - motion.feet).abs() <= STEP_UP);
+            if bridges {
+                motion.pos = cand;
+                return step.length();
+            }
+            motion.pos = cand;
+            motion.grounded = false;
+            return step.length();
+        }
+        if !headroom_at(spatial_query, filter, cand, stand) {
+            continue;
+        }
+        motion.pos = cand;
+        // On a slope the feet may only gain or lose height as fast as the
+        // terrain rises over the distance travelled, so the flat-to-slope
+        // normal change at a ramp's toe cannot snap the capsule up in one
+        // frame. Flat ground (a genuine step) still seats instantly.
+        motion.feet = if normal_y < 0.99 {
+            let grade = ((1.0 - normal_y * normal_y).max(0.0)).sqrt() / normal_y;
+            let max_delta = step.length() * grade + 0.005;
+            motion.feet + (stand - motion.feet).clamp(-max_delta, max_delta)
+        } else {
+            stand
+        };
+        if step != disp {
+            // A reduced slide: keep only the velocity that was used.
+            motion.hv = step / dt;
+        }
+        return step.length();
+    }
+    // Blocked on every attempt: the wall scrubs the wish velocity.
+    motion.hv = Vec2::ZERO;
+    0.0
+}
+
+/// Advance the character one frame. Grounded motion is the sampled-terrain
+/// walk of [`grounded_substep`]; airborne motion keeps move-and-slide so
+/// jumps, falls and wall slides stay physical. Landing is resolved by the
+/// ground probe after the airborne steps, never by depenetration.
+#[allow(clippy::too_many_arguments)]
+fn step_motion(
+    move_and_slide: &MoveAndSlide,
     collider: &Collider,
     rotation: Quat,
-    center: Vec3,
-    top: f32,
-    normal_y: f32,
-    dir: Vec2,
-) -> Option<Vec3> {
-    let dest = Vec3::new(
-        center.x + dir.x * (PILL_RADIUS + 0.15),
-        top + PILL_HALF,
-        center.z + dir.y * (PILL_RADIUS + 0.15),
-    );
-    // An overlap test reports bodies the capsule would embed in. Lift the
-    // check pose so the ledge surface itself — which the capsule correctly
-    // touches — does not read as an overlap. The lift grows on steeper
-    // slopes: the uphill surface rises into the capsule's disc, by
-    // `R * (1 - ny) / ny` at the disc edge for a plane with vertical
-    // component `ny`. It stays small next to real walls, so a destination
-    // inside neighbouring geometry still reads as an overlap.
-    let lift = (PILL_RADIUS * (1.0 - normal_y) / normal_y.max(MIN_GROUND_NORMAL) + 0.04).min(0.15);
-    let probe = Vec3::new(dest.x, dest.y + lift, dest.z);
-    let overlaps = !spatial_query
-        .shape_intersections(collider, probe.real(), rotation, filter)
-        .is_empty();
-    if overlaps { None } else { Some(dest) }
+    filter: &SpatialQueryFilter,
+    motion: &mut Motion,
+    target: Vec2,
+    wish_dir: Vec2,
+    wish_speed: f32,
+    was_grounded: bool,
+    taking_off: bool,
+    idle: bool,
+    sliding: bool,
+    frame: f32,
+) -> (f32, Vec<PushHit>) {
+    let spatial_query = &move_and_slide.spatial_query;
+    let steps = ((frame / (1.0 / 60.0)).ceil() as usize).clamp(1, 10);
+    let step_dt = frame / steps as f32;
+    let mut travelled = 0.0;
+    let mut pushes: Vec<PushHit> = Vec::new();
+    if taking_off {
+        motion.grounded = false;
+    }
+    if idle {
+        motion.hv = Vec2::ZERO;
+        motion.vy = 0.0;
+        if let Some((stand, _)) = ground_at(spatial_query, filter, motion.pos, motion.feet)
+            && (stand - motion.feet).abs() <= STEP_DOWN.max(STEP_UP)
+        {
+            motion.feet = stand;
+            motion.grounded = true;
+        }
+        return (0.0, pushes);
+    }
+    let mut center = Vec3::new(motion.pos.x, motion.feet + PILL_HALF, motion.pos.y);
+    for _ in 0..steps {
+        if motion.grounded {
+            travelled += grounded_substep(
+                spatial_query,
+                filter,
+                motion,
+                target,
+                step_dt,
+                sliding,
+                &mut pushes,
+            );
+            center = Vec3::new(motion.pos.x, motion.feet + PILL_HALF, motion.pos.y);
+        } else {
+            motion.vy -= GRAVITY * step_dt;
+            if !taking_off {
+                if was_grounded {
+                    motion.hv = ground_step(motion.hv, target, step_dt);
+                } else {
+                    motion.hv = air_step(motion.hv, wish_dir, wish_speed, step_dt);
+                }
+            }
+            let velocity = Vec3::new(motion.hv.x, motion.vy, motion.hv.y);
+            let mut hits: Vec<PushHit> = Vec::new();
+            let output = move_and_slide.move_and_slide(
+                collider,
+                center.real(),
+                rotation,
+                velocity,
+                std::time::Duration::from_secs_f32(step_dt),
+                &MoveAndSlideConfig::default(),
+                filter,
+                |hit| {
+                    hits.push(PushHit {
+                        collider: hit.entity,
+                        point: hit.point.f32(),
+                        normal: **hit.normal,
+                        character_velocity: *hit.velocity,
+                    });
+                    MoveAndSlideHitResponse::Accept
+                },
+            );
+            let next = output.position.f32();
+            travelled += Vec2::new(next.x - center.x, next.z - center.z).length();
+            center = next;
+            motion.vy = output.projected_velocity.y;
+            motion.hv = Vec2::new(output.projected_velocity.x, output.projected_velocity.z);
+            pushes.append(&mut hits);
+        }
+    }
+    motion.pos = Vec2::new(center.x, center.z);
+    motion.feet = center.y - PILL_HALF;
+    if !motion.grounded {
+        // Probe down from the capsule centre so a descent can follow the
+        // slope for a short step instead of free-falling between frames.
+        let surface = spatial_query
+            .cast_ray(
+                Vec3::new(center.x, motion.feet + PILL_RADIUS, center.z).real(),
+                Dir3::NEG_Y,
+                PILL_RADIUS / MIN_GROUND_NORMAL + STEP_DOWN,
+                true,
+                filter,
+            )
+            .filter(|hit| hit.normal.y > MIN_GROUND_NORMAL)
+            .map(|hit| {
+                let uphill = Vec2::new(hit.normal.x, hit.normal.z).dot(wish_dir) < -0.05;
+                (contact_gap(hit.distance, hit.normal.y), uphill)
+            });
+        let (grounded, drop) = if motion.vy > MAX_GROUNDED_RISE {
+            (false, None)
+        } else {
+            surface.map_or((false, None), |(gap, uphill)| {
+                ground_support(gap, was_grounded, uphill)
+            })
+        };
+        if grounded {
+            motion.vy = 0.0;
+            motion.grounded = true;
+            if let Some(drop) = drop {
+                motion.feet -= drop;
+            }
+        }
+    } else {
+        motion.vy = 0.0;
+    }
+    (travelled, pushes)
 }
 
 /// How much of the character's inward speed a shoved body picks up. Below 1.0
@@ -342,19 +670,21 @@ pub(super) fn walk(
     // controller so the button still lands.
     let jump = keys.pressed(KeyCode::Space) || touch.jump;
     touch.jump = false;
+    // Left Ctrl held on landing after the jump starts a momentum slide,
+    // exactly as in free control; releasing it (or jumping) ends the slide.
+    let slide_held = keys.pressed(KeyCode::ControlLeft);
 
-    // Steering, not teleporting: the same capsule and move-and-slide as
-    // first-person control, so ramps, gaps and gravity are resolved by physics.
-    // Horizontal speed is physical: on the ground it chases the route pace,
-    // in the air inertia carries and the route can only strafe a little.
+    // Steering, not teleporting: grounded route following uses the same
+    // sampled-terrain walk as first-person control, so ramps, gaps and
+    // drops are resolved by the ground under the destination, never by
+    // depenetration. Horizontal speed is physical: on the ground it chases
+    // the route pace, in the air inertia carries and the route can only
+    // strafe a little.
     let direction = to_target.normalize_or_zero();
     let frame = time.delta_secs().clamp(0.0, 0.25);
-    let steps = ((frame / (1.0 / 60.0)).ceil() as usize).clamp(1, 10);
-    let step_dt = frame / steps as f32;
     let filter = SpatialQueryFilter::from_excluded_entities([entity]);
     let rotation = Quat::from_rotation_y(character.yaw);
-    let mut center = Vec3::new(character.pos.x, character.feet + PILL_HALF, character.pos.y);
-    let mut vy = jump_velocity(character.vy, character.grounded, jump);
+    let vy = jump_velocity(character.vy, character.grounded, jump);
     let mut hv = character.hv;
     // A jump is a vertical impulse: the takeoff frame keeps entry momentum
     // untouched instead of applying ground steering toward the wish.
@@ -363,6 +693,7 @@ pub(super) fn walk(
         // Leaving a moving platform carries its motion into the leap.
         hv += character.ride_vel;
     }
+    let sliding = character.sliding && slide_held && !taking_off;
     let airborne = !was_grounded && vy <= MAX_GROUNDED_RISE;
     if !airborne && !taking_off {
         // Leaving the ground with a jump keeps the run-up: a standing start
@@ -371,78 +702,30 @@ pub(super) fn walk(
             hv = direction * WALK_SPEED.min(1.0);
         }
     }
-    let mut travelled = 0.0;
-
-    for _ in 0..steps {
-        vy -= GRAVITY * step_dt;
-        if !taking_off {
-            if was_grounded {
-                hv = ground_step(hv, direction * WALK_SPEED, step_dt);
-            } else {
-                hv = air_step(hv, direction, WALK_SPEED, step_dt);
-            }
-        }
-        let velocity = Vec3::new(hv.x, vy, hv.y);
-        let mut hits: Vec<PushHit> = Vec::new();
-        let output = move_and_slide.move_and_slide(
-            &kit.character_collider,
-            center.real(),
-            rotation,
-            velocity,
-            std::time::Duration::from_secs_f32(step_dt),
-            &MoveAndSlideConfig::default(),
-            &filter,
-            |hit| {
-                hits.push(PushHit {
-                    collider: hit.entity,
-                    point: hit.point.f32(),
-                    normal: **hit.normal,
-                    character_velocity: *hit.velocity,
-                });
-                MoveAndSlideHitResponse::Accept
-            },
-        );
-        let next = output.position.f32();
-        travelled += Vec2::new(next.x - center.x, next.z - center.z).length();
-        center = next;
-        vy = output.projected_velocity.y;
-        // Walls scrub the into-wall component so route inertia slides along
-        // them instead of storing up speed for after the collision.
-        hv = Vec2::new(output.projected_velocity.x, output.projected_velocity.z);
-        apply_pushes(&hits, &collider_of, &rigid, &masses, &mut bodies);
-    }
-
-    let mut feet = center.y - PILL_HALF;
-    // Step-up assist, same as free control: a low lip at the route border
-    // scrubs route momentum to nothing, so mount ledges within STEP_UP when
-    // the frame barely moved. Runs before `moved` is read so the position
-    // advances onto the ledge the same frame.
-    let intended = WALK_SPEED * frame;
-    if was_grounded && travelled < intended * 0.25 {
-        let dir = if hv.length() > 0.2 {
-            hv.normalize_or_zero()
-        } else {
-            direction
-        };
-        if let Some((top, normal_y)) =
-            step_up_top(&move_and_slide.spatial_query, &filter, center, feet, dir)
-            && let Some(dest) = step_destination(
-                &move_and_slide.spatial_query,
-                &filter,
-                &kit.character_collider,
-                rotation,
-                center,
-                top,
-                normal_y,
-                dir,
-            )
-        {
-            center = dest;
-            feet = top;
-            hv = dir * WALK_SPEED;
-        }
-    }
-    let moved = Vec2::new(center.x, center.z);
+    let mut motion = Motion {
+        pos: character.pos,
+        feet: character.feet,
+        vy,
+        hv,
+        grounded: character.grounded,
+    };
+    let (travelled, pushes) = step_motion(
+        &move_and_slide,
+        &kit.character_collider,
+        rotation,
+        &filter,
+        &mut motion,
+        direction * WALK_SPEED,
+        direction,
+        WALK_SPEED,
+        was_grounded,
+        taking_off,
+        false,
+        sliding,
+        frame,
+    );
+    apply_pushes(&pushes, &collider_of, &rigid, &masses, &mut bodies);
+    let moved = motion.pos;
     let yaw = if direction.length_squared() > 0.01 {
         (-direction.x).atan2(-direction.y)
     } else {
@@ -455,51 +738,27 @@ pub(super) fn walk(
         .map(|route| route.track.nearest_distance(moved))
         .unwrap_or(current.distance);
 
-    // Probe down from the capsule centre so a descent can follow the slope for
-    // a short step instead of free-falling between contact frames.
-    feet = center.y - PILL_HALF;
-    let surface = move_and_slide
-        .spatial_query
-        .cast_ray(
-            Vec3::new(center.x, feet + PILL_RADIUS, center.z).real(),
-            Dir3::NEG_Y,
-            PILL_RADIUS / MIN_GROUND_NORMAL + STEP_DOWN,
-            true,
-            &filter,
-        )
-        .filter(|hit| hit.normal.y > MIN_GROUND_NORMAL)
-        .map(|hit| {
-            let uphill = Vec2::new(hit.normal.x, hit.normal.z).dot(direction) < -0.05;
-            (contact_gap(hit.distance, hit.normal.y), uphill)
-        });
-    let (grounded, drop) = if vy > MAX_GROUNDED_RISE {
-        (false, None)
-    } else {
-        surface.map_or((false, None), |(gap, uphill)| {
-            ground_support(gap, was_grounded, uphill)
-        })
-    };
-    if grounded {
-        vy = 0.0;
-    }
-    if let Some(drop) = drop {
-        feet -= drop;
-    }
-
     if let Some(target) = editor.character.as_mut() {
         target.pos = moved;
-        target.feet = feet;
-        target.vy = if grounded { 0.0 } else { vy };
-        // Keep the post-slide horizontal velocity so inertia survives the
+        target.feet = motion.feet;
+        target.vy = if motion.grounded { 0.0 } else { motion.vy };
+        // Keep the post-move horizontal velocity so inertia survives the
         // frame and walls do not leave phantom speed behind.
-        target.hv = hv;
+        target.hv = motion.hv;
         // Touching down on a moving platform converts back to platform-frame
         // velocity, so the takeoff fold cannot stack speed across hops.
         // Runs on the landing transition only, never while settled.
-        if grounded && !was_grounded {
+        if motion.grounded && !was_grounded {
             target.hv -= character.ride_vel;
         }
-        target.grounded = grounded;
+        target.grounded = motion.grounded;
+        target.sliding = next_sliding(
+            sliding,
+            motion.grounded && !was_grounded,
+            slide_held,
+            motion.grounded,
+            target.hv.length(),
+        );
         target.yaw = yaw;
     }
 
@@ -621,10 +880,8 @@ pub(super) fn character_move(
 
     // Split a long frame into short substeps. Under software rendering a frame
     // can be 0.3 s; a single step that long lets gravity cancel a jump and
-    // tunnels through colliders.
+    // tunnels through colliders. `step_motion` does the splitting.
     let frame = time.delta_secs().clamp(0.0, 0.25);
-    let steps = ((frame / (1.0 / 60.0)).ceil() as usize).clamp(1, 10);
-    let step_dt = frame / steps as f32;
 
     // `pressed`, not `just_pressed`: a frame can span the whole key tap on a
     // slow frame, and a held space should still jump on landing.
@@ -632,7 +889,7 @@ pub(super) fn character_move(
     touch.jump = false;
     // A jump is a vertical impulse: it sets `vy` and leaves `hv` alone so
     // run-up momentum carries into the leap.
-    let mut vy = jump_velocity(character.vy, character.grounded, jump);
+    let vy = jump_velocity(character.vy, character.grounded, jump);
     let mut hv = character.hv;
     // The takeoff frame preserves entry momentum exactly: no ground steering
     // toward the wish, so releasing the stick mid-jump does not scrub speed.
@@ -641,125 +898,49 @@ pub(super) fn character_move(
         // Leaving a moving platform carries its motion into the leap.
         hv += character.ride_vel;
     }
+    // Slide: Left Ctrl is only read as a landing input. Holding it while
+    // airborne queues a slide that starts on touchdown (see `next_sliding`);
+    // holding it while already grounded never starts one, and a jump
+    // takeoff cancels any slide in progress.
+    let slide_held = keys.pressed(KeyCode::ControlLeft);
+    let sliding = character.sliding && slide_held && !taking_off;
 
     let filter = SpatialQueryFilter::from_excluded_entities([entity]);
     let rotation = Quat::from_rotation_y(character.yaw);
-    let mut center = Vec3::new(character.pos.x, character.feet + PILL_HALF, character.pos.y);
-    let frame_start = Vec2::new(center.x, center.z);
 
     // Standing still on a slope should not slide: without friction the
-    // projected gravity would walk the character back down the ramp.
-    let idle = wish == Vec2::ZERO && character.grounded && vy <= 0.01;
+    // projected gravity would walk the character back down the ramp. A
+    // sliding capsule is never idle, even with no steering held: its
+    // momentum is the whole point.
+    let idle = wish == Vec2::ZERO && character.grounded && vy <= 0.01 && !sliding;
 
-    for _ in 0..steps {
-        if idle {
-            vy = 0.0;
-            hv = Vec2::ZERO;
-        } else {
-            vy -= GRAVITY * step_dt;
-            if !taking_off {
-                if was_grounded {
-                    hv = ground_step(hv, target, step_dt);
-                } else {
-                    hv = air_step(hv, direction, wish_speed, step_dt);
-                }
-            }
-        }
-        let velocity = Vec3::new(hv.x, vy, hv.y);
-        let mut hits: Vec<PushHit> = Vec::new();
-        let output = move_and_slide.move_and_slide(
-            &kit.character_collider,
-            center.real(),
-            rotation,
-            velocity,
-            std::time::Duration::from_secs_f32(step_dt),
-            &MoveAndSlideConfig::default(),
-            &filter,
-            |hit| {
-                hits.push(PushHit {
-                    collider: hit.entity,
-                    point: hit.point.f32(),
-                    normal: **hit.normal,
-                    character_velocity: *hit.velocity,
-                });
-                MoveAndSlideHitResponse::Accept
-            },
-        );
-        center = output.position.f32();
-        vy = output.projected_velocity.y;
-        // Keep the wall-slid horizontal velocity so inertia slides along
-        // walls instead of pushing through them on the next substep.
-        hv = Vec2::new(output.projected_velocity.x, output.projected_velocity.z);
-        apply_pushes(&hits, &collider_of, &rigid, &masses, &mut bodies);
-    }
-
-    // Follow a descending slope for a short step instead of free-falling until
-    // the next contact frame; a jump pressed between those frames was ignored.
-    let mut feet = center.y - PILL_HALF;
-    // Step-up assist: pushing into a low lip scrubs `hv` to nothing, so the
-    // raw slide would pin the character at the border forever. When the frame
-    // barely moved despite a clear wish, mount ledges within STEP_UP.
-    let intended = target.length() * frame;
-    let moved_len = Vec2::new(center.x, center.z).distance(frame_start);
-    if was_grounded && target.length() > 0.3 && moved_len < intended * 0.25 {
-        let dir = if hv.length() > 0.2 {
-            hv.normalize_or_zero()
-        } else {
-            direction
-        };
-        if let Some((top, normal_y)) =
-            step_up_top(&move_and_slide.spatial_query, &filter, center, feet, dir)
-            && let Some(dest) = step_destination(
-                &move_and_slide.spatial_query,
-                &filter,
-                &kit.character_collider,
-                rotation,
-                center,
-                top,
-                normal_y,
-                dir,
-            )
-        {
-            // Move onto the probed column as well as up: support below the
-            // step is only found once the capsule is over the ledge.
-            center = dest;
-            feet = top;
-            // Carry the intended pace onto the step instead of the scrubbed
-            // slide remainder.
-            hv = dir * target.length().max(0.5);
-        }
-    }
-    let surface = move_and_slide
-        .spatial_query
-        .cast_ray(
-            Vec3::new(center.x, feet + PILL_RADIUS, center.z).real(),
-            Dir3::NEG_Y,
-            PILL_RADIUS / MIN_GROUND_NORMAL + STEP_DOWN,
-            true,
-            &filter,
-        )
-        .filter(|hit| hit.normal.y > MIN_GROUND_NORMAL)
-        .map(|hit| {
-            let uphill = Vec2::new(hit.normal.x, hit.normal.z).dot(direction) < -0.05;
-            (contact_gap(hit.distance, hit.normal.y), uphill)
-        });
-    let (grounded, drop) = if vy > MAX_GROUNDED_RISE {
-        // A jump must not be cancelled by the ground it is leaving.
-        (false, None)
-    } else {
-        surface.map_or((false, None), |(gap, uphill)| {
-            ground_support(gap, was_grounded, uphill)
-        })
+    let grounded_entry = character.grounded;
+    let mut motion = Motion {
+        pos: character.pos,
+        feet: character.feet,
+        vy,
+        hv,
+        grounded: grounded_entry,
     };
-    if grounded {
-        vy = 0.0;
-    }
-    if let Some(drop) = drop {
-        feet -= drop;
-    }
+    let (_travelled, pushes) = step_motion(
+        &move_and_slide,
+        &kit.character_collider,
+        rotation,
+        &filter,
+        &mut motion,
+        target,
+        direction,
+        wish_speed,
+        was_grounded,
+        taking_off,
+        idle,
+        sliding,
+        frame,
+    );
+    apply_pushes(&pushes, &collider_of, &rigid, &masses, &mut bodies);
 
-    character.pos = Vec2::new(center.x, center.z);
-    character.feet = feet;
+    character.pos = motion.pos;
+    character.feet = motion.feet;
     if orbit.mode == ViewMode::First {
         character.yaw = orbit.yaw;
     } else if direction != Vec2::ZERO {
@@ -783,15 +964,24 @@ pub(super) fn character_move(
         }
     }
 
-    character.grounded = grounded;
-    character.vy = if grounded { 0.0 } else { vy };
+    character.grounded = motion.grounded;
+    character.vy = if motion.grounded { 0.0 } else { motion.vy };
     // Touching down on a moving platform converts back to platform-frame
     // velocity, so the takeoff fold cannot stack speed across hops.
     // Runs on the landing transition only, never while settled.
-    if grounded && !was_grounded {
-        hv -= character.ride_vel;
+    if motion.grounded && !was_grounded {
+        motion.hv -= character.ride_vel;
     }
     // On landing the stored momentum decays through `ground_step` over the
     // next frames, giving a short physical slide instead of a hard stop.
-    character.hv = hv;
+    // With Left Ctrl held through the landing that decay is replaced by a
+    // real slide: `next_sliding` keeps it alive on momentum alone.
+    character.hv = motion.hv;
+    character.sliding = next_sliding(
+        sliding,
+        motion.grounded && !was_grounded,
+        slide_held,
+        motion.grounded,
+        character.hv.length(),
+    );
 }

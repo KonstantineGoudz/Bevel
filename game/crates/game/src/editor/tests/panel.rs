@@ -47,7 +47,8 @@ fn the_property_panel_hit_box_matches_its_floating_window() {
     assert!(over_properties_panel(inside, size, true));
     assert!(!over_properties_panel(inside, size, false));
     assert!(!over_properties_panel(Vec2::new(100.0, 40.0), size, true));
-    assert!(!over_properties_panel(Vec2::new(760.0, 700.0), size, true));
+    // Panel height is 850, so y=750 is still inside (12..862); check beyond.
+    assert!(!over_properties_panel(Vec2::new(760.0, 900.0), size, true));
 }
 
 #[test]
@@ -133,17 +134,30 @@ fn visuals_system_has_disjoint_queries() {
 fn the_object_graph_hit_box_matches_its_floating_window() {
     let size = Vec2::new(1000.0, 800.0);
     let inside = Vec2::new(PANEL_WIDTH + OUTLINER_MARGIN + 20.0, OUTLINER_TOP + 20.0);
-    assert!(over_outliner_panel(inside, size));
+    assert!(over_outliner_panel(inside, size, false));
     assert!(!over_outliner_panel(
         Vec2::new(PANEL_WIDTH + 2.0, OUTLINER_TOP),
-        size
+        size,
+        false
     ));
     assert!(!over_outliner_panel(
         Vec2::new(
             PANEL_WIDTH + OUTLINER_MARGIN,
             OUTLINER_TOP + OUTLINER_HEIGHT + 1.0
         ),
-        size
+        size,
+        false
+    ));
+    // Collapsed: only the title bar occupies space.
+    assert!(!over_outliner_panel(
+        Vec2::new(PANEL_WIDTH + OUTLINER_MARGIN + 20.0, OUTLINER_TOP + 40.0),
+        size,
+        true
+    ));
+    assert!(over_outliner_panel(
+        Vec2::new(PANEL_WIDTH + OUTLINER_MARGIN + 4.0, OUTLINER_TOP + 4.0),
+        size,
+        true
     ));
 }
 
@@ -165,6 +179,7 @@ fn the_object_graph_panel_spawns_and_lists_pieces_and_groups() {
             sync_outliner_selection,
             apply_outliner_edit,
             sync_outliner_rows,
+            sync_outliner_panel,
             sync_outliner_fields,
             update_outliner_rows,
         ),
@@ -192,5 +207,145 @@ fn the_object_graph_panel_spawns_and_lists_pieces_and_groups() {
     assert!(rows.contains(&GraphNode::Piece(1)));
     assert!(rows.contains(&GraphNode::Piece(2)));
     assert!(rows.iter().any(|node| matches!(node, GraphNode::Group(_))));
-    assert_eq!(list, list, "the list entity exists");
+    assert!(app.world().get_entity(list).is_ok());
+
+    // Collapse the panel from its header button.
+    let button = {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<Entity, With<OutlinerCollapseButton>>();
+        query.single(world).expect("collapse button")
+    };
+    let panel = {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<Entity, With<OutlinerPanel>>();
+        query.single(world).expect("outliner panel")
+    };
+    let body = {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<Entity, With<OutlinerBody>>();
+        query.single(world).expect("outliner body")
+    };
+    app.world_mut().trigger(Activate { entity: button });
+    app.update();
+    assert!(app.world().resource::<OutlinerState>().collapsed);
+    assert_eq!(
+        app.world().entity(panel).get::<Node>().unwrap().height,
+        px(OUTLINER_COLLAPSED_HEIGHT)
+    );
+    assert_eq!(
+        app.world().entity(body).get::<Node>().unwrap().display,
+        Display::None
+    );
+
+    app.world_mut().trigger(Activate { entity: button });
+    app.update();
+    assert!(!app.world().resource::<OutlinerState>().collapsed);
+    assert_eq!(
+        app.world().entity(panel).get::<Node>().unwrap().height,
+        px(OUTLINER_HEIGHT)
+    );
+    assert_eq!(
+        app.world().entity(body).get::<Node>().unwrap().display,
+        Display::Flex
+    );
+}
+
+#[test]
+fn a_press_on_row_text_resolves_to_the_owning_row() {
+    use bevy::camera::NormalizedRenderTarget;
+    use bevy::picking::backend::HitData;
+    use bevy::picking::events::Pointer;
+    use bevy::picking::pointer::Location;
+
+    let mut app = App::new();
+    app.init_resource::<Editor>();
+    app.init_resource::<OutlinerState>();
+    app.init_resource::<OutlinerEdit>();
+    app.init_resource::<InputFocus>();
+    app.init_resource::<Orbit>();
+    app.world_mut()
+        .resource_mut::<Editor>()
+        .pieces
+        .push(test_piece(1));
+
+    let list = app.world_mut().spawn((OutlinerList, Node::default())).id();
+    let row = app
+        .world_mut()
+        .spawn((OutlinerRow(GraphNode::Piece(1)), ChildOf(list)))
+        .id();
+    // Bevy's UI picking targets the text node (or a text span), not the row,
+    // so the press must bubble up through the row and resolve there.
+    let text = app.world_mut().spawn(ChildOf(row)).id();
+    assert_eq!(
+        app.world()
+            .entity(text)
+            .get::<ChildOf>()
+            .map(|c| c.parent()),
+        Some(row)
+    );
+    assert_eq!(
+        app.world().entity(row).get::<ChildOf>().map(|c| c.parent()),
+        Some(list)
+    );
+    // In the app the observer lives on the list and receives the event after
+    // bubbling; attaching it to the text here exercises the same hit
+    // resolution without needing the full picking pipeline.
+    app.world_mut().entity_mut(text).observe(on_outliner_press);
+
+    app.world_mut().trigger(PointerPress {
+        entity: text,
+        pointer: Pointer::new(
+            PointerId::Mouse,
+            Location {
+                target: NormalizedRenderTarget::None {
+                    width: 100,
+                    height: 100,
+                },
+                position: Vec2::ZERO,
+            },
+        ),
+        button: PointerButton::Primary,
+        hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+        count: 1,
+    });
+
+    assert_eq!(
+        app.world().resource::<OutlinerState>().selection,
+        GraphNode::Piece(1)
+    );
+    assert_eq!(app.world().resource::<Editor>().selected, Some(1));
+}
+
+#[test]
+fn a_new_group_button_activation_creates_exactly_one_group() {
+    fn spawn_panel(mut commands: Commands) {
+        spawn_object_graph(&mut commands);
+    }
+
+    let mut app = App::new();
+    app.init_resource::<Editor>();
+    app.init_resource::<OutlinerState>();
+    app.init_resource::<OutlinerEdit>();
+    app.init_resource::<InputFocus>();
+    app.add_systems(Startup, spawn_panel);
+    app.update();
+
+    let button = {
+        let world = app.world_mut();
+        let mut query = world.query::<(&OutlinerActionButton, Entity)>();
+        query
+            .iter(world)
+            .find(|(action, _)| action.0 == OutlinerAction::NewGroup)
+            .map(|(_, entity)| entity)
+            .expect("New Group button")
+    };
+    app.world_mut().trigger(Activate { entity: button });
+
+    let editor = app.world().resource::<Editor>();
+    assert_eq!(editor.outline.groups.len(), 1);
+    assert_eq!(editor.note, "group added");
+    assert!(matches!(
+        app.world().resource::<OutlinerState>().selection,
+        GraphNode::Group(_)
+    ));
 }
