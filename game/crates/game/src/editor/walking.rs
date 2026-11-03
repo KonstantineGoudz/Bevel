@@ -1,6 +1,7 @@
 //! walking systems for the level editor.
 
 use super::*;
+use bevy_rapier3d::parry::query::ShapeCastOptions;
 
 // ---------------------------------------------------------------------------
 // Walking
@@ -198,15 +199,15 @@ pub(super) fn contact_gap(ray_distance: f32, normal_y: f32) -> f32 {
 /// the normal, so its lowest point sits that far above the surface point
 /// directly beneath its centre.
 fn ground_at(
-    spatial_query: &SpatialQuery,
-    filter: &SpatialQueryFilter,
+    rapier: &RapierContext,
+    filter: QueryFilter,
     at: Vec2,
     feet: f32,
 ) -> Option<(f32, f32)> {
     let origin_y = feet + STEP_UP + 0.06;
-    let hit = spatial_query.cast_ray(
-        Vec3::new(at.x, origin_y, at.y).real(),
-        Dir3::NEG_Y,
+    let (_, hit) = rapier.cast_ray_and_get_normal(
+        Vec3::new(at.x, origin_y, at.y),
+        Vec3::NEG_Y,
         STEP_UP + 1.6,
         true,
         filter,
@@ -214,7 +215,7 @@ fn ground_at(
     if hit.normal.y <= MIN_GROUND_NORMAL {
         return None;
     }
-    let raw = origin_y - hit.distance;
+    let raw = origin_y - hit.time_of_impact;
     let stand = raw + PILL_RADIUS * (1.0 / hit.normal.y - 1.0);
     Some((stand, hit.normal.y))
 }
@@ -226,8 +227,8 @@ fn ground_at(
 /// normal leans up, never head-on) are not. The hit doubles as the push
 /// record for dynamic bodies in the way.
 fn wall_hit(
-    spatial_query: &SpatialQuery,
-    filter: &SpatialQueryFilter,
+    rapier: &RapierContext,
+    filter: QueryFilter,
     pos: Vec2,
     feet: f32,
     dir: Vec2,
@@ -239,21 +240,20 @@ fn wall_hit(
         return None;
     }
     let dir = dir / len;
-    let Ok(dir3) = Dir3::new(Vec3::new(dir.x, 0.0, dir.y)) else {
-        return None;
-    };
+    let dir3 = Vec3::new(dir.x, 0.0, dir.y);
     let perp = Vec2::new(-dir.y, dir.x);
     for offset in [-PILL_RADIUS * 0.75, 0.0, PILL_RADIUS * 0.75] {
         let base = pos + perp * offset;
         let origin = Vec3::new(base.x, feet + STEP_UP + 0.05, base.y);
-        let Some(hit) = spatial_query.cast_ray(origin.real(), dir3, reach, true, filter) else {
+        let Some((entity, hit)) = rapier.cast_ray_and_get_normal(origin, dir3, reach, true, filter)
+        else {
             continue;
         };
         let facing = Vec2::new(hit.normal.x, hit.normal.z).dot(dir);
         if hit.normal.y < MIN_GROUND_NORMAL && facing < -0.05 {
             return Some(PushHit {
-                collider: hit.entity,
-                point: origin + Vec3::new(dir.x, 0.0, dir.y) * hit.distance,
+                collider: entity,
+                point: hit.point,
                 normal: hit.normal,
                 character_velocity: velocity,
             });
@@ -267,15 +267,10 @@ fn wall_hit(
 /// side geometry is already handled by the wall rays, and the capsule
 /// body legitimately grazes the terrain it stands on, so a full overlap
 /// test would refuse every slope approach.
-fn headroom_at(
-    spatial_query: &SpatialQuery,
-    filter: &SpatialQueryFilter,
-    at: Vec2,
-    stand: f32,
-) -> bool {
-    let origin = Vec3::new(at.x, stand + 0.05, at.y).real();
-    spatial_query
-        .cast_ray(origin, Dir3::Y, PILL_HALF * 2.0 - 0.1, true, filter)
+fn headroom_at(rapier: &RapierContext, filter: QueryFilter, at: Vec2, stand: f32) -> bool {
+    let origin = Vec3::new(at.x, stand + 0.05, at.y);
+    rapier
+        .cast_ray(origin, Vec3::Y, PILL_HALF * 2.0 - 0.1, true, filter)
         .is_none()
 }
 
@@ -295,8 +290,8 @@ struct Motion {
 /// it faster than the terrain under the destination rises.
 #[allow(clippy::too_many_arguments)]
 fn grounded_substep(
-    spatial_query: &SpatialQuery,
-    filter: &SpatialQueryFilter,
+    rapier: &RapierContext,
+    filter: QueryFilter,
     motion: &mut Motion,
     target: Vec2,
     dt: f32,
@@ -313,7 +308,7 @@ fn grounded_substep(
     if disp.length_squared() <= 1e-12 {
         // No wish travel: settle onto whatever is underfoot (a platform
         // may have carried the capsule) without drifting.
-        let ground = ground_at(spatial_query, filter, motion.pos, motion.feet)
+        let ground = ground_at(rapier, filter, motion.pos, motion.feet)
             .filter(|(stand, _)| (stand - motion.feet).abs() <= STEP_DOWN.max(STEP_UP));
         match ground {
             Some((stand, _)) => motion.feet = stand,
@@ -332,7 +327,7 @@ fn grounded_substep(
         let cand = motion.pos + step;
         let velocity = Vec3::new(motion.hv.x, 0.0, motion.hv.y);
         if let Some(hit) = wall_hit(
-            spatial_query,
+            rapier,
             filter,
             motion.pos,
             motion.feet,
@@ -346,7 +341,7 @@ fn grounded_substep(
             }
             continue;
         }
-        let Some((stand, normal_y)) = ground_at(spatial_query, filter, cand, motion.feet) else {
+        let Some((stand, normal_y)) = ground_at(rapier, filter, cand, motion.feet) else {
             // Nothing walkable below within reach: walked off the world.
             motion.pos = cand;
             motion.grounded = false;
@@ -361,7 +356,7 @@ fn grounded_substep(
             // past the capsule's centre, which bridges seams and cracks
             // (ramp ridge onto the next block) instead of dipping in.
             let ahead = cand + step.normalize_or_zero() * PILL_RADIUS;
-            let bridges = ground_at(spatial_query, filter, ahead, motion.feet)
+            let bridges = ground_at(rapier, filter, ahead, motion.feet)
                 .is_some_and(|(ahead_stand, _)| (ahead_stand - motion.feet).abs() <= STEP_UP);
             if bridges {
                 motion.pos = cand;
@@ -371,7 +366,7 @@ fn grounded_substep(
             motion.grounded = false;
             return step.length();
         }
-        if !headroom_at(spatial_query, filter, cand, stand) {
+        if !headroom_at(rapier, filter, cand, stand) {
             continue;
         }
         motion.pos = cand;
@@ -397,16 +392,75 @@ fn grounded_substep(
     0.0
 }
 
+/// How far a swept cast may fall short of contact while still counting as
+/// a touch, in metres. Keeps the gliding capsule a hair off the wall so the
+/// next substep does not start penetrating.
+const SLIDE_SKIN: f32 = 0.01;
+
+/// Sweep the capsule along `velocity * dt`, sliding on contact instead of
+/// stopping: each hit removes the into-surface component from the remaining
+/// travel and from the returned velocity, up to four slides. Returns the new
+/// centre, the projected velocity, and one push record per hit (for shoving
+/// dynamic bodies the way the old move-and-slide callback did).
+#[allow(clippy::too_many_arguments)]
+fn slide_move(
+    rapier: &RapierContext,
+    collider: &Collider,
+    mut pos: Vec3,
+    rot: Quat,
+    mut vel: Vec3,
+    dt: f32,
+    filter: QueryFilter,
+    pushes: &mut Vec<PushHit>,
+) -> (Vec3, Vec3) {
+    let mut remaining = vel * dt;
+    for _ in 0..4 {
+        let dist = remaining.length();
+        if dist < 1e-6 {
+            break;
+        }
+        let dir = remaining / dist;
+        let options = ShapeCastOptions::with_max_time_of_impact(dist);
+        let Some((entity, hit)) = rapier.cast_shape(pos, rot, dir, collider, options, filter)
+        else {
+            pos += remaining;
+            break;
+        };
+        // Scene queries report the hit collider in `details.normal1` /
+        // `witness1` (world space); without impact geometry there is
+        // nothing to slide on, so hold position for this substep.
+        let Some(details) = hit.details else {
+            break;
+        };
+        let travel = (hit.time_of_impact - SLIDE_SKIN).max(0.0);
+        pos += dir * travel;
+        let normal = details.normal1;
+        pushes.push(PushHit {
+            collider: entity,
+            point: details.witness1,
+            normal,
+            character_velocity: vel,
+        });
+        remaining -= normal * remaining.dot(normal).min(0.0);
+        vel -= normal * vel.dot(normal).min(0.0);
+        if remaining.length_squared() < 1e-10 {
+            break;
+        }
+    }
+    (pos, vel)
+}
+
 /// Advance the character one frame. Grounded motion is the sampled-terrain
-/// walk of [`grounded_substep`]; airborne motion keeps move-and-slide so
-/// jumps, falls and wall slides stay physical. Landing is resolved by the
-/// ground probe after the airborne steps, never by depenetration.
+/// walk of [`grounded_substep`]; airborne motion sweeps the capsule along
+/// its velocity and slides on contact so jumps, falls and wall slides stay
+/// physical. Landing is resolved by the ground probe after the airborne
+/// steps, never by depenetration.
 #[allow(clippy::too_many_arguments)]
 fn step_motion(
-    move_and_slide: &MoveAndSlide,
+    rapier: &RapierContext,
     collider: &Collider,
     rotation: Quat,
-    filter: &SpatialQueryFilter,
+    filter: QueryFilter,
     motion: &mut Motion,
     target: Vec2,
     wish_dir: Vec2,
@@ -417,7 +471,6 @@ fn step_motion(
     sliding: bool,
     frame: f32,
 ) -> (f32, Vec<PushHit>) {
-    let spatial_query = &move_and_slide.spatial_query;
     let steps = ((frame / (1.0 / 60.0)).ceil() as usize).clamp(1, 10);
     let step_dt = frame / steps as f32;
     let mut travelled = 0.0;
@@ -428,7 +481,7 @@ fn step_motion(
     if idle {
         motion.hv = Vec2::ZERO;
         motion.vy = 0.0;
-        let ground = ground_at(spatial_query, filter, motion.pos, motion.feet)
+        let ground = ground_at(rapier, filter, motion.pos, motion.feet)
             .filter(|(stand, _)| (stand - motion.feet).abs() <= STEP_DOWN.max(STEP_UP));
         match ground {
             Some((stand, _)) => {
@@ -449,7 +502,7 @@ fn step_motion(
     for _ in 0..steps {
         if motion.grounded {
             travelled += grounded_substep(
-                spatial_query,
+                rapier,
                 filter,
                 motion,
                 target,
@@ -469,29 +522,13 @@ fn step_motion(
             }
             let velocity = Vec3::new(motion.hv.x, motion.vy, motion.hv.y);
             let mut hits: Vec<PushHit> = Vec::new();
-            let output = move_and_slide.move_and_slide(
-                collider,
-                center.real(),
-                rotation,
-                velocity,
-                std::time::Duration::from_secs_f32(step_dt),
-                &MoveAndSlideConfig::default(),
-                filter,
-                |hit| {
-                    hits.push(PushHit {
-                        collider: hit.entity,
-                        point: hit.point.f32(),
-                        normal: **hit.normal,
-                        character_velocity: *hit.velocity,
-                    });
-                    MoveAndSlideHitResponse::Accept
-                },
+            let (next, projected) = slide_move(
+                rapier, collider, center, rotation, velocity, step_dt, filter, &mut hits,
             );
-            let next = output.position.f32();
             travelled += Vec2::new(next.x - center.x, next.z - center.z).length();
             center = next;
-            motion.vy = output.projected_velocity.y;
-            motion.hv = Vec2::new(output.projected_velocity.x, output.projected_velocity.z);
+            motion.vy = projected.y;
+            motion.hv = Vec2::new(projected.x, projected.z);
             pushes.append(&mut hits);
         }
     }
@@ -500,18 +537,18 @@ fn step_motion(
     if !motion.grounded {
         // Probe down from the capsule centre so a descent can follow the
         // slope for a short step instead of free-falling between frames.
-        let surface = spatial_query
-            .cast_ray(
-                Vec3::new(center.x, motion.feet + PILL_RADIUS, center.z).real(),
-                Dir3::NEG_Y,
+        let surface = rapier
+            .cast_ray_and_get_normal(
+                Vec3::new(center.x, motion.feet + PILL_RADIUS, center.z),
+                Vec3::NEG_Y,
                 PILL_RADIUS / MIN_GROUND_NORMAL + STEP_DOWN,
                 true,
                 filter,
             )
-            .filter(|hit| hit.normal.y > MIN_GROUND_NORMAL)
-            .map(|hit| {
+            .filter(|(_, hit)| hit.normal.y > MIN_GROUND_NORMAL)
+            .map(|(_, hit)| {
                 let uphill = Vec2::new(hit.normal.x, hit.normal.z).dot(wish_dir) < -0.05;
-                (contact_gap(hit.distance, hit.normal.y), uphill)
+                (contact_gap(hit.time_of_impact, hit.normal.y), uphill)
             });
         let (grounded, drop) = if motion.vy > MAX_GROUNDED_RISE {
             (false, None)
@@ -565,8 +602,8 @@ pub(super) fn push_impulse(
         return None;
     }
     // `normal` is the obstacle surface normal; the push direction is into the
-    // body. The double-negative form below matches Avian's kinematic example
-    // and pushes into the body whichever way the normal is oriented.
+    // body. The double-negative form below pushes into the body whichever
+    // way the normal is oriented.
     let touch_dir = -normal.normalize_or_zero();
     if touch_dir == Vec3::ZERO {
         return None;
@@ -581,11 +618,12 @@ pub(super) fn push_impulse(
 
 /// Resolve a hit collider to the rigid body that owns it. Piece colliders live
 /// on the body entity itself; child colliders (if any) point at it through
-/// `ColliderOf`.
-fn push_target(collider: Entity, collider_of: &Query<&ColliderOf>) -> Entity {
-    collider_of
+/// their `ChildOf` parent. Shared with the cone projectile, which shoves
+/// dynamic bodies the same way the capsule does.
+pub(super) fn push_target(collider: Entity, parents: &Query<&ChildOf>) -> Entity {
+    parents
         .get(collider)
-        .map(|of| of.body)
+        .map(|p| p.parent())
         .unwrap_or(collider)
 }
 
@@ -594,32 +632,38 @@ fn push_target(collider: Entity, collider_of: &Query<&ColliderOf>) -> Entity {
 /// inward speed so light props do not launch.
 fn apply_pushes(
     hits: &[PushHit],
-    collider_of: &Query<&ColliderOf>,
+    parents: &Query<&ChildOf>,
     rigid: &Query<&RigidBody>,
-    masses: &Query<&ComputedMass>,
-    bodies: &mut Query<Forces>,
+    bodies: &mut Query<
+        (
+            &mut ExternalImpulse,
+            &Velocity,
+            &ReadMassProperties,
+            &Transform,
+        ),
+        With<RigidBody>,
+    >,
 ) {
     for hit in hits {
-        let target = push_target(hit.collider, collider_of);
+        let target = push_target(hit.collider, parents);
         let Ok(body) = rigid.get(target) else {
             continue;
         };
-        if !body.is_dynamic() {
+        if *body != RigidBody::Dynamic {
             continue;
         }
-        let Ok(mass) = masses.get(target) else {
+        let Ok((mut impulse, velocity, props, transform)) = bodies.get_mut(target) else {
             continue;
         };
-        let Ok(mut forces) = bodies.get_mut(target) else {
-            continue;
-        };
-        let body_vel = forces.linear_velocity();
-        let Some(impulse) =
-            push_impulse(hit.normal, hit.character_velocity, body_vel, mass.value())
+        let mass = props.get().mass;
+        let com_world =
+            transform.translation + transform.rotation * props.get().local_center_of_mass;
+        let Some(push) = push_impulse(hit.normal, hit.character_velocity, velocity.linear, mass)
         else {
             continue;
         };
-        forces.apply_linear_impulse_at_point(impulse, hit.point.real());
+        impulse.impulse += push;
+        impulse.torque_impulse += (hit.point - com_world).cross(push);
     }
 }
 
@@ -635,12 +679,19 @@ pub(super) fn walk(
     mut orbit: ResMut<Orbit>,
     kit: Res<Kit>,
     player: Query<Entity, With<CharacterVisual>>,
-    move_and_slide: MoveAndSlide,
+    rapier: ReadRapierContext,
     focus: Res<InputFocus>,
-    collider_of: Query<&ColliderOf>,
+    parents: Query<&ChildOf>,
     rigid: Query<&RigidBody>,
-    masses: Query<&ComputedMass>,
-    mut bodies: Query<Forces>,
+    mut bodies: Query<
+        (
+            &mut ExternalImpulse,
+            &Velocity,
+            &ReadMassProperties,
+            &Transform,
+        ),
+        With<RigidBody>,
+    >,
     menu: Res<AddMenu>,
 ) {
     if focus.get().is_some() || menu.open {
@@ -692,7 +743,7 @@ pub(super) fn walk(
     // strafe a little.
     let direction = to_target.normalize_or_zero();
     let frame = time.delta_secs().clamp(0.0, 0.25);
-    let filter = SpatialQueryFilter::from_excluded_entities([entity]);
+    let filter = QueryFilter::default().exclude_rigid_body(entity);
     let rotation = Quat::from_rotation_y(character.yaw);
     let vy = jump_velocity(character.vy, character.grounded, jump);
     let mut hv = character.hv;
@@ -719,11 +770,14 @@ pub(super) fn walk(
         hv,
         grounded: character.grounded,
     };
+    let Ok(ctx) = rapier.single() else {
+        return;
+    };
     let (travelled, pushes) = step_motion(
-        &move_and_slide,
+        &ctx,
         &kit.character_collider,
         rotation,
-        &filter,
+        filter,
         &mut motion,
         direction * WALK_SPEED,
         direction,
@@ -734,7 +788,7 @@ pub(super) fn walk(
         sliding,
         frame,
     );
-    apply_pushes(&pushes, &collider_of, &rigid, &masses, &mut bodies);
+    apply_pushes(&pushes, &parents, &rigid, &mut bodies);
     let moved = motion.pos;
     let yaw = if direction.length_squared() > 0.01 {
         (-direction.x).atan2(-direction.y)
@@ -821,12 +875,19 @@ pub(super) fn character_move(
     mut touch: ResMut<TouchState>,
     kit: Res<Kit>,
     player: Query<Entity, With<CharacterVisual>>,
-    move_and_slide: MoveAndSlide,
+    rapier: ReadRapierContext,
     focus: Res<InputFocus>,
-    collider_of: Query<&ColliderOf>,
+    parents: Query<&ChildOf>,
     rigid: Query<&RigidBody>,
-    masses: Query<&ComputedMass>,
-    mut bodies: Query<Forces>,
+    mut bodies: Query<
+        (
+            &mut ExternalImpulse,
+            &Velocity,
+            &ReadMassProperties,
+            &Transform,
+        ),
+        With<RigidBody>,
+    >,
     menu: Res<AddMenu>,
 ) {
     if focus.get().is_some() || menu.open {
@@ -900,7 +961,7 @@ pub(super) fn character_move(
     let slide_held = input.pressed(Action::Slide) || touch.slide;
     let sliding = character.sliding && slide_held && !taking_off;
 
-    let filter = SpatialQueryFilter::from_excluded_entities([entity]);
+    let filter = QueryFilter::default().exclude_rigid_body(entity);
     let rotation = Quat::from_rotation_y(character.yaw);
 
     // Standing still on a slope should not slide: without friction the
@@ -917,11 +978,14 @@ pub(super) fn character_move(
         hv,
         grounded: grounded_entry,
     };
+    let Ok(ctx) = rapier.single() else {
+        return;
+    };
     let (_travelled, pushes) = step_motion(
-        &move_and_slide,
+        &ctx,
         &kit.character_collider,
         rotation,
-        &filter,
+        filter,
         &mut motion,
         target,
         direction,
@@ -932,7 +996,7 @@ pub(super) fn character_move(
         sliding,
         frame,
     );
-    apply_pushes(&pushes, &collider_of, &rigid, &masses, &mut bodies);
+    apply_pushes(&pushes, &parents, &rigid, &mut bodies);
 
     character.pos = motion.pos;
     character.feet = motion.feet;

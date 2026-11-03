@@ -443,7 +443,11 @@ fn copying_copies_platform_paths() {
 
     let json = level_json(&editor, &Orbit::default(), &movers);
     let doc: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-    let platforms = doc.get("platforms").expect("platforms key").as_array().unwrap();
+    let platforms = doc
+        .get("platforms")
+        .expect("platforms key")
+        .as_array()
+        .unwrap();
     assert_eq!(platforms.len(), 1, "{json}");
     let saved = &platforms[0];
     assert_eq!(saved.get("piece").unwrap(), 7);

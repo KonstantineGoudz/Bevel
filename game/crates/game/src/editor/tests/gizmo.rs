@@ -761,3 +761,33 @@ fn the_build_orbit_target_is_the_selected_piece_centre() {
     editor.selected = None;
     assert_eq!(selection_center(&editor), None);
 }
+
+#[test]
+fn actor_facing_matches_the_movement_convention() {
+    // Yaw zero faces -z, matching `forward` in the movement code; yaw -90
+    // degrees faces +x, the sprint-jump direction in the physics tests.
+    assert!((actor_facing(0.0) - Vec2::new(0.0, -1.0)).length() < 1e-6);
+    assert!((actor_facing(-std::f32::consts::FRAC_PI_2) - Vec2::X).length() < 1e-6);
+    assert!((actor_facing(std::f32::consts::PI) - Vec2::Y).length() < 1e-6);
+    assert!((actor_facing(1.0).length() - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn actor_arrow_runs_outward_from_the_ring_on_the_ground() {
+    let pos = Vec2::new(2.0, 3.0);
+    let (start, tip, head) = actor_arrow_geometry(pos, 0.5, -std::f32::consts::FRAC_PI_2);
+    let base = Vec3::new(2.0, 0.55, 3.0);
+    let dir = Vec3::X;
+    // Shaft starts at the ring edge and ends at the tip, both on the ground.
+    assert!((start - (base + dir * ACTOR_ARROW_INNER)).length() < 1e-5);
+    assert!((tip - (base + dir * ACTOR_ARROW_TIP)).length() < 1e-5);
+    assert!((start.y - 0.55).abs() < 1e-6 && (tip.y - 0.55).abs() < 1e-6);
+    // Diamond head: the tip is one vertex, the other two sit symmetric
+    // about the shaft, one head-length back and a half-width apart.
+    assert!((head[1] - tip).length() < 1e-6);
+    let back = (head[0] + head[2]) * 0.5;
+    assert!((back - (tip - dir * ACTOR_ARROW_HEAD_BACK)).length() < 1e-5);
+    assert!(((head[0] - head[2]).length() - 2.0 * ACTOR_ARROW_HEAD_SIDE).abs() < 1e-5);
+    let across = (head[0] - back).normalize_or_zero();
+    assert!(across.dot(dir).abs() < 1e-5, "head spans across the shaft");
+}

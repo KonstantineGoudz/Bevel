@@ -6,11 +6,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use avian3d::character_controller::prelude::{
-    MoveAndSlide, MoveAndSlideConfig, MoveAndSlideHitResponse,
-};
-use avian3d::math::{ToF32Precision, ToRealPrecision};
-use avian3d::prelude::*;
 use bevy::clipboard::Clipboard;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::input::touch::Touches;
@@ -24,6 +19,7 @@ use bevy::prelude::*;
 use bevy::shape::InfinitePlane3d;
 use bevy::ui_widgets::{Activate, Button};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
+use bevy_rapier3d::prelude::*;
 
 use crate::controls::{Action, ClusterButton, Controls, PlayerInput};
 use crate::locomotion::{LocomotionInput, LocomotionState};
@@ -161,6 +157,8 @@ impl Plugin for EditorPlugin {
                 Update,
                 (
                     resolve_platform_push,
+                    shoot_cone,
+                    advance_cones,
                     update_cursor,
                     sync_dynamic_pieces,
                     touch_gizmo_fallback,
@@ -521,6 +519,8 @@ struct TouchState {
     jump: bool,
     /// Set by the interact button, consumed by the interaction system.
     interact: bool,
+    /// Set by the shoot button, consumed by the cone-firing system.
+    shoot: bool,
     /// Toggled by the sprint cluster button; ORed with the Sprint action.
     sprint: bool,
     /// Toggled by the slide cluster button; ORed with the Slide action and
@@ -978,6 +978,9 @@ struct Kit {
     ghost: Handle<StandardMaterial>,
     pill: Handle<Mesh>,
     pill_mat: Handle<StandardMaterial>,
+    /// Projectile mesh, shared by every cone the actor fires.
+    cone: Handle<Mesh>,
+    cone_mat: Handle<StandardMaterial>,
     character_collider: Collider,
 }
 
@@ -1000,6 +1003,7 @@ mod properties;
 mod route;
 mod save;
 mod setup;
+mod shooting;
 mod touch;
 mod transform;
 mod visuals;
@@ -1024,6 +1028,7 @@ use properties::*;
 use route::*;
 use save::*;
 use setup::*;
+use shooting::*;
 use touch::*;
 use transform::*;
 use visuals::*;

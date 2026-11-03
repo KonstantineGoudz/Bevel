@@ -662,6 +662,7 @@
         { id: "sprint", label: "Sprint (hold)", group: "Play", context: "Play", defaults: [{ kind: "key", code: "ShiftLeft", shift: true }, { kind: "key", code: "ShiftRight", shift: true }] },
         { id: "slide", label: "Slide (hold)", group: "Play", context: "Play", defaults: [{ kind: "key", code: "ControlLeft", ctrl: true }, { kind: "key", code: "ControlRight", ctrl: true }] },
         { id: "interact", label: "Interact", group: "Play", context: "Play", defaults: [{ kind: "key", code: "KeyE" }, { kind: "pad", code: "East" }] },
+        { id: "shoot", label: "Shoot cone", group: "Play", context: "Play", defaults: [{ kind: "key", code: "KeyQ" }, { kind: "pad", code: "RightTrigger" }] },
         { id: "orbitDrag", label: "Orbit camera (drag)", group: "Camera", context: "Global", defaults: [{ kind: "mouse", code: "Right" }] },
         { id: "panDrag", label: "Pan camera (drag)", group: "Camera", context: "Global", defaults: [{ kind: "mouse", code: "Middle" }, { kind: "mouse", code: "Right", shift: true }] },
         { id: "cycleView", label: "Cycle camera view", group: "Camera", context: "Global", defaults: [{ kind: "key", code: "KeyV" }, { kind: "pad", code: "West" }] },
@@ -712,10 +713,11 @@
         { id: "sprint", label: "Run (sprint)" },
         { id: "slide", label: "Slide" },
         { id: "interact", label: "Interact" },
+        { id: "shoot", label: "Shoot cone" },
         { id: "none", label: "Disabled" },
       ];
-      const TOUCH_DEFAULTS = { A: "jump", B: "slide", X: "interact", Y: "sprint" };
-      const TOUCH_TARGET_IDS = new Set(["jump", "sprint", "slide", "interact"]);
+      const TOUCH_DEFAULTS = { A: "jump", B: "slide", X: "shoot", Y: "sprint" };
+      const TOUCH_TARGET_IDS = new Set(["jump", "sprint", "slide", "interact", "shoot"]);
 
       const controlsDialog = document.querySelector("#controls-dialog");
       const controlsList = document.querySelector("#controls-list");

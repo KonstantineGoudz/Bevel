@@ -958,6 +958,14 @@ pub(super) fn on_outliner_press(
             }
         }
         OutlinerHit::Empty => {
+            // Motion editing pins the path's piece: clearing or switching
+            // the selection mid-path would orphan the waypoints being laid.
+            if editor.actor_tool == Some(ActorTool::Platform) {
+                if focus.get().is_some() {
+                    focus.clear();
+                }
+                return;
+            }
             state.selection = GraphNode::Root;
             editor.selected = None;
             if focus.get().is_some() {
@@ -967,6 +975,13 @@ pub(super) fn on_outliner_press(
         OutlinerHit::Row(node) => {
             if focus.get().is_some() {
                 focus.clear();
+            }
+            // Same pin as Empty: while a motion path is being edited only
+            // its own piece stays selected; other rows cannot steal it.
+            if editor.actor_tool == Some(ActorTool::Platform)
+                && !matches!(node, GraphNode::Piece(id) if editor.selected == Some(id))
+            {
+                return;
             }
             state.selection = node;
             // Selecting in the graph is an object action: holster a shape

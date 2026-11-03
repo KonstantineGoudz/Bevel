@@ -7,10 +7,10 @@
 
 use std::collections::HashMap;
 
-use avian3d::collision::collider::contact_query::contact;
-
 use super::*;
 use crate::platforms::{self, PlatformMode, PlatformWaypoint};
+use bevy_rapier3d::parry::math::Pose;
+use bevy_rapier3d::parry::query::contact;
 
 /// Default travel speed, m/s.
 pub const DEFAULT_PLATFORM_SPEED: f32 = 1.5;
@@ -301,6 +301,15 @@ fn deck_height_at(shape: &model::Shape, piece: &Piece, at: Vec2) -> Option<f32> 
     }
 }
 
+/// Bevy pose as a Parry isometry for direct shape-vs-shape queries.
+pub(super) fn iso(pos: Vec3, rot: Quat) -> Pose {
+    Pose {
+        rotation: rot,
+        translation: pos,
+        ..Pose::identity()
+    }
+}
+
 /// True rider: deck-like contact normal, capsule over the deck footprint,
 /// feet on the surface. A rim clip or side brush fails the footprint or
 /// height test and shoves instead of carrying, so a platform can never
@@ -335,21 +344,21 @@ fn is_supported(
     piece: &Piece,
     shape: &model::Shape,
 ) -> bool {
+    // Parry contact points/normals come back in world space, so unlike the
+    // old Avian wrapper there is no local-space normal to rotate by hand.
     let Ok(Some(hit)) = contact(
-        capsule,
-        cap_pos.real(),
-        cap_rot,
-        platform,
-        plat_pos.real(),
-        plat_rot,
+        &iso(cap_pos, cap_rot),
+        capsule.as_shape(),
+        &iso(plat_pos, plat_rot),
+        platform.as_shape(),
         RIDE_SKIN,
     ) else {
         return false;
     };
-    if hit.penetration < -RIDE_SKIN {
+    if hit.dist > RIDE_SKIN {
         return false;
     }
-    let normal = plat_rot * hit.local_normal2;
+    let normal = hit.normal2;
     is_rider(pos, feet, piece, shape, normal.y)
 }
 
@@ -377,20 +386,21 @@ fn contact_push(
     shape: &model::Shape,
 ) -> Option<Vec3> {
     let Ok(Some(hit)) = contact(
-        capsule,
-        cap_pos.real(),
-        cap_rot,
-        platform,
-        plat_pos.real(),
-        plat_rot,
+        &iso(cap_pos, cap_rot),
+        capsule.as_shape(),
+        &iso(plat_pos, plat_rot),
+        platform.as_shape(),
         0.0,
     ) else {
         return None;
     };
-    if hit.penetration <= PUSH_EPSILON {
+    // Parry reports negative distance for penetration; the world-space
+    // platform normal needs no rotation.
+    let penetration = -hit.dist;
+    if penetration <= PUSH_EPSILON {
         return None;
     }
-    let normal = plat_rot * hit.local_normal2;
+    let normal = hit.normal2;
     if !normal.is_finite() || normal.length_squared() < 1e-6 {
         return None;
     }
@@ -402,7 +412,7 @@ fn contact_push(
         // True rider on the deck (or a ramp slope): carried, never shoved.
         return None;
     }
-    let distance = hit.penetration + PUSH_SKIN;
+    let distance = penetration + PUSH_SKIN;
     let offset = Vec2::new(cap_pos.x - plat_pos.x, cap_pos.z - plat_pos.z);
     let sideways = if offset.length_squared() > 1e-8 {
         offset.normalize_or_zero()

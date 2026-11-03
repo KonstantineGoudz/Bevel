@@ -1140,10 +1140,8 @@ pub(super) fn apply_property_edits(
     mut bodies: Query<
         (
             &mut Transform,
-            &mut Position,
-            &mut Rotation,
-            &mut LinearVelocity,
-            &mut AngularVelocity,
+            Option<&mut Velocity>,
+            Option<&mut ExternalImpulse>,
             Has<Sleeping>,
         ),
         With<PieceVisual>,
@@ -1206,19 +1204,20 @@ pub(super) fn apply_property_edits(
     let Some(&entity) = visuals.map.get(&piece.id) else {
         return;
     };
-    let Ok((mut transform, mut position, mut rotation, mut linear, mut angular, sleeping)) =
-        bodies.get_mut(entity)
-    else {
+    let Ok((mut transform, velocity, impulse, sleeping)) = bodies.get_mut(entity) else {
         return;
     };
     let pos = Vec3::new(piece.pos.x, piece.elevation, piece.pos.y);
     let rot = model::piece_quat(&piece);
     transform.translation = pos;
     transform.rotation = rot;
-    position.0 = pos.real();
-    rotation.0 = rot;
-    *linear = LinearVelocity::default();
-    *angular = AngularVelocity::default();
+    // Clear any residual motion so the teleported body starts at rest.
+    if let Some(mut velocity) = velocity {
+        *velocity = Velocity::zero();
+    }
+    if let Some(mut impulse) = impulse {
+        *impulse = ExternalImpulse::default();
+    }
     if sleeping {
         commands.entity(entity).remove::<Sleeping>();
     }

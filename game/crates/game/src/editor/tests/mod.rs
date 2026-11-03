@@ -8,6 +8,7 @@ mod panel;
 mod physics;
 mod route;
 mod save;
+mod shooting;
 mod state;
 mod touch;
 mod transform;
@@ -106,13 +107,9 @@ fn physics_app() -> App {
         MinimalPlugins,
         AssetPlugin::default(),
         TransformPlugin,
-        PhysicsPlugins::new(PostUpdate),
+        RapierPhysicsPlugin::<NoUserData>::default(),
     ));
     app.init_asset::<Mesh>();
-    app.init_resource::<SpatialQueryDiagnostics>();
-    app.init_resource::<avian3d::collider_tree::ColliderTreeDiagnostics>();
-    app.init_resource::<avian3d::collision::CollisionDiagnostics>();
-    app.init_resource::<avian3d::dynamics::solver::SolverDiagnostics>();
     app.init_resource::<ButtonInput<MouseButton>>();
     app.init_resource::<crate::controls::Controls>();
     app.insert_resource(Kit {
@@ -122,7 +119,10 @@ fn physics_app() -> App {
         ghost: Handle::default(),
         pill: Handle::default(),
         pill_mat: Handle::default(),
-        character_collider: Collider::capsule(PILL_RADIUS, PILL_CYLINDER),
+        cone: Handle::default(),
+        cone_mat: Handle::default(),
+        // Rapier takes half height first: capsule_y(half_height, radius).
+        character_collider: Collider::capsule_y(PILL_CYLINDER * 0.5, PILL_RADIUS),
     });
     app.init_resource::<Editor>();
     app.init_resource::<Orbit>();
@@ -130,9 +130,9 @@ fn physics_app() -> App {
     app.init_resource::<AddMenu>();
     app.init_resource::<ButtonInput<KeyCode>>();
     app.world_mut().spawn((
-        RigidBody::Static,
-        Collider::cuboid(20.0, 0.2, 20.0),
-        Position::from_xyz(0.0, -0.1, 0.0),
+        RigidBody::Fixed,
+        Collider::cuboid(10.0, 0.1, 10.0),
+        Transform::from_xyz(0.0, -0.1, 0.0),
     ));
     app.init_resource::<InputFocus>();
     app.world_mut().spawn(CharacterVisual);

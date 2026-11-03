@@ -17,7 +17,7 @@ pub(super) fn on_palette_activate(
     mut touch: ResMut<TouchState>,
     mut clipboard: ResMut<Clipboard>,
     nav: Res<Nav>,
-    spatial_query: SpatialQuery,
+    rapier: ReadRapierContext,
     player: Query<Entity, With<CharacterVisual>>,
     movers: Res<Movers>,
 ) {
@@ -32,7 +32,7 @@ pub(super) fn on_palette_activate(
     let filter = player
         .iter()
         .next()
-        .map(|entity| SpatialQueryFilter::from_excluded_entities([entity]))
+        .map(|entity| QueryFilter::default().exclude_rigid_body(entity))
         .unwrap_or_default();
     let now = time.elapsed_secs_f64();
     if let Some((last, at)) = editor.last_palette {
@@ -93,13 +93,16 @@ pub(super) fn on_palette_activate(
             }
         }
         PaletteAction::Walk => {
-            if editor.actor_tool == Some(ActorTool::Plan) {
-                walk_from_plan(&mut editor, &nav, &spatial_query, &filter);
+            if editor.actor_tool == Some(ActorTool::Plan)
+                && let Ok(rapier_ctx) = rapier.single()
+            {
+                walk_from_plan(&mut editor, &nav, &rapier_ctx, filter);
             }
         }
         PaletteAction::Smooth => {
             if editor.actor_tool == Some(ActorTool::Plan)
-                && smooth_plan(&mut editor, &nav, &spatial_query, &filter)
+                && let Ok(rapier_ctx) = rapier.single()
+                && smooth_plan(&mut editor, &nav, &rapier_ctx, filter)
             {
                 editor.note = "smoothed";
             }
@@ -115,7 +118,12 @@ pub(super) fn on_palette_activate(
             return;
         }
     }
-    editor.selected = None;
+    // Motion-path editing pins the piece selection; a camera-only action
+    // must not drop it mid-path. Every other palette action changes tools,
+    // modes or levels, so the clear below still applies to those.
+    if editor.actor_tool != Some(ActorTool::Platform) || !matches!(button.0, PaletteAction::View) {
+        editor.selected = None;
+    }
     editor.ghost = None;
     editor.ghost_rot = 0.0;
 }
@@ -139,7 +147,7 @@ pub(super) fn rebuild_nav(editor: Res<Editor>, mut nav: ResMut<Nav>) {
 pub(super) fn refresh_route(
     mut editor: ResMut<Editor>,
     nav: Res<Nav>,
-    spatial_query: SpatialQuery,
+    rapier: ReadRapierContext,
     player: Query<Entity, With<CharacterVisual>>,
 ) {
     // Mid-drag the pieces have not settled yet; wait for the release.
@@ -156,10 +164,13 @@ pub(super) fn refresh_route(
     let filter = player
         .iter()
         .next()
-        .map(|entity| SpatialQueryFilter::from_excluded_entities([entity]))
+        .map(|entity| QueryFilter::default().exclude_rigid_body(entity))
         .unwrap_or_default();
+    let Ok(rapier_ctx) = rapier.single() else {
+        return;
+    };
     let was_walking = editor.walk.is_some();
-    let ok = rebuild_route(&mut editor, &nav, &spatial_query, &filter, was_walking);
+    let ok = rebuild_route(&mut editor, &nav, &rapier_ctx, filter, was_walking);
     let (_, valid) = rebuild_walk_state(ok, was_walking);
     if let Some(route) = editor.route.as_mut() {
         route.valid = valid;
@@ -265,7 +276,7 @@ pub(super) fn interact(
     outliner: Res<OutlinerState>,
     panel_state: Res<PropertiesPanelState>,
     camera: Single<(&Camera, &Transform)>,
-    spatial_query: SpatialQuery,
+    rapier: ReadRapierContext,
     player: Query<Entity, With<CharacterVisual>>,
     input: PlayerInput,
     time: Res<Time>,
@@ -276,8 +287,11 @@ pub(super) fn interact(
     let surface_filter = player
         .iter()
         .next()
-        .map(|entity| SpatialQueryFilter::from_excluded_entities([entity]))
+        .map(|entity| QueryFilter::default().exclude_rigid_body(entity))
         .unwrap_or_default();
+    let Ok(rapier_ctx) = rapier.single() else {
+        return;
+    };
 
     // A focused property field owns the keyboard. The text widget handles its
     // own edits and shortcuts.
@@ -346,7 +360,7 @@ pub(super) fn interact(
     }
 
     if input.just_pressed(Action::WalkPlan) && editor.actor_tool == Some(ActorTool::Plan) {
-        walk_from_plan(&mut editor, &nav, &spatial_query, &surface_filter);
+        walk_from_plan(&mut editor, &nav, &rapier_ctx, surface_filter);
     }
 
     if !playing && input.just_pressed(Action::PlaceCharacter) {
@@ -380,7 +394,7 @@ pub(super) fn interact(
                     .as_ref()
                     .is_some_and(|plan| plan.selected.is_some());
             if waypoint_selected {
-                delete_waypoint(&mut editor, &nav, &spatial_query, &surface_filter);
+                delete_waypoint(&mut editor, &nav, &rapier_ctx, surface_filter);
             } else {
                 delete_piece(&mut editor);
             }
@@ -560,7 +574,7 @@ pub(super) fn interact(
 
     if editor.actor_tool == Some(ActorTool::Path) {
         if clicked && orbit.mode != ViewMode::First {
-            let (target, height) = surface_target(&cursor, &spatial_query, &surface_filter, world);
+            let (target, height) = surface_target(&cursor, &rapier_ctx, surface_filter, world);
             let cell = resolve_cell(&editor.pieces, target, height);
             let shift =
                 input.keys.pressed(KeyCode::ShiftLeft) || input.keys.pressed(KeyCode::ShiftRight);
@@ -573,8 +587,8 @@ pub(super) fn interact(
                 append,
                 true,
                 &nav,
-                &spatial_query,
-                &surface_filter,
+                &rapier_ctx,
+                surface_filter,
             );
             // A tap here is a waypoint, never a selection: drop any stale
             // highlight left over from placing the block.
@@ -592,7 +606,7 @@ pub(super) fn interact(
             return;
         }
         if clicked {
-            let (target, height) = surface_target(&cursor, &spatial_query, &surface_filter, world);
+            let (target, height) = surface_target(&cursor, &rapier_ctx, surface_filter, world);
             let cell = resolve_cell(&editor.pieces, target, height);
             let shift =
                 input.keys.pressed(KeyCode::ShiftLeft) || input.keys.pressed(KeyCode::ShiftRight);
@@ -606,8 +620,8 @@ pub(super) fn interact(
                 append,
                 start_walk,
                 &nav,
-                &spatial_query,
-                &surface_filter,
+                &rapier_ctx,
+                surface_filter,
             );
             editor.selected = None;
             editor.drag = None;
@@ -617,6 +631,20 @@ pub(super) fn interact(
 
     if editor.actor_tool == Some(ActorTool::Platform) {
         if clicked {
+            // A click on a waypoint or tangent handle selects it; it must
+            // not also lay down a new waypoint. The press observer usually
+            // records this first, but the click must stay a pure select
+            // even if the two ever disagree.
+            if select_mover_handle(
+                &mut editor,
+                &mut movers,
+                camera,
+                &camera_global,
+                screen,
+                touch.enabled,
+            ) {
+                return;
+            }
             let id = match editor.selected {
                 Some(id) if editor.pieces.iter().any(|p| p.id == id) => id,
                 _ => {
@@ -649,7 +677,7 @@ pub(super) fn interact(
         // only authorises a route through the Path/Plan tools above; a bare
         // click there is selection, so loading a course cannot start walking.
         if click_routes(playing, orbit.mode, editor.character.is_some()) {
-            let (target, height) = surface_target(&cursor, &spatial_query, &surface_filter, world);
+            let (target, height) = surface_target(&cursor, &rapier_ctx, surface_filter, world);
             let cell = resolve_cell(&editor.pieces, target, height);
             let shift =
                 input.keys.pressed(KeyCode::ShiftLeft) || input.keys.pressed(KeyCode::ShiftRight);
@@ -662,8 +690,8 @@ pub(super) fn interact(
                 append,
                 true,
                 &nav,
-                &spatial_query,
-                &surface_filter,
+                &rapier_ctx,
+                surface_filter,
             );
             editor.selected = None;
             editor.drag = None;

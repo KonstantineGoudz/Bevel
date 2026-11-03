@@ -530,6 +530,7 @@ pub(super) fn apply_touch_button(touch: &mut TouchState, action: Option<Action>)
     match action {
         Some(Action::Jump) => touch.jump = true,
         Some(Action::Interact) => touch.interact = true,
+        Some(Action::Shoot) => touch.shoot = true,
         Some(Action::Sprint) => touch.sprint = !touch.sprint,
         Some(Action::Slide) => touch.slide = !touch.slide,
         _ => {}
@@ -544,8 +545,8 @@ pub(super) fn run_touch_action(
     touch: &mut TouchState,
     clipboard: &mut Clipboard,
     nav: &Nav,
-    spatial_query: &SpatialQuery,
-    filter: &SpatialQueryFilter,
+    rapier: &RapierContext,
+    filter: QueryFilter,
     controls: &Controls,
     movers: &Movers,
 ) {
@@ -560,7 +561,7 @@ pub(super) fn run_touch_action(
                     .as_ref()
                     .is_some_and(|plan| plan.selected.is_some());
             if waypoint_selected {
-                delete_waypoint(editor, nav, spatial_query, filter);
+                delete_waypoint(editor, nav, rapier, filter);
             } else {
                 delete_piece(editor);
             }
@@ -600,12 +601,12 @@ pub(super) fn run_touch_action(
         TouchAction::Add => touch.append = !touch.append,
         TouchAction::Walk => {
             if editor.actor_tool == Some(ActorTool::Plan) {
-                walk_from_plan(editor, nav, spatial_query, filter);
+                walk_from_plan(editor, nav, rapier, filter);
             }
         }
         TouchAction::Smooth => {
             if editor.actor_tool == Some(ActorTool::Plan)
-                && smooth_plan(editor, nav, spatial_query, filter)
+                && smooth_plan(editor, nav, rapier, filter)
             {
                 editor.note = "smoothed";
             }
@@ -934,7 +935,7 @@ pub(super) fn path_drag(
     capture: Res<PointerCapture>,
     camera: Single<(&Camera, &Transform)>,
     nav: Res<Nav>,
-    spatial_query: SpatialQuery,
+    rapier: ReadRapierContext,
     player: Query<Entity, With<CharacterVisual>>,
     menu: Res<AddMenu>,
 ) {
@@ -972,8 +973,11 @@ pub(super) fn path_drag(
     let filter = player
         .iter()
         .next()
-        .map(|entity| SpatialQueryFilter::from_excluded_entities([entity]))
+        .map(|entity| QueryFilter::default().exclude_rigid_body(entity))
         .unwrap_or_default();
+    let Ok(rapier_ctx) = rapier.single() else {
+        return;
+    };
     apply_path_drag(
         &mut editor,
         drag,
@@ -981,8 +985,8 @@ pub(super) fn path_drag(
         camera,
         &global,
         &nav,
-        &spatial_query,
-        &filter,
+        &rapier_ctx,
+        filter,
     );
 }
 
@@ -996,7 +1000,7 @@ pub(super) fn on_touch_button(
     mut touch: ResMut<TouchState>,
     mut clipboard: ResMut<Clipboard>,
     nav: Res<Nav>,
-    spatial_query: SpatialQuery,
+    rapier: ReadRapierContext,
     player: Query<Entity, With<CharacterVisual>>,
     mut menu: ResMut<AddMenu>,
     mut focus: ResMut<InputFocus>,
@@ -1014,7 +1018,7 @@ pub(super) fn on_touch_button(
     let filter = player
         .iter()
         .next()
-        .map(|entity| SpatialQueryFilter::from_excluded_entities([entity]))
+        .map(|entity| QueryFilter::default().exclude_rigid_body(entity))
         .unwrap_or_default();
     let now = time.elapsed_secs_f64();
     // A touch often synthesizes a mouse click too, which would fire this
@@ -1056,6 +1060,9 @@ pub(super) fn on_touch_button(
     if !object_editing_allowed(editor.mode) && touch_is_authoring(button.0) {
         return;
     }
+    let Ok(rapier_ctx) = rapier.single() else {
+        return;
+    };
     run_touch_action(
         button.0,
         &mut editor,
@@ -1063,8 +1070,8 @@ pub(super) fn on_touch_button(
         &mut touch,
         &mut clipboard,
         &nav,
-        &spatial_query,
-        &filter,
+        &rapier_ctx,
+        filter,
         &controls,
         &movers,
     );

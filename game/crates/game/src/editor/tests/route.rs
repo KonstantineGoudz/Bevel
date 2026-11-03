@@ -259,3 +259,149 @@ fn the_route_line_smooths_the_step_onto_a_block() {
     assert!((smoothed[2] - 0.675).abs() < 1e-4);
     assert!((smoothed[3] - 0.9).abs() < 1e-4);
 }
+
+/// Headless camera + viewport math (no renderer needed), mirroring the
+/// touch gizmo tests: projection and viewport are consistent, which is all
+/// the hit test needs.
+fn viewport_camera(app: &mut App) {
+    use bevy::camera::{RenderTargetInfo, Viewport};
+
+    let eye = Vec3::new(6.0, 7.0, 6.0);
+    let cam_transform = Transform::from_translation(eye).looking_at(Vec3::ZERO, Vec3::Y);
+    let mut camera = Camera::default();
+    camera.viewport = Some(Viewport {
+        physical_position: UVec2::ZERO,
+        physical_size: UVec2::new(800, 600),
+        depth: 0.0..1.0,
+    });
+    camera.computed.clip_from_view =
+        Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, 800.0 / 600.0, 0.1, 100.0);
+    camera.computed.target_info = Some(RenderTargetInfo {
+        physical_size: UVec2::new(800, 600),
+        scale_factor: 1.0,
+    });
+    app.world_mut()
+        .spawn((camera, Camera3d::default(), cam_transform));
+}
+
+fn viewport_of(app: &mut App, point: Vec3) -> Vec2 {
+    let world = app.world_mut();
+    let mut query = world.query::<(&Camera, &Transform)>();
+    let (camera, transform) = query.single(&*world).expect("camera");
+    let global = GlobalTransform::from(*transform);
+    camera
+        .world_to_viewport(&global, point)
+        .expect("point on screen")
+}
+
+#[derive(Resource)]
+struct MoverClick {
+    screen: Vec2,
+    hit: bool,
+}
+
+fn probe_select_mover(
+    mut editor: ResMut<Editor>,
+    mut movers: ResMut<Movers>,
+    camera: Single<(&Camera, &Transform)>,
+    mut probe: ResMut<MoverClick>,
+) {
+    let (camera, transform) = *camera;
+    let global = GlobalTransform::from(*transform);
+    probe.hit = select_mover_handle(
+        &mut editor,
+        &mut movers,
+        camera,
+        &global,
+        probe.screen,
+        false,
+    );
+}
+
+fn mover_click_hit(app: &mut App, screen: Vec2) -> bool {
+    app.insert_resource(MoverClick { screen, hit: false });
+    app.world_mut()
+        .run_system_once(probe_select_mover)
+        .expect("probe");
+    app.world().resource::<MoverClick>().hit
+}
+
+#[test]
+fn a_selected_waypoints_gizmo_shafts_grab_like_the_dot() {
+    let mut app = App::new();
+    app.init_resource::<Editor>();
+    app.init_resource::<Movers>();
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.pieces.push(test_piece(7));
+        editor.selected = Some(7);
+        editor.actor_tool = Some(ActorTool::Platform);
+    }
+    {
+        let mut movers = app.world_mut().resource_mut::<Movers>();
+        let mover = movers.mover_mut(7, Vec2::ZERO);
+        mover
+            .waypoints
+            .push(crate::platforms::PlatformWaypoint::new(Vec2::X * 4.0));
+        mover.rebuild();
+        mover.selected = Some(0);
+    }
+    viewport_camera(&mut app);
+
+    let y = 0.06;
+    let dot_screen = viewport_of(&mut app, Vec3::new(0.0, y, 0.0));
+    // Well out on the +X shaft, far past the dot's own hit radius.
+    let shaft_screen = viewport_of(&mut app, Vec3::new(MOVER_GIZMO_REACH * 0.9, y, 0.0));
+    assert!(
+        shaft_screen.distance(dot_screen) > 10.0,
+        "the probe must be outside the dot hit so only the shaft can match"
+    );
+
+    let world = app.world_mut();
+    let mut camera_q = world.query::<&Camera>();
+    let mut transform_q = world.query::<&Transform>();
+    let hit = mover_handle_at(
+        world.resource::<Editor>(),
+        world.resource::<Movers>(),
+        camera_q.single(world).expect("camera"),
+        &GlobalTransform::from(*transform_q.single(world).expect("transform")),
+        shaft_screen,
+        10.0,
+    );
+    assert_eq!(
+        hit,
+        Some(PathHandle::Waypoint(0)),
+        "the selected waypoint's gizmo shaft grabs like its dot"
+    );
+    drop(world);
+
+    // Click-to-select records the waypoint instead of appending. Dots are
+    // always live, so an unselected waypoint is picked up by its dot...
+    app.world_mut()
+        .resource_mut::<Movers>()
+        .map
+        .get_mut(&7)
+        .expect("mover")
+        .selected = None;
+    assert!(mover_click_hit(&mut app, dot_screen));
+    assert_eq!(
+        app.world()
+            .resource::<Movers>()
+            .map
+            .get(&7)
+            .expect("mover")
+            .selected,
+        Some(0)
+    );
+    // ...while the shafts only grab once selected, so unselected waypoints
+    // never gain phantom handles from a neighbour's gizmo.
+    app.world_mut()
+        .resource_mut::<Movers>()
+        .map
+        .get_mut(&7)
+        .expect("mover")
+        .selected = None;
+    assert!(!mover_click_hit(&mut app, shaft_screen));
+    // Empty space selects nothing and must not append.
+    assert!(!mover_click_hit(&mut app, Vec2::new(5.0, 5.0)));
+}

@@ -288,7 +288,9 @@ fn visuals_system_has_disjoint_queries() {
         ghost: Handle::default(),
         pill: Handle::default(),
         pill_mat: Handle::default(),
-        character_collider: Collider::cuboid(1.0, 1.0, 1.0),
+        cone: Handle::default(),
+        cone_mat: Handle::default(),
+        character_collider: Collider::cuboid(0.5, 0.5, 0.5),
     });
     app.add_systems(Update, sync_visuals);
     app.update();
@@ -681,4 +683,81 @@ fn clicking_a_lock_badge_toggles_lock_without_selecting() {
         count: 1,
     });
     assert!(!app.world().resource::<Editor>().outline.is_locked(1));
+}
+
+#[test]
+fn motion_editing_pins_the_paths_piece_in_the_outliner() {
+    use bevy::camera::NormalizedRenderTarget;
+    use bevy::picking::backend::HitData;
+    use bevy::picking::events::{Pointer, PointerPress};
+    use bevy::picking::pointer::Location;
+
+    let mut app = App::new();
+    app.init_resource::<Editor>();
+    app.init_resource::<OutlinerState>();
+    app.init_resource::<OutlinerEdit>();
+    app.init_resource::<InputFocus>();
+    app.init_resource::<Orbit>();
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.pieces.push(test_piece(1));
+        editor.pieces.push(test_piece(2));
+        // Editing piece 1's motion path: the Motion tool is armed.
+        editor.selected = Some(1);
+        editor.actor_tool = Some(ActorTool::Platform);
+    }
+
+    let list = app.world_mut().spawn((OutlinerList, Node::default())).id();
+    let mut row = |id| {
+        app.world_mut()
+            .spawn((OutlinerRow(GraphNode::Piece(id)), ChildOf(list)))
+            .id()
+    };
+    let _row1 = row(1);
+    let row2 = row(2);
+    let text = app.world_mut().spawn(ChildOf(row2)).id();
+    app.world_mut().entity_mut(text).observe(on_outliner_press);
+
+    let press = || PointerPress {
+        entity: text,
+        pointer: Pointer::new(
+            PointerId::Mouse,
+            Location {
+                target: NormalizedRenderTarget::None {
+                    width: 100,
+                    height: 100,
+                },
+                position: Vec2::ZERO,
+            },
+        ),
+        button: PointerButton::Primary,
+        hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+        count: 1,
+    };
+
+    // A click on another object's row must not steal the path's piece.
+    app.world_mut().trigger(press());
+    assert_eq!(
+        app.world().resource::<Editor>().selected,
+        Some(1),
+        "the motion path keeps its piece"
+    );
+    // The frame sync derives the highlight from the pinned selection.
+    app.world_mut()
+        .run_system_once(sync_outliner_selection)
+        .expect("sync");
+    assert_eq!(
+        app.world().resource::<OutlinerState>().selection,
+        GraphNode::Piece(1),
+        "the highlight follows the pinned piece"
+    );
+
+    // Without the Motion tool the same click selects normally.
+    app.world_mut().resource_mut::<Editor>().actor_tool = None;
+    app.world_mut().trigger(press());
+    assert_eq!(app.world().resource::<Editor>().selected, Some(2));
+    assert_eq!(
+        app.world().resource::<OutlinerState>().selection,
+        GraphNode::Piece(2)
+    );
 }

@@ -25,10 +25,14 @@ pub(super) fn piece_collider(shape: &model::Shape) -> Option<Collider> {
         return Collider::convex_hull(&points);
     }
 
+    // Rapier takes half extents with some argument orders flipped
+    // (cylinder/cone/capsule put the height first).
     let body = match &shape.geom {
-        model::Geometry::Bar { len, thick } => Collider::cuboid(*len, height, *thick),
-        model::Geometry::Rect { w, h } => Collider::cuboid(*w, height, *h),
-        model::Geometry::Circle { r } => Collider::cylinder(*r, height),
+        model::Geometry::Bar { len, thick } => {
+            Collider::cuboid(len * 0.5, height * 0.5, thick * 0.5)
+        }
+        model::Geometry::Rect { w, h } => Collider::cuboid(w * 0.5, height * 0.5, h * 0.5),
+        model::Geometry::Circle { r } => Collider::cylinder(height * 0.5, *r),
         model::Geometry::Hex { .. } | model::Geometry::Diamond { .. } => {
             let outline = model::shape_points(shape);
             let mut hull = Vec::with_capacity(outline.len() * 2);
@@ -44,16 +48,16 @@ pub(super) fn piece_collider(shape: &model::Shape) -> Option<Collider> {
             let outline = model::shape_points(shape);
             let (low, high) = outline_bounds(&outline);
             Collider::cuboid(
-                (high.x - low.x).max(0.05),
-                height,
-                (high.y - low.y).max(0.05),
+                (high.x - low.x).max(0.05) * 0.5,
+                height * 0.5,
+                (high.y - low.y).max(0.05) * 0.5,
             )
         }
     };
 
     Some(Collider::compound(vec![(
-        Position(Vec3::new(0.0, mid, 0.0).real()),
-        Rotation::default(),
+        Vec3::new(0.0, mid, 0.0),
+        Quat::default(),
         body,
     )]))
 }

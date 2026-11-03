@@ -116,9 +116,10 @@ pub(super) fn setup(
 
     // Invisible floor under the whole grid: the character always has something
     // to stand on, so walking off a tile does not drop it into the void.
+    // Half extents: 160 x 0.2 x 160 m.
     commands.spawn((
-        RigidBody::Static,
-        Collider::cuboid(160.0, 0.2, 160.0),
+        RigidBody::Fixed,
+        Collider::cuboid(80.0, 0.1, 80.0),
         Transform::from_xyz(0.0, -0.1, 0.0),
     ));
     // Solid geometry: one mesh set per catalogue entry.
@@ -168,6 +169,15 @@ pub(super) fn setup(
         metallic: 0.0,
         ..default()
     });
+    // The projectile: one small cone mesh pointed along +Y, so a shot only
+    // needs a rotation that maps +Y onto its flight direction.
+    let cone = meshes.add(Cone::new(CONE_RADIUS, CONE_LENGTH));
+    let cone_mat = materials.add(StandardMaterial {
+        base_color: CONE_COLOR,
+        emissive: CONE_COLOR.to_linear() * 2.0,
+        perceptual_roughness: 0.4,
+        ..default()
+    });
     commands.insert_resource(Kit {
         parts,
         mats,
@@ -175,7 +185,10 @@ pub(super) fn setup(
         ghost,
         pill,
         pill_mat,
-        character_collider: Collider::capsule(PILL_RADIUS, PILL_CYLINDER),
+        cone,
+        cone_mat,
+        // `capsule_y` takes the half height first, radius second.
+        character_collider: Collider::capsule_y(PILL_CYLINDER * 0.5, PILL_RADIUS),
     });
 
     let panel = commands

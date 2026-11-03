@@ -94,12 +94,13 @@ impl ClusterButton {
     }
 
     /// Factory default action. A jumps, B slides (the future crouch), X
-    /// interacts, Y runs (sprints).
+    /// fires a cone, Y runs (sprints). Interact keeps its Play-toolbar "Use"
+    /// button, so remapping X costs no functionality.
     pub fn default_action(self) -> Action {
         match self {
             Self::A => Action::Jump,
             Self::B => Action::Slide,
-            Self::X => Action::Interact,
+            Self::X => Action::Shoot,
             Self::Y => Action::Sprint,
         }
     }
@@ -109,9 +110,13 @@ impl ClusterButton {
 /// disables the button.
 pub fn parse_touch_target(id: &str) -> Option<Action> {
     match Action::parse(id) {
-        Some(action @ (Action::Jump | Action::Sprint | Action::Slide | Action::Interact)) => {
-            Some(action)
-        }
+        Some(
+            action @ (Action::Jump
+            | Action::Sprint
+            | Action::Slide
+            | Action::Interact
+            | Action::Shoot),
+        ) => Some(action),
         _ => None,
     }
 }
@@ -129,6 +134,8 @@ pub enum Action {
     Sprint,
     Slide,
     Interact,
+    /// Fire a cone along the actor's facing.
+    Shoot,
     // -- Camera (both modes) -------------------------------------------------
     OrbitDrag,
     PanDrag,
@@ -182,6 +189,7 @@ impl Action {
         Action::Sprint,
         Action::Slide,
         Action::Interact,
+        Action::Shoot,
         Action::OrbitDrag,
         Action::PanDrag,
         Action::CycleView,
@@ -227,6 +235,7 @@ impl Action {
             Self::Sprint => "sprint",
             Self::Slide => "slide",
             Self::Interact => "interact",
+            Self::Shoot => "shoot",
             Self::OrbitDrag => "orbitDrag",
             Self::PanDrag => "panDrag",
             Self::CycleView => "cycleView",
@@ -279,6 +288,7 @@ impl Action {
             Self::Sprint => "Sprint (hold)",
             Self::Slide => "Slide (hold)",
             Self::Interact => "Interact",
+            Self::Shoot => "Shoot cone",
             Self::OrbitDrag => "Orbit camera (drag)",
             Self::PanDrag => "Pan camera (drag)",
             Self::CycleView => "Cycle camera view",
@@ -325,6 +335,7 @@ impl Action {
             | Self::Sprint
             | Self::Slide
             | Self::Interact
+            | Self::Shoot
             | Self::WalkPlan => "Play",
             Self::OrbitDrag
             | Self::PanDrag
@@ -364,7 +375,8 @@ impl Action {
             | Self::Jump
             | Self::Sprint
             | Self::Slide
-            | Self::Interact => ActionContext::Play,
+            | Self::Interact
+            | Self::Shoot => ActionContext::Play,
             Self::OrbitDrag
             | Self::PanDrag
             | Self::CycleView
@@ -660,6 +672,10 @@ impl Controls {
                 ],
             ),
             (A::Interact, &[key(KeyCode::KeyE), pad(GamepadButton::East)]),
+            (
+                A::Shoot,
+                &[key(KeyCode::KeyQ), pad(GamepadButton::RightTrigger)],
+            ),
             (A::OrbitDrag, &[mouse(MouseButton::Right)]),
             (
                 A::PanDrag,
@@ -1353,7 +1369,8 @@ mod tests {
         assert_eq!(controls.touch_action(ClusterButton::B), Some(Action::Slide));
         assert_eq!(
             controls.touch_action(ClusterButton::X),
-            Some(Action::Interact)
+            Some(Action::Shoot),
+            "the X pad button fires a cone on phones"
         );
         assert_eq!(
             controls.touch_action(ClusterButton::Y),

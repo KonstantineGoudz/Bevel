@@ -183,6 +183,12 @@ pub(super) fn draw(
                 waypoint_colour,
             );
             gizmos.sphere(Isometry3d::new(at, Quat::IDENTITY), 0.05, waypoint_colour);
+            // The selected waypoint gets a ground-plane move gizmo, the
+            // same X/Z arrows the piece gizmo draws. Its shafts are live
+            // handles: `mover_handle_at` grabs them like the dot.
+            if selected_waypoint {
+                mover_waypoint_gizmo(&mut gizmos, at);
+            }
             // Tangent handles for the selected piece's path, like the plan.
             if editor.selected == Some(piece.id) {
                 for control in [waypoint.incoming, waypoint.outgoing].into_iter().flatten() {
@@ -205,6 +211,7 @@ pub(super) fn draw(
             0.44,
             PILL_COLOR,
         );
+        actor_arrow(&mut gizmos, character);
     }
 }
 

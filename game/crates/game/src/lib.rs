@@ -1,10 +1,10 @@
 //! Party Dungeon — top-down 3D multiplayer party crawler.
 
-use avian3d::prelude::PhysicsPlugins;
 use bevy::asset::AssetApp;
 use bevy::asset::io::AssetSourceBuilder;
 use bevy::asset::io::memory::{Dir, MemoryAssetReader};
 use bevy::prelude::*;
+use bevy_rapier3d::prelude::{NoUserData, RapierPhysicsPlugin};
 
 pub mod controls;
 mod controls_codes;
@@ -69,7 +69,7 @@ pub fn main() {
         // The glTF viewer needs no physics and no editor state.
         app.add_plugins(viewer::ViewerPlugin);
     } else {
-        app.add_plugins((PhysicsPlugins::default(), GamePlugin));
+        app.add_plugins((RapierPhysicsPlugin::<NoUserData>::default(), GamePlugin));
     }
     app.run();
 }

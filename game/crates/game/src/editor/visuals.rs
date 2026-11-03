@@ -29,16 +29,20 @@ pub(super) fn spawn_piece(
     if !ghost {
         let shape = &shapes()[piece.shape];
         if let Some(collider) = piece_collider(shape) {
-            root.insert((
-                if piece.dynamic {
-                    RigidBody::Dynamic
-                } else {
-                    RigidBody::Static
-                },
-                collider,
-                Position(transform.translation.real()),
-                Rotation(transform.rotation),
-            ));
+            // Rapier reads Transform directly, so only the body + collider
+            // are inserted here. Dynamic bodies also get velocity and
+            // impulse components up front: the shove systems write through
+            // them and Rapier never auto-inserts them.
+            if piece.dynamic {
+                root.insert((
+                    RigidBody::Dynamic,
+                    collider,
+                    Velocity::zero(),
+                    ExternalImpulse::default(),
+                ));
+            } else {
+                root.insert((RigidBody::Fixed, collider));
+            }
         }
     }
     let root = root.id();
@@ -106,19 +110,8 @@ pub(super) fn sync_visuals(
     orbit: Res<Orbit>,
     kit: Res<Kit>,
     mut visuals: ResMut<Visuals>,
-    mut transforms: Query<
-        (&mut Transform, Option<&mut Position>, Option<&mut Rotation>),
-        Or<(With<PieceVisual>, With<CharacterVisual>)>,
-    >,
-    mut bodies: Query<
-        (
-            &RigidBody,
-            Has<Sleeping>,
-            Option<&mut LinearVelocity>,
-            Option<&mut AngularVelocity>,
-        ),
-        With<PieceVisual>,
-    >,
+    mut transforms: Query<&mut Transform, Or<(With<PieceVisual>, With<CharacterVisual>)>>,
+    mut bodies: Query<(&RigidBody, Has<Sleeping>, Option<&mut Velocity>), With<PieceVisual>>,
     mut visibilities: Query<&mut Visibility, With<CharacterVisual>>,
     mut piece_visibilities: Query<&mut Visibility, (With<PieceVisual>, Without<CharacterVisual>)>,
     mut materials: Option<ResMut<Assets<StandardMaterial>>>,
@@ -145,17 +138,21 @@ pub(super) fn sync_visuals(
                 let wanted = if piece.dynamic {
                     RigidBody::Dynamic
                 } else {
-                    RigidBody::Static
+                    RigidBody::Fixed
                 };
-                if let Ok((body, sleeping, linear, angular)) = bodies.get_mut(entity)
+                if let Ok((body, sleeping, velocity)) = bodies.get_mut(entity)
                     && *body != wanted
                 {
                     commands.entity(entity).insert(wanted);
-                    if let Some(mut linear) = linear {
-                        *linear = LinearVelocity::default();
+                    if wanted == RigidBody::Dynamic {
+                        // A freshly dynamic body needs the impulse plumbing
+                        // the shove systems write through.
+                        commands
+                            .entity(entity)
+                            .insert((Velocity::zero(), ExternalImpulse::default()));
                     }
-                    if let Some(mut angular) = angular {
-                        *angular = AngularVelocity::default();
+                    if let Some(mut velocity) = velocity {
+                        *velocity = Velocity::zero();
                     }
                     if sleeping {
                         commands.entity(entity).remove::<Sleeping>();
@@ -173,7 +170,7 @@ pub(super) fn sync_visuals(
                 }
                 // Parametric trigger scaling: keep in sync when size changes.
                 // Dynamic pieces also need scale updates (though triggers are never dynamic due to no collider).
-                if let Ok((mut transform, _, _)) = transforms.get_mut(entity) {
+                if let Ok(mut transform) = transforms.get_mut(entity) {
                     if let Some(shape) = shapes().get(piece.shape)
                         && shape.is_trigger
                     {
@@ -220,15 +217,9 @@ pub(super) fn sync_visuals(
                 }
                 let pos = Vec3::new(piece.pos.x, piece.elevation, piece.pos.y);
                 let rot = model::piece_quat(piece);
-                if let Ok((mut transform, position, rotation)) = transforms.get_mut(entity) {
+                if let Ok(mut transform) = transforms.get_mut(entity) {
                     transform.translation = pos;
                     transform.rotation = rot;
-                    if let Some(mut position) = position {
-                        position.0 = pos.real();
-                    }
-                    if let Some(mut rotation) = rotation {
-                        rotation.0 = rot;
-                    }
                 }
             }
             None => {
@@ -258,7 +249,7 @@ pub(super) fn sync_visuals(
         };
         match visuals.map.get(&0) {
             Some(&entity) => {
-                if let Ok((mut transform, _, _)) = transforms.get_mut(entity) {
+                if let Ok(mut transform) = transforms.get_mut(entity) {
                     transform.translation = Vec3::new(piece.pos.x, 0.0, piece.pos.y);
                     transform.rotation = model::piece_quat(&piece);
                     if let Some(shape) = shapes().get(piece.shape)
@@ -291,13 +282,14 @@ pub(super) fn sync_visuals(
                 let entity = commands
                     .spawn((
                         CharacterVisual,
-                        RigidBody::Kinematic,
+                        // Rapier drives kinematic bodies from Transform, so
+                        // the position-based variant matches the old Kinematic
+                        // (which we move by hand, never by physics forces).
+                        RigidBody::KinematicPositionBased,
                         kit.character_collider.clone(),
                         Mesh3d(kit.pill.clone()),
                         MeshMaterial3d(kit.pill_mat.clone()),
                         transform,
-                        Position(transform.translation.real()),
-                        Rotation(transform.rotation),
                     ))
                     .id();
                 visuals.character = Some(entity);
@@ -305,16 +297,10 @@ pub(super) fn sync_visuals(
             }
         };
         let (pos, rot, scale) = character_pose(character);
-        if let Ok((mut transform, position, rotation)) = transforms.get_mut(entity) {
+        if let Ok(mut transform) = transforms.get_mut(entity) {
             transform.translation = pos;
             transform.rotation = rot;
             transform.scale = scale;
-            if let Some(mut position) = position {
-                position.0 = pos.real();
-            }
-            if let Some(mut rotation) = rotation {
-                rotation.0 = rot;
-            }
         }
         if let Ok(mut visibility) = visibilities.get_mut(entity) {
             *visibility = if orbit.mode == ViewMode::First {

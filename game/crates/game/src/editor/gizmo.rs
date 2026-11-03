@@ -527,6 +527,70 @@ pub(super) fn closed(gizmos: &mut Gizmos, points: &[Vec3], colour: Color) {
     );
 }
 
+/// Reach of a motion-path waypoint's move gizmo, in metres. Fixed (a
+/// waypoint has no bounding box to size against), big enough to grab.
+/// Axes and diamond heads use the same fractions as the piece gizmo.
+pub(super) const MOVER_GIZMO_REACH: f32 = 1.1;
+
+/// Move gizmo for the selected motion-path waypoint: ground-plane X/Z
+/// shafts running both ways from the point with outward diamond heads, the
+/// same method as the piece transform gizmo. No Y shaft: waypoints live on
+/// the ground plane and only ever move in it.
+pub(super) fn mover_waypoint_gizmo(gizmos: &mut Gizmos, at: Vec3) {
+    for (dir, colour) in [(Vec3::X, GIZMO_X), (Vec3::Z, GIZMO_Z)] {
+        gizmos.line(
+            at - dir * MOVER_GIZMO_REACH,
+            at + dir * MOVER_GIZMO_REACH,
+            colour,
+        );
+        for (end, outward) in [
+            (at + dir * MOVER_GIZMO_REACH, dir),
+            (at - dir * MOVER_GIZMO_REACH, -dir),
+        ] {
+            let back = end - outward * (MOVER_GIZMO_REACH * GIZMO_ARROW_BACK);
+            let side = Vec3::new(dir.z, 0.0, dir.x) * (MOVER_GIZMO_REACH * GIZMO_ARROW_SIDE);
+            closed(gizmos, &[back + side, end, back - side], colour);
+        }
+    }
+}
+
+/// Actor facing arrow: a ground-level shaft running outward from the
+/// character ring edge, tipped with the same diamond head as the transform
+/// gizmo arrows. All sizes in metres.
+pub(super) const ACTOR_ARROW_INNER: f32 = 0.44;
+pub(super) const ACTOR_ARROW_TIP: f32 = 1.24;
+pub(super) const ACTOR_ARROW_HEAD_BACK: f32 = 0.2;
+pub(super) const ACTOR_ARROW_HEAD_SIDE: f32 = 0.1;
+
+/// Unit facing direction for an actor yaw, on the ground plane. Matches the
+/// movement code's convention (`yaw = atan2(-dx, -dy)`), so the arrow agrees
+/// with where the capsule actually walks.
+pub(super) fn actor_facing(yaw: f32) -> Vec2 {
+    Vec2::new(-yaw.sin(), -yaw.cos())
+}
+
+/// Shaft endpoints and diamond-head triangle of the actor facing arrow, in
+/// world space on the ground plane under the capsule. Pure so tests can pin
+/// the facing math without a window.
+pub(super) fn actor_arrow_geometry(pos: Vec2, feet: f32, yaw: f32) -> (Vec3, Vec3, [Vec3; 3]) {
+    let facing = actor_facing(yaw);
+    let base = Vec3::new(pos.x, feet + 0.05, pos.y);
+    let dir = Vec3::new(facing.x, 0.0, facing.y);
+    let start = base + dir * ACTOR_ARROW_INNER;
+    let tip = base + dir * ACTOR_ARROW_TIP;
+    let back = tip - dir * ACTOR_ARROW_HEAD_BACK;
+    let side = Vec3::new(-facing.y, 0.0, facing.x) * ACTOR_ARROW_HEAD_SIDE;
+    (start, tip, [back + side, tip, back - side])
+}
+
+/// Draw the actor facing arrow the same way the transform gizmo draws its
+/// arrows: a shaft line plus a closed diamond head, in the actor's colour.
+pub(super) fn actor_arrow(gizmos: &mut Gizmos, character: Character) {
+    let (start, tip, head) = actor_arrow_geometry(character.pos, character.feet, character.yaw);
+    gizmos.line(start, tip, PILL_COLOR);
+    closed(gizmos, &head, PILL_COLOR);
+}
+
 pub(super) fn selection_box(gizmos: &mut Gizmos, piece: &Piece, shape: &model::Shape) {
     let points = model::shape_points(shape);
     let root = Vec3::new(piece.pos.x, piece.elevation, piece.pos.y);

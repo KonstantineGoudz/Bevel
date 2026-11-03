@@ -4,40 +4,36 @@ use super::*;
 
 pub(super) fn surface_target(
     cursor: &Cursor,
-    spatial_query: &SpatialQuery,
-    filter: &SpatialQueryFilter,
+    rapier: &RapierContext,
+    filter: QueryFilter,
     fallback: Vec2,
 ) -> (Vec2, f32) {
     cursor
         .ray
         .and_then(|ray| {
-            spatial_query
-                .cast_ray(ray.origin.real(), ray.direction, 80.0, true, filter)
-                .map(|hit| ray.get_point(hit.distance))
+            rapier
+                .cast_ray_and_get_normal(ray.origin, ray.direction.into(), 80.0, true, filter)
+                .map(|(_, hit)| hit.point)
         })
         .map(|point| (Vec2::new(point.x, point.z), point.y))
         .unwrap_or((fallback, 0.0))
 }
 
 /// Height of the walkable surface under `at`, ignoring walls' vertical faces.
-pub(super) fn surface_height(
-    spatial_query: &SpatialQuery,
-    filter: &SpatialQueryFilter,
-    at: Vec2,
-) -> Option<f32> {
+pub(super) fn surface_height(rapier: &RapierContext, filter: QueryFilter, at: Vec2) -> Option<f32> {
     let origin = Vec3::new(at.x, 8.0, at.y);
-    spatial_query
-        .cast_ray(origin.real(), Dir3::NEG_Y, 16.0, true, filter)
-        .filter(|hit| hit.normal.y > 0.3)
-        .map(|hit| origin.y - hit.distance)
+    rapier
+        .cast_ray_and_get_normal(origin, Vec3::NEG_Y, 16.0, true, filter)
+        .filter(|(_, hit)| hit.normal.y > 0.3)
+        .map(|(_, hit)| origin.y - hit.time_of_impact)
 }
 
 /// Lift the flat track onto the geometry it crosses, so the drawn curve climbs
 /// a ramp and sits on a block top instead of running along the floor below.
 pub(super) fn route_line(
     track: &path::Track,
-    spatial_query: &SpatialQuery,
-    filter: &SpatialQueryFilter,
+    rapier: &RapierContext,
+    filter: QueryFilter,
     start_height: f32,
 ) -> Vec<Vec3> {
     let points = track.points();
@@ -47,7 +43,7 @@ pub(super) fn route_line(
 
     let heights = lift_heights(
         points.iter().copied(),
-        |point| surface_height(spatial_query, filter, point),
+        |point| surface_height(rapier, filter, point),
         start_height,
     );
     let smoothed = smooth_heights(&heights);
@@ -326,7 +322,63 @@ pub(super) fn mover_handle_at(
             );
         }
     }
+    // The borrow of `best` through `consider` ends with its last call above.
+    // The selected waypoint carries a move gizmo (drawn by
+    // `mover_waypoint_gizmo`): its X/Z shafts grab like the handle itself,
+    // so the point can be dragged by the arrows, not just the dot. Same
+    // screen-space segment test as the piece gizmo axes.
+    if let Some(selected) = mover.selected
+        && let Some(waypoint) = mover.waypoints.get(selected)
+    {
+        let id = selected as u32;
+        let at = Vec3::new(waypoint.pos.x, y, waypoint.pos.y);
+        for axis in [Vec3::X, Vec3::Z] {
+            let (Ok(a), Ok(b)) = (
+                camera.world_to_viewport(camera_transform, at - axis * MOVER_GIZMO_REACH),
+                camera.world_to_viewport(camera_transform, at + axis * MOVER_GIZMO_REACH),
+            ) else {
+                continue;
+            };
+            if point_segment_distance(screen, a, b) < radius {
+                let distance = screen.distance((a + b) * 0.5);
+                if best.is_none_or(|(best_distance, _)| distance < best_distance) {
+                    best = Some((distance, PathHandle::Waypoint(id)));
+                }
+            }
+        }
+    }
     best.map(|(_, handle)| handle)
+}
+
+/// Select the motion-path handle under a click, if any. Returns true when a
+/// handle was hit (and recorded on the mover), so the click must not also
+/// append a waypoint. Keeps tap-to-select working even if the press
+/// observer and the click system ever disagree about ordering.
+pub(super) fn select_mover_handle(
+    editor: &mut Editor,
+    movers: &mut Movers,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    screen: Vec2,
+    touch: bool,
+) -> bool {
+    let radius = if touch { 24.0 } else { 10.0 };
+    let Some(handle) = mover_handle_at(editor, movers, camera, camera_transform, screen, radius)
+    else {
+        return false;
+    };
+    let index = match handle {
+        PathHandle::Waypoint(id) => id as usize,
+        PathHandle::Tangent { waypoint, .. } => waypoint as usize,
+    };
+    let Some(id) = editor.selected else {
+        return false;
+    };
+    if let Some(mover) = movers.map.get_mut(&id) {
+        mover.selected = Some(index);
+        return true;
+    }
+    false
 }
 
 /// Which waypoint/tangent handle is under a screen point.
@@ -369,8 +421,8 @@ pub(super) fn apply_path_drag(
     camera: &Camera,
     camera_transform: &GlobalTransform,
     nav: &Nav,
-    spatial_query: &SpatialQuery,
-    filter: &SpatialQueryFilter,
+    rapier: &RapierContext,
+    filter: QueryFilter,
 ) -> bool {
     let Some(ray) = camera.viewport_to_world(camera_transform, screen).ok() else {
         return false;
@@ -378,9 +430,9 @@ pub(super) fn apply_path_drag(
 
     match drag.handle {
         PathHandle::Waypoint(id) => {
-            let hit = spatial_query
-                .cast_ray(ray.origin.real(), ray.direction, 80.0, true, filter)
-                .map(|hit| ray.get_point(hit.distance))
+            let hit = rapier
+                .cast_ray_and_get_normal(ray.origin, ray.direction.into(), 80.0, true, filter)
+                .map(|(_, hit)| hit.point)
                 .or_else(|| {
                     ray.plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))
                 });
@@ -390,7 +442,7 @@ pub(super) fn apply_path_drag(
             let pos = Vec2::new(point.x, point.z);
             let height = point.y;
             let cell = resolve_cell(&editor.pieces, pos, height);
-            set_waypoint(editor, id, pos, cell, height, nav, spatial_query, filter)
+            set_waypoint(editor, id, pos, cell, height, nav, rapier, filter)
         }
         PathHandle::Tangent { waypoint, side } => {
             let Some(point) =
@@ -404,7 +456,7 @@ pub(super) fn apply_path_drag(
                 side,
                 Vec2::new(point.x, point.z),
                 nav,
-                spatial_query,
+                rapier,
                 filter,
             )
         }
@@ -418,8 +470,8 @@ pub(super) fn set_tangent(
     side: TangentSide,
     control: Vec2,
     nav: &Nav,
-    spatial_query: &SpatialQuery,
-    filter: &SpatialQueryFilter,
+    rapier: &RapierContext,
+    filter: QueryFilter,
 ) -> bool {
     let old_plan = editor.plan.clone();
     let old_route = editor.route.clone();
@@ -462,7 +514,7 @@ pub(super) fn set_tangent(
         }
     }
 
-    let ok = rebuild_route(editor, nav, spatial_query, filter, live);
+    let ok = rebuild_route(editor, nav, rapier, filter, live);
     if !ok {
         editor.plan = old_plan;
         editor.route = old_route;
@@ -503,8 +555,8 @@ pub(super) fn set_waypoint(
     cell: path::Hex,
     height: f32,
     nav: &Nav,
-    spatial_query: &SpatialQuery,
-    filter: &SpatialQueryFilter,
+    rapier: &RapierContext,
+    filter: QueryFilter,
 ) -> bool {
     let old_plan = editor.plan.clone();
     let old_route = editor.route.clone();
@@ -523,7 +575,7 @@ pub(super) fn set_waypoint(
         waypoint.height = height;
     }
 
-    let ok = rebuild_route(editor, nav, spatial_query, filter, live);
+    let ok = rebuild_route(editor, nav, rapier, filter, live);
     if !ok {
         editor.plan = old_plan;
         editor.route = old_route;
@@ -536,8 +588,8 @@ pub(super) fn set_waypoint(
 pub(super) fn delete_waypoint(
     editor: &mut Editor,
     nav: &Nav,
-    spatial_query: &SpatialQuery,
-    filter: &SpatialQueryFilter,
+    rapier: &RapierContext,
+    filter: QueryFilter,
 ) -> bool {
     let old_plan = editor.plan.clone();
     let old_route = editor.route.clone();
@@ -558,7 +610,7 @@ pub(super) fn delete_waypoint(
     }
 
     let live = old_walk.is_some();
-    let ok = rebuild_route(editor, nav, spatial_query, filter, live);
+    let ok = rebuild_route(editor, nav, rapier, filter, live);
     if !ok {
         editor.plan = old_plan;
         editor.route = old_route;
@@ -581,8 +633,8 @@ pub(super) fn rebuild_walk_state(valid: bool, was_walking: bool) -> (bool, bool)
 pub(super) fn walk_from_plan(
     editor: &mut Editor,
     nav: &Nav,
-    spatial_query: &SpatialQuery,
-    filter: &SpatialQueryFilter,
+    rapier: &RapierContext,
+    filter: QueryFilter,
 ) -> bool {
     if !walk_enabled(
         editor.plan.as_ref(),
@@ -591,7 +643,7 @@ pub(super) fn walk_from_plan(
     ) {
         return false;
     }
-    if !rebuild_route(editor, nav, spatial_query, filter, false) {
+    if !rebuild_route(editor, nav, rapier, filter, false) {
         return false;
     }
     editor.walk = Some(Walk {
@@ -620,8 +672,8 @@ pub(super) fn clear_tangents(plan: &mut Plan) -> usize {
 pub(super) fn smooth_plan(
     editor: &mut Editor,
     nav: &Nav,
-    spatial_query: &SpatialQuery,
-    filter: &SpatialQueryFilter,
+    rapier: &RapierContext,
+    filter: QueryFilter,
 ) -> bool {
     let old_plan = editor.plan.clone();
     let old_route = editor.route.clone();
@@ -631,7 +683,7 @@ pub(super) fn smooth_plan(
         return false;
     };
     clear_tangents(plan);
-    let ok = rebuild_route(editor, nav, spatial_query, filter, live);
+    let ok = rebuild_route(editor, nav, rapier, filter, live);
     if !ok {
         editor.plan = old_plan;
         editor.route = old_route;
@@ -645,8 +697,8 @@ pub(super) fn smooth_plan(
 pub(super) fn rebuild_route(
     editor: &mut Editor,
     nav: &Nav,
-    spatial_query: &SpatialQuery,
-    filter: &SpatialQueryFilter,
+    rapier: &RapierContext,
+    filter: QueryFilter,
     live: bool,
 ) -> bool {
     let Some(character) = editor.character else {
@@ -672,7 +724,7 @@ pub(super) fn rebuild_route(
         return false;
     };
 
-    let new_line = route_line(&route_plan.track, spatial_query, filter, height);
+    let new_line = route_line(&route_plan.track, rapier, filter, height);
     let (trail, line) = if live {
         if let Some(old) = editor.route.as_ref() {
             (
@@ -714,8 +766,8 @@ pub(super) fn add_waypoint(
     append: bool,
     start_walk: bool,
     nav: &Nav,
-    spatial_query: &SpatialQuery,
-    filter: &SpatialQueryFilter,
+    rapier: &RapierContext,
+    filter: QueryFilter,
 ) -> bool {
     if editor.character.is_none() {
         editor.note = "place a character first (C)";
@@ -735,7 +787,7 @@ pub(super) fn add_waypoint(
     }
 
     editor.plan = Some(plan.clone());
-    let ok = rebuild_route(editor, nav, spatial_query, filter, live);
+    let ok = rebuild_route(editor, nav, rapier, filter, live);
     editor.plan = choose_plan(old_plan, Some(plan), ok);
     if !ok {
         editor.route = old_route;

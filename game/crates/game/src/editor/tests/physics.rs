@@ -677,10 +677,9 @@ fn riding_setup(app: &mut App) {
     // Static world geometry matching the platform's start pose.
     let block = &shapes()[model::shape_index("block").unwrap()];
     app.world_mut().spawn((
-        RigidBody::Static,
+        RigidBody::Fixed,
         piece_collider(block).unwrap(),
-        Position::from_xyz(0.0, 0.0, 0.0),
-        Rotation::default(),
+        Transform::from_xyz(0.0, 0.0, 0.0),
     ));
     app.update();
     app.update();
@@ -815,17 +814,20 @@ fn landing_on_a_moving_platform_does_not_stack_speed() {
 
 /// True Parry contact check: no tracked platform may penetrate the capsule
 /// beyond a hair. Uses the real collider shapes, so this fails exactly when
-/// the player would see overlap.
+/// the player would see overlap. Same Parry contact the movers use, so the
+/// helper and the game can never disagree about what "overlap" means.
 fn assert_platforms_clear(app: &App, context: &str) {
-    use avian3d::collision::collider::contact_query::contact;
-    use avian3d::math::ToRealPrecision as _;
+    use bevy_rapier3d::parry::query::contact;
+
     let world = app.world();
     let editor = world.resource::<Editor>();
     let movers = world.resource::<Movers>();
     let kit = world.resource::<Kit>();
     let character = editor.character.expect("character");
-    let cap_pos = Vec3::new(character.pos.x, character.feet + PILL_HALF, character.pos.y);
-    let cap_rot = Quat::from_rotation_y(character.yaw);
+    let cap_iso = super::super::movers::iso(
+        Vec3::new(character.pos.x, character.feet + PILL_HALF, character.pos.y),
+        Quat::from_rotation_y(character.yaw),
+    );
     for piece in &editor.pieces {
         let Some(mover) = movers.map.get(&piece.id) else {
             continue;
@@ -837,23 +839,23 @@ fn assert_platforms_clear(app: &App, context: &str) {
         let Some(platform) = piece_collider(shape) else {
             continue;
         };
-        let plat_pos = Vec3::new(piece.pos.x, piece.elevation, piece.pos.y);
-        let plat_rot = model::piece_quat(piece);
+        let plat_iso = super::super::movers::iso(
+            Vec3::new(piece.pos.x, piece.elevation, piece.pos.y),
+            model::piece_quat(piece),
+        );
         let hit = contact(
-            &kit.character_collider,
-            cap_pos.real(),
-            cap_rot,
-            &platform,
-            plat_pos.real(),
-            plat_rot,
+            &cap_iso,
+            kit.character_collider.as_shape(),
+            &plat_iso,
+            platform.as_shape(),
             0.0,
         )
         .expect("contact query");
         if let Some(hit) = hit {
             assert!(
-                hit.penetration <= 0.002,
+                -hit.dist <= 0.002,
                 "{context}: penetration {:.3}: char={:?} piece={:?}",
-                hit.penetration,
+                -hit.dist,
                 character.pos,
                 piece.pos,
             );
@@ -914,10 +916,9 @@ fn a_capsule_pushed_off_a_block_falls_while_idle() {
     // A fixed block for the capsule to stand on.
     let block = model::shape_index("block").unwrap();
     app.world_mut().spawn((
-        RigidBody::Static,
+        RigidBody::Fixed,
         piece_collider(&shapes()[block]).unwrap(),
-        Position::from_xyz(0.0, 0.0, 0.0),
-        Rotation::default(),
+        Transform::from_xyz(0.0, 0.0, 0.0),
     ));
 
     // A tall pillar sweeping through the capsule's body: a pure side push, not
@@ -1088,17 +1089,19 @@ fn walking_off_a_tile_mounts_the_next_ramp() {
     let ramp = &shapes()[model::shape_index("ramp").unwrap()];
     // Tile centred on the origin; its vertical edge sits near x = 1.04.
     app.world_mut().spawn((
-        RigidBody::Static,
+        RigidBody::Fixed,
         piece_collider(floor).unwrap(),
-        Position::from_xyz(0.0, 0.0, 0.0),
-        Rotation::default(),
+        Transform::from_xyz(0.0, 0.0, 0.0),
     ));
     // Ramp low edge flush with the tile edge, rising along +x.
     app.world_mut().spawn((
-        RigidBody::Static,
+        RigidBody::Fixed,
         piece_collider(ramp).unwrap(),
-        Position::from_xyz(2.04, 0.0, 0.0),
-        Rotation(Quat::from_rotation_y(-std::f32::consts::PI * 1.5)),
+        Transform {
+            translation: Vec3::new(2.04, 0.0, 0.0),
+            rotation: Quat::from_rotation_y(-std::f32::consts::PI * 1.5),
+            ..default()
+        },
     ));
     app.update();
     app.update();
@@ -1160,10 +1163,13 @@ fn a_standing_start_does_not_teleport_onto_a_ramp() {
         let shape = &shapes()[piece.shape];
         let rot = model::piece_quat(piece);
         app.world_mut().spawn((
-            RigidBody::Static,
+            RigidBody::Fixed,
             piece_collider(shape).unwrap(),
-            Position::from_xyz(piece.pos.x, piece.elevation, piece.pos.y),
-            Rotation(rot),
+            Transform {
+                translation: Vec3::new(piece.pos.x, piece.elevation, piece.pos.y),
+                rotation: rot,
+                ..default()
+            },
         ));
     }
     app.update();
@@ -1214,10 +1220,13 @@ fn ramp_only_app() -> App {
     let mut app = physics_app();
     let ramp = &shapes()[model::shape_index("ramp").unwrap()];
     app.world_mut().spawn((
-        RigidBody::Static,
+        RigidBody::Fixed,
         piece_collider(ramp).unwrap(),
-        Position::from_xyz(2.0, 0.0, 0.0),
-        Rotation(Quat::from_rotation_y(-std::f32::consts::PI * 1.5)),
+        Transform {
+            translation: Vec3::new(2.0, 0.0, 0.0),
+            rotation: Quat::from_rotation_y(-std::f32::consts::PI * 1.5),
+            ..default()
+        },
     ));
     app.update();
     app.update();
@@ -1400,16 +1409,18 @@ fn walking_up_a_ramp_steps_onto_the_next_block() {
     let ramp_pos = model::hex_center(1, 0);
     let block_pos = model::hex_center(2, 0);
     app.world_mut().spawn((
-        RigidBody::Static,
+        RigidBody::Fixed,
         piece_collider(ramp).unwrap(),
-        Position::from_xyz(ramp_pos.x, 0.0, ramp_pos.y),
-        Rotation(Quat::from_rotation_y(-std::f32::consts::PI * 1.5)),
+        Transform {
+            translation: Vec3::new(ramp_pos.x, 0.0, ramp_pos.y),
+            rotation: Quat::from_rotation_y(-std::f32::consts::PI * 1.5),
+            ..default()
+        },
     ));
     app.world_mut().spawn((
-        RigidBody::Static,
+        RigidBody::Fixed,
         piece_collider(block).unwrap(),
-        Position::from_xyz(block_pos.x, 0.0, block_pos.y),
-        Rotation::default(),
+        Transform::from_xyz(block_pos.x, 0.0, block_pos.y),
     ));
     app.update();
     app.update();
@@ -1488,10 +1499,13 @@ fn route_walk_crosses_the_full_course_without_pops() {
             (0.0, Quat::default())
         };
         app.world_mut().spawn((
-            RigidBody::Static,
+            RigidBody::Fixed,
             piece_collider(shape).unwrap(),
-            Position::from_xyz(pos.x, y, pos.y),
-            Rotation(rot),
+            Transform {
+                translation: Vec3::new(pos.x, y, pos.y),
+                rotation: rot,
+                ..default()
+            },
         ));
     }
     app.update();
@@ -1574,17 +1588,19 @@ fn walking_off_a_block_mounts_the_ramp_on_it() {
     let ramp = &shapes()[model::shape_index("ramp").unwrap()];
     // Block top at y = 0.9, spanning x in [-0.9, 0.9].
     app.world_mut().spawn((
-        RigidBody::Static,
+        RigidBody::Fixed,
         piece_collider(block).unwrap(),
-        Position::from_xyz(0.0, 0.0, 0.0),
-        Rotation::default(),
+        Transform::from_xyz(0.0, 0.0, 0.0),
     ));
     // Ramp resting on the block, low edge flush with the block edge.
     app.world_mut().spawn((
-        RigidBody::Static,
+        RigidBody::Fixed,
         piece_collider(ramp).unwrap(),
-        Position::from_xyz(1.9, 0.9, 0.0),
-        Rotation(Quat::from_rotation_y(-std::f32::consts::PI * 1.5)),
+        Transform {
+            translation: Vec3::new(1.9, 0.9, 0.0),
+            rotation: Quat::from_rotation_y(-std::f32::consts::PI * 1.5),
+            ..default()
+        },
     ));
     app.update();
     app.update();
@@ -1639,10 +1655,13 @@ fn a_small_lip_at_the_ramp_base_is_stepped_over() {
         let mut app = physics_app();
         let ramp = &shapes()[model::shape_index("ramp").unwrap()];
         app.world_mut().spawn((
-            RigidBody::Static,
+            RigidBody::Fixed,
             piece_collider(ramp).unwrap(),
-            Position::from_xyz(2.0, lift, 0.0),
-            Rotation(Quat::from_rotation_y(-std::f32::consts::PI * 1.5)),
+            Transform {
+                translation: Vec3::new(2.0, lift, 0.0),
+                rotation: Quat::from_rotation_y(-std::f32::consts::PI * 1.5),
+                ..default()
+            },
         ));
         app.update();
         app.update();
@@ -1703,16 +1722,18 @@ fn step_up_refuses_a_destination_inside_the_next_block() {
     // Ramp lip at x = 1.0, floating 0.3 above the floor; block face at x = 1.2
     // so the step destination overlaps the block.
     app.world_mut().spawn((
-        RigidBody::Static,
+        RigidBody::Fixed,
         piece_collider(ramp).unwrap(),
-        Position::from_xyz(2.0, 0.3, 0.0),
-        Rotation(Quat::from_rotation_y(-std::f32::consts::PI * 1.5)),
+        Transform {
+            translation: Vec3::new(2.0, 0.3, 0.0),
+            rotation: Quat::from_rotation_y(-std::f32::consts::PI * 1.5),
+            ..default()
+        },
     ));
     app.world_mut().spawn((
-        RigidBody::Static,
+        RigidBody::Fixed,
         piece_collider(block).unwrap(),
-        Position::from_xyz(2.1, 0.0, 0.0),
-        Rotation::default(),
+        Transform::from_xyz(2.1, 0.0, 0.0),
     ));
     app.update();
     app.update();
@@ -1775,10 +1796,13 @@ fn a_tall_lip_still_blocks() {
     let mut app = physics_app();
     let ramp = &shapes()[model::shape_index("ramp").unwrap()];
     app.world_mut().spawn((
-        RigidBody::Static,
+        RigidBody::Fixed,
         piece_collider(ramp).unwrap(),
-        Position::from_xyz(2.0, 0.6, 0.0),
-        Rotation(Quat::from_rotation_y(-std::f32::consts::PI * 1.5)),
+        Transform {
+            translation: Vec3::new(2.0, 0.6, 0.0),
+            rotation: Quat::from_rotation_y(-std::f32::consts::PI * 1.5),
+            ..default()
+        },
     ));
     app.update();
     app.update();
@@ -1828,10 +1852,13 @@ fn route_following_mounts_a_lipped_ramp() {
     let mut app = physics_app();
     let ramp = &shapes()[model::shape_index("ramp").unwrap()];
     app.world_mut().spawn((
-        RigidBody::Static,
+        RigidBody::Fixed,
         piece_collider(ramp).unwrap(),
-        Position::from_xyz(2.0, 0.15, 0.0),
-        Rotation(Quat::from_rotation_y(-std::f32::consts::PI * 1.5)),
+        Transform {
+            translation: Vec3::new(2.0, 0.15, 0.0),
+            rotation: Quat::from_rotation_y(-std::f32::consts::PI * 1.5),
+            ..default()
+        },
     ));
     app.update();
     app.update();
@@ -1905,10 +1932,13 @@ fn can_jump_while_climbing_a_ramp() {
     let mut app = physics_app();
     let ramp = &shapes()[model::shape_index("ramp").unwrap()];
     app.world_mut().spawn((
-        RigidBody::Static,
+        RigidBody::Fixed,
         piece_collider(ramp).unwrap(),
-        Position::from_xyz(2.0, 0.0, 0.0),
-        Rotation(Quat::from_rotation_y(-std::f32::consts::PI * 1.5)),
+        Transform {
+            translation: Vec3::new(2.0, 0.0, 0.0),
+            rotation: Quat::from_rotation_y(-std::f32::consts::PI * 1.5),
+            ..default()
+        },
     ));
     app.update();
 
@@ -1962,10 +1992,13 @@ fn can_jump_while_descending_a_ramp() {
     let mut app = physics_app();
     let ramp = &shapes()[model::shape_index("ramp").unwrap()];
     app.world_mut().spawn((
-        RigidBody::Static,
+        RigidBody::Fixed,
         piece_collider(ramp).unwrap(),
-        Position::from_xyz(2.0, 0.0, 0.0),
-        Rotation(Quat::from_rotation_y(-std::f32::consts::PI * 1.5)),
+        Transform {
+            translation: Vec3::new(2.0, 0.0, 0.0),
+            rotation: Quat::from_rotation_y(-std::f32::consts::PI * 1.5),
+            ..default()
+        },
     ));
     app.update();
 
@@ -2140,8 +2173,10 @@ fn walking_into_a_dynamic_crate_shoves_it() {
         .world_mut()
         .spawn((
             RigidBody::Dynamic,
-            Collider::cuboid(0.85, 0.85, 0.85),
-            Position::from_xyz(1.2, 0.425, 0.0),
+            Collider::cuboid(0.425, 0.425, 0.425),
+            Velocity::zero(),
+            ExternalImpulse::default(),
+            Transform::from_xyz(1.2, 0.425, 0.0),
         ))
         .id();
     // Build the collider tree and computed mass before the first shove.
@@ -2173,11 +2208,15 @@ fn walking_into_a_dynamic_crate_shoves_it() {
         tick_character(&mut app);
     }
 
+    // Impulses land in the solver on the next physics step; flush the
+    // schedule so the shove shows up in the body's velocity.
+    app.update();
+
     let velocity = app
         .world()
-        .get::<LinearVelocity>(prop)
+        .get::<Velocity>(prop)
         .expect("dynamic prop keeps its velocity")
-        .0;
+        .linear;
     assert!(
         velocity.x > 0.3,
         "the crate should gain forward speed, got {velocity:?}"
@@ -2190,9 +2229,9 @@ fn walking_into_a_static_wall_shoves_nothing() {
     let wall = app
         .world_mut()
         .spawn((
-            RigidBody::Static,
-            Collider::cuboid(0.2, 2.8, 1.2),
-            Position::from_xyz(1.2, 1.4, 0.0),
+            RigidBody::Fixed,
+            Collider::cuboid(0.1, 1.4, 0.6),
+            Transform::from_xyz(1.2, 1.4, 0.0),
         ))
         .id();
     app.update();
@@ -2223,11 +2262,11 @@ fn walking_into_a_static_wall_shoves_nothing() {
     }
 
     // A static wall must not pick up speed; it still blocks the capsule.
-    if let Some(velocity) = app.world().get::<LinearVelocity>(wall) {
+    if let Some(velocity) = app.world().get::<Velocity>(wall) {
         assert!(
-            velocity.0.length() < 1e-4,
+            velocity.linear.length() < 1e-4,
             "static wall should not move, got {:?}",
-            velocity.0
+            velocity.linear
         );
     }
     let character = app.world().resource::<Editor>().character.unwrap();

@@ -2,6 +2,9 @@
 /target/
 **/target/
 
+# Workspace-local cargo home (registry mirror for sandboxed builds)
+.cargo-home/
+
 # Node (notes/)
 notes/node_modules/
 notes/dist/
