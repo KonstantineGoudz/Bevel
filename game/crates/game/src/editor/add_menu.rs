@@ -482,30 +482,43 @@ pub(super) fn on_add_menu_item(
     menu.last_built = Some((String::new(), 0, 0));
 }
 
-/// Bridge to a transparent HTML `<input>` overlay on mobile web.
+/// Bridge to a native HTML `<input>` overlay on mobile web.
 ///
 /// winit's web backend ignores `set_ime_allowed`, so focusing Bevy's
-/// `TextInput` never summons the virtual keyboard. Instead, while the menu
-/// is open on a touch device we show a real (but invisible) input element
-/// positioned over the Bevy search box: tapping it is a native tap on a
-/// native field, so the OS shows the keyboard, and every keystroke is
-/// mirrored into the Bevy `EditableText` below. Desktop web and native
-/// builds never create the element and keep the Bevy-only path.
+/// `TextInput` never summons the virtual keyboard. Instead, while a text
+/// field is focused on a touch device we show a real input element and mirror
+/// every keystroke into the Bevy `EditableText` below. Three bindings:
+/// - Add-menu search: the overlay is invisible and sits over the Bevy search
+///   box, so taps there are native taps and the Bevy box shows the text.
+/// - Property fields and the outliner label: the overlay is a visible box
+///   pinned above the bottom controls (clear of both panels), since the Bevy
+///   fields stay on the sides.
+/// Tapping the visible box (or the search area) is a native tap on a native
+/// field, so the OS shows the keyboard. `font-size:16px` stops iOS from
+/// zooming on focus. Desktop web and native builds never create the element
+/// and keep the Bevy-only path.
 #[derive(Resource, Default)]
-pub(super) struct WasmSearchBridge {
+pub(super) struct WasmTextBridge {
     #[cfg(target_arch = "wasm32")]
     shared: Option<std::sync::Arc<std::sync::Mutex<String>>>,
-    was_open: bool,
+    /// Focused Bevy field bound to the overlay: (entity, kind) with
+    /// 0 = Add search, 1 = property field, 2 = outliner label.
+    active: Option<(Entity, u8)>,
 }
 
 /// Transparent overlay geometry: covers the Bevy search box (panel top +
 /// header) with margin, so taps on the visible search field land on the
-/// native input. `font-size:16px` stops iOS from zooming on focus.
+/// native input.
 #[cfg(target_arch = "wasm32")]
-const WASM_SEARCH_VISIBLE_STYLE: &str = "position:fixed;left:50%;transform:translateX(-50%);top:140px;width:min(360px,calc(100vw - 40px));height:44px;opacity:0;z-index:20;font-size:16px;margin:0;padding:0;border:none;background:transparent;";
+const WASM_SEARCH_STYLE: &str = "position:fixed;left:50%;transform:translateX(-50%);top:140px;width:min(360px,calc(100vw - 40px));height:44px;opacity:0;z-index:20;font-size:16px;margin:0;padding:0;border:none;background:transparent;";
 
-pub(super) fn setup_wasm_search_input(mut commands: Commands) {
-    commands.init_resource::<WasmSearchBridge>();
+/// Visible overlay geometry for property fields: bottom-center, clear of
+/// the panel, the stick and the pads.
+#[cfg(target_arch = "wasm32")]
+const WASM_PROP_STYLE: &str = "position:fixed;left:50%;transform:translateX(-50%);bottom:210px;width:min(360px,calc(100vw - 40px));height:40px;padding:6px 10px;border-radius:8px;border:1px solid #24303f;background:#141c26;color:#c3d0df;font:16px system-ui;z-index:20;";
+
+pub(super) fn setup_wasm_text_input(mut commands: Commands) {
+    commands.init_resource::<WasmTextBridge>();
     #[cfg(target_arch = "wasm32")]
     {
         use wasm_bindgen::JsCast;
@@ -516,7 +529,7 @@ pub(super) fn setup_wasm_search_input(mut commands: Commands) {
         let Some(document) = window.document() else {
             return;
         };
-        if document.get_element_by_id("bevy-add-search").is_some() {
+        if document.get_element_by_id("bevy-text-input").is_some() {
             return;
         }
         let Ok(element) = document.create_element("input") else {
@@ -525,22 +538,20 @@ pub(super) fn setup_wasm_search_input(mut commands: Commands) {
         let Ok(input) = element.dyn_into::<web_sys::HtmlInputElement>() else {
             return;
         };
-        input.set_id("bevy-add-search");
+        input.set_id("bevy-text-input");
         input.set_type("text");
         let _ = input.set_attribute("autocomplete", "off");
         let _ = input.set_attribute("autocorrect", "off");
         let _ = input.set_attribute("autocapitalize", "off");
         let _ = input.set_attribute("spellcheck", "false");
-        let _ = input.set_attribute("inputmode", "search");
-        let _ = input.set_attribute("enterkeyhint", "search");
-        let _ = input.set_attribute("aria-label", "Search components");
+        let _ = input.set_attribute("aria-label", "Edit text");
         let _ = input.set_attribute("style", "display:none");
         let shared = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let writer = std::sync::Arc::clone(&shared);
         let callback = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
             let value = web_sys::window()
                 .and_then(|window| window.document())
-                .and_then(|document| document.get_element_by_id("bevy-add-search"))
+                .and_then(|document| document.get_element_by_id("bevy-text-input"))
                 .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok())
                 .map(|input| input.value())
                 .unwrap_or_default();
@@ -553,18 +564,33 @@ pub(super) fn setup_wasm_search_input(mut commands: Commands) {
         if let Some(body) = document.body() {
             let _ = body.append_child(&input);
         }
-        commands.insert_resource(WasmSearchBridge {
+        commands.insert_resource(WasmTextBridge {
             shared: Some(shared),
-            was_open: false,
+            active: None,
         });
     }
 }
 
-pub(super) fn sync_wasm_search_input(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn sync_wasm_text_input(
     menu: Res<AddMenu>,
     touch: Res<TouchState>,
-    mut bridge: ResMut<WasmSearchBridge>,
-    mut search_query: Query<&mut EditableText, With<AddMenuSearch>>,
+    focus: Res<InputFocus>,
+    mut bridge: ResMut<WasmTextBridge>,
+    mut texts: Query<
+        (
+            Entity,
+            &mut EditableText,
+            Has<AddMenuSearch>,
+            Has<PropertyField>,
+            Has<OutlinerNameInput>,
+        ),
+        Or<(
+            With<AddMenuSearch>,
+            With<PropertyField>,
+            With<OutlinerNameInput>,
+        )>,
+    >,
     mut hint_query: Query<&mut Text, With<AddMenuHint>>,
 ) {
     for mut hint in &mut hint_query {
@@ -577,6 +603,39 @@ pub(super) fn sync_wasm_search_input(
             hint.0 = text.to_string();
         }
     }
+    // The overlay binds to the Add search while the menu is open, else to
+    // whichever text field owns Bevy focus (property value or outliner label).
+    //
+    // A single text query with `Has` markers keeps the system's access
+    // unambiguous: three filtered `&mut EditableText` queries would panic
+    // with B0001 (`With` alone never proves disjointness).
+    //
+    // `active` tags the search so the right on-screen style is used below:
+    // 0 = Add search, 1 = property field, 2 = outliner label.
+    let active: Option<(Entity, u8)> = if menu.open {
+        texts
+            .iter()
+            .find_map(|(entity, _, is_search, _, _)| is_search.then_some((entity, 0)))
+    } else {
+        focus.get().and_then(|entity| {
+            texts
+                .get(entity)
+                .ok()
+                .and_then(|(_, _, is_search, is_prop, is_name)| {
+                    if is_search {
+                        // Focus drifted onto the search box without the menu.
+                        None
+                    } else if is_prop {
+                        Some((entity, 1))
+                    } else if is_name {
+                        Some((entity, 2))
+                    } else {
+                        None
+                    }
+                })
+        })
+    };
+    let show = touch.enabled && active.is_some();
     #[cfg(target_arch = "wasm32")]
     {
         use wasm_bindgen::JsCast;
@@ -584,42 +643,15 @@ pub(super) fn sync_wasm_search_input(
         let Some(document) = web_sys::window().and_then(|window| window.document()) else {
             return;
         };
-        let Some(element) = document.get_element_by_id("bevy-add-search") else {
+        let Some(element) = document.get_element_by_id("bevy-text-input") else {
             return;
         };
         let Ok(input) = element.dyn_into::<web_sys::HtmlInputElement>() else {
             return;
         };
-        let show = menu.open && touch.enabled;
-        if show {
-            if !bridge.was_open {
-                if let Some(shared) = bridge.shared.as_ref() {
-                    if let Ok(mut slot) = shared.lock() {
-                        slot.clear();
-                    }
-                }
-                input.set_value("");
-                // Best effort: a native tap on the (invisible) overlay always
-                // works even when this programmatic focus is blocked.
-                let _ = input.focus();
-            }
-            let pending = bridge
-                .shared
-                .as_ref()
-                .and_then(|shared| shared.lock().ok().map(|slot| slot.clone()));
-            if let Some(pending) = pending {
-                if let Ok(mut text) = search_query.single_mut() {
-                    if text.value().to_string() != pending {
-                        text.editor_mut().set_text(&pending);
-                    }
-                }
-                if input.value() != pending {
-                    input.set_value(&pending);
-                }
-            }
-        } else {
+        if !show {
             let _ = input.set_attribute("style", "display:none");
-            if bridge.was_open {
+            if bridge.active.take().is_some() {
                 let _ = input.blur();
                 if let Some(shared) = bridge.shared.as_ref() {
                     if let Ok(mut slot) = shared.lock() {
@@ -628,16 +660,67 @@ pub(super) fn sync_wasm_search_input(
                 }
                 input.set_value("");
             }
-            bridge.was_open = false;
             return;
         }
-        let _ = input.set_attribute("style", WASM_SEARCH_VISIBLE_STYLE);
-        bridge.was_open = true;
+        let (entity, kind) = active.expect("shown only when bound");
+        let is_search = kind == 0;
+        if bridge.active != active {
+            bridge.active = active;
+            // (Re)bind: push the Bevy text into the overlay, pick the keyboard
+            // (numeric for numbers, plain for names), and summon it. A native
+            // tap on the overlay always works even when programmatic focus is
+            // blocked.
+            let current = texts
+                .get(entity)
+                .ok()
+                .map(|(_, text, _, _, _)| text.value().to_string())
+                .unwrap_or_default();
+            if let Some(shared) = bridge.shared.as_ref() {
+                if let Ok(mut slot) = shared.lock() {
+                    *slot = current.clone();
+                }
+            }
+            input.set_value(&current);
+            if is_search {
+                let _ = input.set_attribute("inputmode", "search");
+                let _ = input.set_attribute("enterkeyhint", "search");
+                let _ = input.set_attribute("aria-label", "Search components");
+                let _ = input.set_attribute("style", WASM_SEARCH_STYLE);
+            } else {
+                let _ =
+                    input.set_attribute("inputmode", if kind == 1 { "decimal" } else { "text" });
+                let _ = input.set_attribute("enterkeyhint", "done");
+                let _ = input.set_attribute(
+                    "aria-label",
+                    if kind == 1 {
+                        "Edit property value"
+                    } else {
+                        "Edit label"
+                    },
+                );
+                let _ = input.set_attribute("style", WASM_PROP_STYLE);
+            }
+            let _ = input.focus();
+        }
+        let pending = bridge
+            .shared
+            .as_ref()
+            .and_then(|shared| shared.lock().ok().map(|slot| slot.clone()));
+        if let Some(pending) = pending {
+            if let Ok((_, mut text, _, _, _)) = texts.get_mut(entity) {
+                if text.value().to_string() != pending {
+                    text.editor_mut().set_text(&pending);
+                }
+            }
+            if input.value() != pending {
+                input.set_value(&pending);
+            }
+        }
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = (&menu, &touch, &mut bridge, &mut search_query);
-        bridge.was_open = false;
+        let _ = (&menu, &touch, &focus, &mut bridge, &mut texts);
+        bridge.active = None;
     }
 }
 

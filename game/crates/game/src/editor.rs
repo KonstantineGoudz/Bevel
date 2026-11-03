@@ -121,9 +121,13 @@ impl Plugin for EditorPlugin {
             .init_resource::<AddMenu>()
             .init_resource::<OutlinerState>()
             .init_resource::<OutlinerEdit>()
+            .init_resource::<PropertiesPanelState>()
             // Remappable controls, loaded from browser storage on web.
             .insert_resource(crate::controls::Controls::load())
-            .add_systems(Startup, (load_session, setup, setup_wasm_search_input).chain())
+            .add_systems(
+                Startup,
+                (load_session, setup, setup_wasm_text_input).chain(),
+            )
             .add_systems(
                 Update,
                 (
@@ -156,10 +160,11 @@ impl Plugin for EditorPlugin {
             .add_systems(
                 Update,
                 (
+                    resolve_platform_push,
                     update_cursor,
                     sync_dynamic_pieces,
                     touch_gizmo_fallback,
-                    sync_wasm_search_input,
+                    sync_wasm_text_input,
                     update_add_menu,
                     save_shortcut,
                     interact,
@@ -188,6 +193,7 @@ impl Plugin for EditorPlugin {
                 Update,
                 (
                     handle_transparency_slider,
+                    sync_properties_chrome,
                     sync_properties_panel,
                     sync_transparency_slider,
                     sync_trigger_color_buttons,

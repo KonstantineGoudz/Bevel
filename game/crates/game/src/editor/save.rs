@@ -6,11 +6,12 @@ use super::*;
 // Save
 // ---------------------------------------------------------------------------
 
-pub(super) fn level_json(editor: &Editor) -> String {
+pub(super) fn level_json(editor: &Editor, orbit: &Orbit, movers: &Movers) -> String {
     let pieces: Vec<String> = editor
         .pieces
         .iter()
         .map(|p| {
+            let shape = &shapes()[p.shape];
             let name = editor
                 .outline
                 .label(p.id)
@@ -36,10 +37,49 @@ pub(super) fn level_json(editor: &Editor) -> String {
             } else {
                 format!(",\"interact\":\"{}\"", p.interact.id())
             };
+            // Trigger volumes are parametric: without their extents the copy
+            // loads a default box. Only non-default configs are written, the
+            // same rule the session snapshot uses.
+            let trigger = if shape.is_trigger {
+                let size = model::sanitize_trigger_size(p.trigger_size);
+                let alpha = model::sanitize_trigger_alpha(p.trigger_alpha);
+                let form = model::piece_trigger_shape(p, shape).id();
+                let is_default = (size - model::TRIGGER_DEFAULT_SIZE).length_squared() < 1e-6
+                    && form == "box"
+                    && (alpha - model::TRIGGER_DEFAULT_ALPHA).abs() < 1e-6
+                    && p.trigger_color == model::TRIGGER_DEFAULT_COLOR
+                    && p.trigger_visible == model::TRIGGER_DEFAULT_VISIBLE;
+                if is_default {
+                    String::new()
+                } else {
+                    let mut extra = format!(
+                        ",\"triggerWidth\":{:.3},\"triggerLength\":{:.3},\"triggerHeight\":{:.3}",
+                        size.x, size.z, size.y,
+                    );
+                    if form != "box" {
+                        extra += &format!(",\"triggerShape\":\"{form}\"");
+                    }
+                    if (alpha - model::TRIGGER_DEFAULT_ALPHA).abs() >= 1e-6 {
+                        extra += &format!(",\"triggerAlpha\":{alpha:.3}");
+                    }
+                    if p.trigger_color != model::TRIGGER_DEFAULT_COLOR {
+                        extra += &format!(
+                            ",\"triggerColor\":\"{}\"",
+                            model::trigger_color_to_hex_string(p.trigger_color)
+                        );
+                    }
+                    if p.trigger_visible != model::TRIGGER_DEFAULT_VISIBLE {
+                        extra += &format!(",\"triggerVisible\":{}", p.trigger_visible);
+                    }
+                    extra
+                }
+            } else {
+                String::new()
+            };
             format!(
-                "{{\"id\":{},\"shape\":\"{}\",\"x\":{:.3},\"z\":{:.3},\"y\":{:.3},\"rotDeg\":{:.1},\"pitchDeg\":{:.1},\"rollDeg\":{:.1},\"dynamic\":{},\"damage\":{:.1}{interact}{name}{group}{locked}}}",
+                "{{\"id\":{},\"shape\":\"{}\",\"x\":{:.3},\"z\":{:.3},\"y\":{:.3},\"rotDeg\":{:.1},\"pitchDeg\":{:.1},\"rollDeg\":{:.1},\"dynamic\":{},\"damage\":{:.1}{interact}{trigger}{name}{group}{locked}}}",
                 p.id,
-                shapes()[p.shape].id,
+                shape.id,
                 p.pos.x,
                 p.pos.y,
                 p.elevation,
@@ -72,26 +112,54 @@ pub(super) fn level_json(editor: &Editor) -> String {
         .character
         .map(|c| {
             format!(
-                ",\"character\":{{\"x\":{:.3},\"z\":{:.3},\"yawDeg\":{:.1}}}",
+                ",\"character\":{{\"x\":{:.3},\"z\":{:.3},\"feet\":{:.3},\"yawDeg\":{:.1},\"hp\":{:.1},\"maxHp\":{:.1}}}",
                 c.pos.x,
                 c.pos.y,
-                c.yaw.to_degrees()
+                c.feet,
+                c.yaw.to_degrees(),
+                c.health.current,
+                c.health.max,
             )
         })
         .unwrap_or_default();
+    // Moving-platform paths, sorted by piece so the output is stable. These
+    // are the "paths" a plain piece copy used to drop on the floor.
+    let mut platform_ids: Vec<u32> = movers.map.keys().copied().collect();
+    platform_ids.sort_unstable();
+    let platforms: Vec<String> = platform_ids
+        .iter()
+        .filter_map(|id| movers.map.get(id).map(|mover| (*id, mover)))
+        .map(|(id, mover)| {
+            serde_json::to_string(&movers::to_saved(id, mover)).expect("platform serializes")
+        })
+        .collect();
     format!(
-        "{{\"format\":\"party-dungeon-level\",\"version\":1,\"units\":\"metres\",\"hexSize\":{},\"groups\":[{}],\"pieces\":[{}]{character}}}",
+        "{{\"format\":\"party-dungeon-level\",\"version\":2,\"units\":\"metres\",\"hexSize\":{},\"nextId\":{},\"groups\":[{}],\"pieces\":[{}],\"platforms\":[{}]{character},\"camera\":{{\"targetX\":{:.3},\"targetY\":{:.3},\"targetZ\":{:.3},\"yawDeg\":{:.1},\"pitchDeg\":{:.1},\"distance\":{:.3},\"mode\":\"{}\"}}}}",
         model::HEX_SIZE,
+        editor.next_id,
         groups.join(","),
-        pieces.join(",")
+        pieces.join(","),
+        platforms.join(","),
+        orbit.target.x,
+        orbit.target.y,
+        orbit.target.z,
+        orbit.yaw.to_degrees(),
+        orbit.pitch.to_degrees(),
+        orbit.distance,
+        orbit.mode.id(),
     )
 }
 
 /// Put the same level JSON that `S` writes on the system clipboard. This is a
 /// debugging aid, so it copies the exact saved document rather than the larger
 /// session snapshot used by the browser's autosave.
-pub(super) fn copy_level_json(editor: &mut Editor, clipboard: &mut Clipboard) {
-    let json = level_json(editor);
+pub(super) fn copy_level_json(
+    editor: &mut Editor,
+    orbit: &Orbit,
+    movers: &Movers,
+    clipboard: &mut Clipboard,
+) {
+    let json = level_json(editor, orbit, movers);
     match copy_to_clipboard(&json, clipboard) {
         Ok(()) => editor.note = "copied level JSON",
         Err(()) => {
@@ -320,7 +388,7 @@ pub(super) fn save_shortcut(
         return;
     }
     if input.just_pressed(Action::CopyJson) {
-        copy_level_json(&mut editor, &mut clipboard);
+        copy_level_json(&mut editor, &orbit, &movers, &mut clipboard);
     } else if input.just_pressed(Action::SaveLevel) {
         if editor.mode == Mode::Build {
             save(
@@ -345,8 +413,7 @@ pub(super) fn save(
 ) {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = (orbit, movers);
-        let json = level_json(editor);
+        let json = level_json(editor, orbit, movers);
         let path = std::path::Path::new("level.json");
         match std::fs::write(path, &json) {
             Ok(()) => {

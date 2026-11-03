@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="data:," />
     <title>Party Dungeon — editor</title>
     <style>
       html, body {
@@ -53,9 +54,24 @@
         const box = document.getElementById("error");
         document.getElementById("loading")?.setAttribute("hidden", "");
         box.style.display = "block";
-        box.textContent = message;
+        box.textContent = [box.textContent, message]
+          .filter((part) => part && part.length > 0)
+          .join("\n\n");
         document.getElementById("back").removeAttribute("hidden");
       };
+
+      // Surface runtime failures on the page itself: phones have no devtools
+      // attached, and without this a post-init crash looks like a black
+      // screen. Wasm traps arrive as `error` events; rejected promises arrive
+      // as `unhandledrejection`.
+      window.addEventListener("error", (event) => {
+        const detail =
+          event?.error?.stack || event?.message || String(event);
+        showError(`Runtime error:\n\n${detail}`);
+      });
+      window.addEventListener("unhandledrejection", (event) => {
+        showError(`Failed to start:\n\n${event?.reason}`);
+      });
 
       const id = new URLSearchParams(window.location.search).get("session");
       if (!id) {
@@ -79,8 +95,16 @@
               showError(`Failed to start the wasm build:\n\n${err}`);
               console.error(err);
             });
-          // Fallback: hide after 12s so a stalled build doesn't leave a permanent overlay.
-          setTimeout(() => document.getElementById("loading")?.setAttribute("hidden", ""), 12000);
+          // Slow connections and phones can take a while to fetch and compile
+          // the wasm module. Say so instead of going black: once the app
+          // boots it hides the overlay itself.
+          setTimeout(() => {
+            const loading = document.getElementById("loading");
+            if (loading && !loading.hasAttribute("hidden")) {
+              loading.textContent =
+                "Still loading — fetching and compiling the game (up to a minute on slow connections)…";
+            }
+          }, 12000);
         }
       }
     </script>

@@ -109,7 +109,7 @@ fn saving_writes_each_pieces_height() {
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         interact: crate::model::InteractAction::None,
     });
-    let json = level_json(&editor);
+    let json = level_json(&editor, &Orbit::default(), &Movers::default());
     assert!(json.contains("\"y\":1.250"), "{json}");
 }
 
@@ -134,7 +134,7 @@ fn saving_writes_each_pieces_full_rotation() {
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         interact: crate::model::InteractAction::None,
     });
-    let json = level_json(&editor);
+    let json = level_json(&editor, &Orbit::default(), &Movers::default());
     assert!(json.contains("\"rotDeg\":30.0"), "{json}");
     assert!(json.contains("\"pitchDeg\":-15.0"), "{json}");
     assert!(json.contains("\"rollDeg\":10.0"), "{json}");
@@ -163,7 +163,7 @@ fn saving_writes_an_interaction_only_when_set() {
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         interact: crate::model::InteractAction::TogglePause,
     });
-    let json = level_json(&editor);
+    let json = level_json(&editor, &Orbit::default(), &Movers::default());
     assert!(json.contains("\"interact\":\"togglePause\""), "{json}");
 }
 
@@ -417,10 +417,138 @@ fn the_debug_level_json_includes_labels_and_groups() {
     let group = editor.group_node(GraphNode::Piece(1)).unwrap();
     editor.rename_node(GraphNode::Piece(1), "North \"wall\"");
     editor.outline.toggle_lock(1);
-    let json = level_json(&editor);
+    let json = level_json(&editor, &Orbit::default(), &Movers::default());
     assert!(json.contains("\"name\":\"North \\\"wall\\\"\""), "{json}");
     assert!(json.contains("\"locked\":true"), "{json}");
     assert!(json.contains(&format!("\"group\":{group}")), "{json}");
     assert!(json.contains("\"groups\":[{\"id\":"), "{json}");
     assert!(json.contains("\"collapsed\":false"), "{json}");
+}
+
+#[test]
+fn copying_copies_platform_paths() {
+    let mut editor = Editor::default();
+    editor.pieces.push(test_piece(7));
+    let mut movers = Movers::default();
+    let mover = movers.mover_mut(7, Vec2::ZERO);
+    mover.waypoints.push(crate::platforms::PlatformWaypoint {
+        pos: Vec2::new(4.0, 0.0),
+        incoming: Some(Vec2::new(3.0, -1.0)),
+        outgoing: None,
+    });
+    mover.mode = crate::platforms::PlatformMode::Loop;
+    mover.speed = 2.5;
+    mover.paused = true;
+    mover.rebuild();
+
+    let json = level_json(&editor, &Orbit::default(), &movers);
+    let doc: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let platforms = doc.get("platforms").expect("platforms key").as_array().unwrap();
+    assert_eq!(platforms.len(), 1, "{json}");
+    let saved = &platforms[0];
+    assert_eq!(saved.get("piece").unwrap(), 7);
+    assert_eq!(saved.get("mode").unwrap(), "loop");
+    assert_eq!(saved.get("speed").unwrap(), 2.5);
+    assert_eq!(saved.get("paused").unwrap(), true);
+    let waypoints = saved.get("waypoints").unwrap().as_array().unwrap();
+    assert_eq!(waypoints.len(), 2);
+    assert_eq!(waypoints[0].get("x").unwrap(), 0.0);
+    assert_eq!(waypoints[1].get("x").unwrap(), 4.0);
+    assert_eq!(
+        waypoints[1].get("incoming").unwrap(),
+        &serde_json::json!([3.0, -1.0])
+    );
+}
+
+#[test]
+fn copying_copies_trigger_volumes_only_when_custom() {
+    let mut editor = Editor::default();
+    let shape = model::shape_index("trigger_box").unwrap();
+    editor.pieces.push(Piece {
+        id: 1,
+        shape,
+        pos: Vec2::ZERO,
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
+        trigger_size: Vec3::new(3.0, 4.0, 5.0),
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: 0.8,
+        trigger_color: 0xff0000,
+        trigger_visible: false,
+        interact: crate::model::InteractAction::None,
+    });
+    editor.pieces.push(Piece {
+        id: 2,
+        shape,
+        pos: Vec2::X,
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
+    });
+
+    let json = level_json(&editor, &Orbit::default(), &Movers::default());
+    let doc: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let pieces = doc.get("pieces").unwrap().as_array().unwrap();
+    let custom = &pieces[0];
+    assert_eq!(custom.get("triggerWidth").unwrap(), 3.0);
+    assert_eq!(custom.get("triggerLength").unwrap(), 5.0);
+    assert_eq!(custom.get("triggerHeight").unwrap(), 4.0);
+    assert_eq!(custom.get("triggerAlpha").unwrap(), 0.8);
+    assert_eq!(custom.get("triggerColor").unwrap(), "#ff0000");
+    assert_eq!(custom.get("triggerVisible").unwrap(), false);
+    let plain = &pieces[1];
+    assert!(plain.get("triggerWidth").is_none(), "{plain}");
+    assert!(plain.get("triggerShape").is_none(), "{plain}");
+}
+
+#[test]
+fn copying_copies_character_camera_and_next_id() {
+    let mut editor = Editor::default();
+    editor.next_id = 42;
+    editor.character = Some(Character {
+        pos: Vec2::new(1.5, -2.5),
+        feet: 0.75,
+        yaw: 1.0,
+        vy: 0.0,
+        hv: Vec2::ZERO,
+        ride_vel: Vec2::ZERO,
+        grounded: true,
+        sliding: false,
+        health: crate::statuses::Health {
+            current: 70.0,
+            max: 100.0,
+        },
+    });
+    let orbit = Orbit {
+        target: Vec3::new(1.0, 2.0, 3.0),
+        yaw: 0.5,
+        pitch: 0.9,
+        distance: 12.0,
+        mode: ViewMode::Top,
+    };
+    let json = level_json(&editor, &orbit, &Movers::default());
+    let doc: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(doc.get("version").unwrap(), 2);
+    assert_eq!(doc.get("nextId").unwrap(), 42);
+    let character = doc.get("character").expect("character key");
+    assert_eq!(character.get("feet").unwrap(), 0.75);
+    assert_eq!(character.get("hp").unwrap(), 70.0);
+    assert_eq!(character.get("maxHp").unwrap(), 100.0);
+    let camera = doc.get("camera").expect("camera key");
+    assert_eq!(camera.get("targetX").unwrap(), 1.0);
+    assert_eq!(camera.get("mode").unwrap(), "top");
+    assert_eq!(camera.get("distance").unwrap(), 12.0);
 }

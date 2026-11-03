@@ -197,6 +197,8 @@ fn a_finger_can_grab_and_drag_a_gizmo_handle() {
     app.init_resource::<Movers>();
     app.init_resource::<Nav>();
     app.init_resource::<PointerCapture>();
+    app.init_resource::<OutlinerState>();
+    app.init_resource::<PropertiesPanelState>();
     app.world_mut().resource_mut::<TouchState>().enabled = true;
     app.world_mut().spawn((
         Window {
@@ -331,6 +333,8 @@ fn a_finger_can_grab_the_negative_end_of_an_axis() {
     app.init_resource::<Movers>();
     app.init_resource::<Nav>();
     app.init_resource::<PointerCapture>();
+    app.init_resource::<OutlinerState>();
+    app.init_resource::<PropertiesPanelState>();
     app.world_mut().resource_mut::<TouchState>().enabled = true;
     app.world_mut().spawn((
         Window {
@@ -426,10 +430,22 @@ fn the_pad_cluster_is_excluded_from_the_gizmo_fallback() {
     // raw-touch gizmo fallback must never steal their taps.
     let size = Vec2::new(390.0, 844.0);
     let s = 0.5;
-    assert!(over_pad_cluster(Vec2::new(390.0 - 20.0, 844.0 - 30.0), size, s));
-    assert!(over_pad_cluster(Vec2::new(390.0 - 60.0, 844.0 - 80.0), size, s));
+    assert!(over_pad_cluster(
+        Vec2::new(390.0 - 20.0, 844.0 - 30.0),
+        size,
+        s
+    ));
+    assert!(over_pad_cluster(
+        Vec2::new(390.0 - 60.0, 844.0 - 80.0),
+        size,
+        s
+    ));
     assert!(!over_pad_cluster(Vec2::new(195.0, 420.0), size, s));
-    assert!(!over_pad_cluster(Vec2::new(390.0 - 200.0, 844.0 - 200.0), size, s));
+    assert!(!over_pad_cluster(
+        Vec2::new(390.0 - 200.0, 844.0 - 200.0),
+        size,
+        s
+    ));
 }
 
 /// The raw-touch fallback grabs a gizmo handle even when UI picking never
@@ -446,6 +462,8 @@ fn raw_touch_grabs_a_gizmo_without_pointer_events() {
     app.init_resource::<Editor>();
     app.init_resource::<PathGesture>();
     app.init_resource::<PointerCapture>();
+    app.init_resource::<OutlinerState>();
+    app.init_resource::<PropertiesPanelState>();
     app.init_resource::<AddMenu>();
     app.init_resource::<InputFocus>();
     {

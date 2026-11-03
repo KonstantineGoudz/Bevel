@@ -813,6 +813,271 @@ fn landing_on_a_moving_platform_does_not_stack_speed() {
     );
 }
 
+/// True Parry contact check: no tracked platform may penetrate the capsule
+/// beyond a hair. Uses the real collider shapes, so this fails exactly when
+/// the player would see overlap.
+fn assert_platforms_clear(app: &App, context: &str) {
+    use avian3d::collision::collider::contact_query::contact;
+    use avian3d::math::ToRealPrecision as _;
+    let world = app.world();
+    let editor = world.resource::<Editor>();
+    let movers = world.resource::<Movers>();
+    let kit = world.resource::<Kit>();
+    let character = editor.character.expect("character");
+    let cap_pos = Vec3::new(character.pos.x, character.feet + PILL_HALF, character.pos.y);
+    let cap_rot = Quat::from_rotation_y(character.yaw);
+    for piece in &editor.pieces {
+        let Some(mover) = movers.map.get(&piece.id) else {
+            continue;
+        };
+        if mover.track.is_none() {
+            continue;
+        }
+        let shape = &shapes()[piece.shape];
+        let Some(platform) = piece_collider(shape) else {
+            continue;
+        };
+        let plat_pos = Vec3::new(piece.pos.x, piece.elevation, piece.pos.y);
+        let plat_rot = model::piece_quat(piece);
+        let hit = contact(
+            &kit.character_collider,
+            cap_pos.real(),
+            cap_rot,
+            &platform,
+            plat_pos.real(),
+            plat_rot,
+            0.0,
+        )
+        .expect("contact query");
+        if let Some(hit) = hit {
+            assert!(
+                hit.penetration <= 0.002,
+                "{context}: penetration {:.3}: char={:?} piece={:?}",
+                hit.penetration,
+                character.pos,
+                piece.pos,
+            );
+        }
+    }
+}
+
+/// A platform driving sideways into a standing capsule must shove it ahead
+/// instead of passing through. The capsule is idle (no input, grounded), the
+/// case the grounded controller would otherwise never resolve.
+#[test]
+fn a_still_capsule_is_pushed_by_a_moving_platform() {
+    let mut app = physics_app();
+    riding_setup(&mut app);
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            // Parked just ahead of the block's +x face (half width 0.9 plus
+            // the 0.32 capsule radius clears at ~1.22).
+            pos: Vec2::new(1.5, 0.0),
+            feet: 0.0,
+            yaw: 0.0,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            sliding: false,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+
+    // No input at all: the capsule idles while the platform drives into it.
+    let start = app.world().resource::<Editor>().character.unwrap().pos.x;
+    for _ in 0..120 {
+        tick_rider(&mut app);
+        // The frame must always end clear of every tracked platform.
+        assert_platforms_clear(&app, "idle capsule");
+    }
+    let end = app.world().resource::<Editor>().character.unwrap().pos.x;
+    assert!(
+        end - start > 0.5,
+        "the idle capsule must be shoved ahead of the platform, start={start} end={end}"
+    );
+}
+
+/// An idle capsule standing on a block that gets shoved off must start
+/// falling immediately, even with no input. It used to keep `grounded = true`
+/// because the idle branch never checked whether anything was still underfoot,
+/// so it hovered until the first movement input re-entered the normal
+/// controller.
+#[test]
+fn a_capsule_pushed_off_a_block_falls_while_idle() {
+    let mut app = physics_app();
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+
+    // A fixed block for the capsule to stand on.
+    let block = model::shape_index("block").unwrap();
+    app.world_mut().spawn((
+        RigidBody::Static,
+        piece_collider(&shapes()[block]).unwrap(),
+        Position::from_xyz(0.0, 0.0, 0.0),
+        Rotation::default(),
+    ));
+
+    // A tall pillar sweeping through the capsule's body: a pure side push, not
+    // a deck it could ride.
+    let pillar = model::shape_index("pillar").unwrap();
+    app.world_mut().resource_mut::<Editor>().pieces.push(Piece {
+        id: 7,
+        shape: pillar,
+        pos: Vec2::new(-2.0, 0.0),
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
+    });
+    let mut movers = Movers::default();
+    let mover = movers.mover_mut(7, Vec2::new(-2.0, 0.0));
+    mover
+        .waypoints
+        .push(crate::platforms::PlatformWaypoint::new(Vec2::new(2.0, 0.0)));
+    mover.rebuild();
+    mover.speed = 1.5;
+    app.insert_resource(movers);
+
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: Vec2::ZERO,
+            feet: 0.9,
+            yaw: 0.0,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            sliding: false,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+
+    let mut airborne = false;
+    let mut minimum_feet = f32::MAX;
+    for _ in 0..240 {
+        tick_rider(&mut app);
+        let character = app.world().resource::<Editor>().character.unwrap();
+        minimum_feet = minimum_feet.min(character.feet);
+        if !character.grounded {
+            airborne = true;
+        }
+        if airborne && character.grounded && character.feet.abs() < 0.05 {
+            break;
+        }
+    }
+
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        airborne,
+        "the idle capsule must leave the block after the push, pos={:?} feet={} grounded={}",
+        character.pos, character.feet, character.grounded
+    );
+    assert!(
+        minimum_feet < 0.5,
+        "the capsule must actually descend, minimum feet={minimum_feet}"
+    );
+    assert!(
+        character.grounded && character.feet.abs() < 0.05,
+        "the capsule must land on the floor, pos={:?} feet={} grounded={}",
+        character.pos,
+        character.feet,
+        character.grounded
+    );
+}
+
+/// Same side-swipe while airborne: the platform must still shove, and the
+/// capsule must never end a frame intersecting it.
+#[test]
+fn an_airborne_capsule_is_pushed_by_a_moving_platform() {
+    let mut app = physics_app();
+    riding_setup(&mut app);
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        let mut hovering = riding_character();
+        hovering.pos = Vec2::new(1.5, 0.0);
+        hovering.feet = 0.2;
+        hovering.grounded = false;
+        editor.character = Some(hovering);
+        editor.walk = None;
+    }
+
+    let start = app.world().resource::<Editor>().character.unwrap().pos.x;
+    for _ in 0..120 {
+        tick_rider(&mut app);
+        assert_platforms_clear(&app, "airborne capsule");
+    }
+    let end = app.world().resource::<Editor>().character.unwrap().pos.x;
+    assert!(
+        end - start > 0.3,
+        "the airborne capsule must be shoved, start={start} end={end}"
+    );
+}
+
+/// An off-centre hit deflects sideways off the face instead of surfing it:
+/// a capsule clipped by the platform's corner slides clear to the side and
+/// the platform travels on past it, rather than dragging the capsule along.
+#[test]
+fn a_corner_hit_deflects_aside_instead_of_surfing() {
+    let mut app = physics_app();
+    riding_setup(&mut app);
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            // Ahead of the block but off to the side: the face would shove
+            // it straight forward forever if the push never escaped.
+            pos: Vec2::new(1.5, 0.8),
+            feet: 0.0,
+            yaw: 0.0,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            sliding: false,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+
+    for _ in 0..120 {
+        tick_rider(&mut app);
+        assert_platforms_clear(&app, "corner hit");
+    }
+    let editor = app.world().resource::<Editor>();
+    let character = editor.character.unwrap();
+    let platform = editor.pieces.iter().find(|p| p.id == 7).unwrap().pos;
+    assert!(
+        character.pos.y > 1.15,
+        "the capsule must slide clear of the face (half depth 0.9 + radius 0.32), pos={:?}",
+        character.pos,
+    );
+    assert!(
+        platform.x - character.pos.x > 0.5,
+        "the platform must travel on past the escaped capsule, char={:?} platform={:?}",
+        character.pos,
+        platform,
+    );
+    assert_eq!(
+        character.ride_vel,
+        Vec2::ZERO,
+        "nothing touches the capsule anymore, so no ride velocity may linger"
+    );
+}
+
 /// Walk from a floor tile into an adjacent ramp's low edge, the way a player
 /// crosses the tile border in the game. The ramp must be mountable without
 /// jumping.
@@ -1971,4 +2236,146 @@ fn walking_into_a_static_wall_shoves_nothing() {
         "the wall should still block, pos={:?}",
         character.pos
     );
+}
+
+/// The reporter's level, verbatim: one floor, pill parked at its rim.
+/// A floor piece with a motion path driving toward the pill.
+fn user_level_app() -> (App, Vec2) {
+    let floor_pos = Vec2::new(-1.273, -2.268);
+    let char_pos = Vec2::new(-0.969, -0.973);
+    let mut app = physics_app();
+    app.world_mut().resource_mut::<Editor>().pieces.push(Piece {
+        id: 1,
+        shape: model::shape_index("floor").unwrap(),
+        pos: floor_pos,
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+        trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
+    });
+    let dir = (char_pos - floor_pos).normalize_or_zero();
+    let mut movers = Movers::default();
+    let mover = movers.mover_mut(1, floor_pos);
+    mover
+        .waypoints
+        .push(crate::platforms::PlatformWaypoint::new(
+            floor_pos + dir * 4.0,
+        ));
+    mover.rebuild();
+    app.insert_resource(movers);
+    app.update();
+    app.update();
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: char_pos,
+            feet: 0.0,
+            yaw: 91f32.to_radians(),
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            sliding: false,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+    (app, dir)
+}
+
+/// Rim touch is not riding: while the floor slides toward the pill but has
+/// not reached it, the pill must stand perfectly still — no carry, no shove,
+/// no ride velocity. (Before the footprint check, the rim's upward contact
+/// normal read as "supported" and dragged the pill from frame zero.)
+#[test]
+fn user_level_rim_touch_drags_nothing() {
+    let (mut app, _) = user_level_app();
+    let start = app.world().resource::<Editor>().character.unwrap().pos;
+    for _ in 0..10 {
+        tick_rider(&mut app);
+        assert_platforms_clear(&app, "rim approach");
+    }
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        character.pos.distance(start) < 1e-3,
+        "the pill must stand still until the floor is actually under it, moved {:?} -> {:?}",
+        start,
+        character.pos,
+    );
+    assert_eq!(
+        character.ride_vel,
+        Vec2::ZERO,
+        "no contact yet, so no ride velocity"
+    );
+}
+
+/// Once the sliding floor is truly under the pill it picks it up and carries
+/// it — legitimate riding (over the deck, feet on the surface), never a rim
+/// drag. The floor travels 2.88 m in 120 ticks; the pill must end up riding
+/// the deck, having travelled with it.
+#[test]
+fn user_level_floor_picks_up_only_when_aboard() {
+    let (mut app, dir) = user_level_app();
+    let start = app.world().resource::<Editor>().character.unwrap().pos;
+    for _ in 0..120 {
+        tick_rider(&mut app);
+        assert_platforms_clear(&app, "slide-under");
+    }
+    let editor = app.world().resource::<Editor>();
+    let character = editor.character.unwrap();
+    let platform = editor.pieces.iter().find(|p| p.id == 1).unwrap();
+    let travelled = (character.pos - start).dot(dir);
+    assert!(
+        travelled > 1.0,
+        "the pill must ride once the floor is under it, travelled {travelled} along {dir:?}",
+    );
+    let shape = &shapes()[platform.shape];
+    assert!(
+        model::hit_test(shape, platform, character.pos, 0.05),
+        "riding means over the deck footprint, not hanging off it: char={:?} floor={:?}",
+        character.pos,
+        platform.pos,
+    );
+    assert!(
+        (character.feet - (platform.elevation + shape.top())).abs() < 0.05,
+        "standing on the deck top, feet={} deck={}",
+        character.feet,
+        platform.elevation + shape.top(),
+    );
+}
+
+/// A pill parked clear beside the track is never touched: the floor slides
+/// past, the pill stays put, no ride velocity lingers.
+#[test]
+fn user_level_pill_beside_the_track_is_untouched() {
+    let (mut app, dir) = user_level_app();
+    let perp = Vec2::new(-dir.y, dir.x);
+    let start = Vec2::new(-1.273, -2.268) + dir * 2.0 + perp * 1.6;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        let mut character = editor.character.unwrap();
+        character.pos = start;
+        editor.character = Some(character);
+    }
+    for _ in 0..120 {
+        tick_rider(&mut app);
+        assert_platforms_clear(&app, "beside track");
+    }
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        character.pos.distance(start) < 0.05,
+        "the floor must pass without dragging the pill, moved {:?} -> {:?}",
+        start,
+        character.pos,
+    );
+    assert_eq!(character.ride_vel, Vec2::ZERO);
 }

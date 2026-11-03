@@ -19,6 +19,7 @@ pub(super) fn on_palette_activate(
     nav: Res<Nav>,
     spatial_query: SpatialQuery,
     player: Query<Entity, With<CharacterVisual>>,
+    movers: Res<Movers>,
 ) {
     // While the pointer is captured the mouse only looks; Tab must release it
     // before a button can be used.
@@ -108,7 +109,7 @@ pub(super) fn on_palette_activate(
             focus_character(&mut orbit, editor.character);
         }
         PaletteAction::CopyJson => {
-            copy_level_json(&mut editor, &mut clipboard);
+            copy_level_json(&mut editor, &orbit, &movers, &mut clipboard);
             // Copying is not an authoring action: keep the current selection
             // and tool so the debug copy does not disturb what was on screen.
             return;
@@ -262,6 +263,7 @@ pub(super) fn interact(
     nav: Res<Nav>,
     menu: Res<AddMenu>,
     outliner: Res<OutlinerState>,
+    panel_state: Res<PropertiesPanelState>,
     camera: Single<(&Camera, &Transform)>,
     spatial_query: SpatialQuery,
     player: Query<Entity, With<CharacterVisual>>,
@@ -407,15 +409,17 @@ pub(super) fn interact(
         return;
     }
     if !playing
-        && !touch.enabled
-        && over_properties_panel(screen, cursor.screen_size, editor.selected.is_some())
+        && over_properties_panel(
+            screen,
+            cursor.screen_size,
+            editor.selected.is_some(),
+            panel_state.collapsed,
+            &touch,
+        )
     {
         return;
     }
-    if !playing
-        && !touch.enabled
-        && over_outliner_panel(screen, cursor.screen_size, outliner.collapsed)
-    {
+    if !playing && over_outliner_panel(screen, cursor.screen_size, outliner.collapsed, &touch) {
         return;
     }
 

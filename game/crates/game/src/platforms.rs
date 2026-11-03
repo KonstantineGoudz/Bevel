@@ -6,7 +6,6 @@
 
 use bevy::math::Vec2;
 
-use crate::model::{self, Piece};
 use crate::path;
 
 /// How a platform travels its track.
@@ -192,16 +191,6 @@ fn clamp_handle(anchor: Vec2, other: Vec2, control: Vec2) -> Vec2 {
     anchor + (control - anchor).clamp_length_max(limit)
 }
 
-/// True when the character stands on the piece: same footprint plus feet
-/// near the platform top. The tolerance rides through small physics gaps.
-pub fn is_riding(character_pos: Vec2, feet: f32, piece: &Piece, shape: &model::Shape) -> bool {
-    if !model::hit_test(shape, piece, character_pos, 0.25) {
-        return false;
-    }
-    let top = piece.elevation + shape.top();
-    (feet - top).abs() < 0.35
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,32 +301,5 @@ mod tests {
         let open = build_platform_track(&waypoints, false);
         let (open_end, _) = open.at(open.total());
         assert!(open_end.distance(start) > 2.0, "{open_end:?} vs {start:?}");
-    }
-
-    #[test]
-    fn rider_check_needs_footprint_and_height() {
-        let block = model::shape_index("block").unwrap();
-        let shape = &model::shapes()[block];
-        let piece = Piece {
-            id: 1,
-            shape: block,
-            pos: Vec2::ZERO,
-            rot: 0.0,
-            pitch: 0.0,
-            roll: 0.0,
-            elevation: 0.0,
-            dynamic: false,
-            trigger: crate::model::Trigger::harmless(),
-            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
-            trigger_shape_override: crate::model::TriggerShape::Box,
-            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
-            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
-            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
-            interact: crate::model::InteractAction::None,
-        };
-        let top = shape.top();
-        assert!(is_riding(Vec2::ZERO, top, &piece, shape));
-        assert!(!is_riding(Vec2::new(5.0, 5.0), top, &piece, shape));
-        assert!(!is_riding(Vec2::ZERO, top + 2.0, &piece, shape));
     }
 }

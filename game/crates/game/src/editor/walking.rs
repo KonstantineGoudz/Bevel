@@ -313,10 +313,11 @@ fn grounded_substep(
     if disp.length_squared() <= 1e-12 {
         // No wish travel: settle onto whatever is underfoot (a platform
         // may have carried the capsule) without drifting.
-        if let Some((stand, _)) = ground_at(spatial_query, filter, motion.pos, motion.feet)
-            && (stand - motion.feet).abs() <= STEP_DOWN.max(STEP_UP)
-        {
-            motion.feet = stand;
+        let ground = ground_at(spatial_query, filter, motion.pos, motion.feet)
+            .filter(|(stand, _)| (stand - motion.feet).abs() <= STEP_DOWN.max(STEP_UP));
+        match ground {
+            Some((stand, _)) => motion.feet = stand,
+            None => motion.grounded = false,
         }
         return 0.0;
     }
@@ -427,11 +428,20 @@ fn step_motion(
     if idle {
         motion.hv = Vec2::ZERO;
         motion.vy = 0.0;
-        if let Some((stand, _)) = ground_at(spatial_query, filter, motion.pos, motion.feet)
-            && (stand - motion.feet).abs() <= STEP_DOWN.max(STEP_UP)
-        {
-            motion.feet = stand;
-            motion.grounded = true;
+        let ground = ground_at(spatial_query, filter, motion.pos, motion.feet)
+            .filter(|(stand, _)| (stand - motion.feet).abs() <= STEP_DOWN.max(STEP_UP));
+        match ground {
+            Some((stand, _)) => {
+                motion.feet = stand;
+                motion.grounded = true;
+            }
+            None => {
+                // A mover shoved the capsule off its perch (or the platform
+                // slid out from under it). Idle frames still have to notice
+                // that and start falling instead of hovering until input.
+                motion.grounded = false;
+                motion.vy = -GRAVITY * frame;
+            }
         }
         return (0.0, pushes);
     }

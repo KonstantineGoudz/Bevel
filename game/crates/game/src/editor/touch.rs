@@ -12,6 +12,9 @@ pub(super) fn touch_input(
     time: Res<Time>,
     window: Single<&Window, With<PrimaryWindow>>,
     mut state: ResMut<TouchState>,
+    editor: Res<Editor>,
+    panel_state: Res<PropertiesPanelState>,
+    outliner: Res<OutlinerState>,
 ) {
     state.look = Vec2::ZERO;
     state.pan = Vec2::ZERO;
@@ -46,7 +49,24 @@ pub(super) fn touch_input(
         // grab radius is deliberately larger than the drawn pad so DPR and
         // UiScale rounding cannot put the thumb just outside it.
         let stick = grabs_stick(pos, centre, STICK_REACH * s * 1.7);
-        let control = !stick && over_controls(pos, size, s);
+        let mut control = !stick && over_controls(pos, size, s);
+        // A press on the floating property panel is panel business, never a
+        // camera gesture or a grid tap.
+        if !control
+            && editor.mode == Mode::Build
+            && editor.selected.is_some()
+            && over_properties_panel(pos, size, true, panel_state.collapsed, &state)
+        {
+            control = true;
+        }
+        // Same for the object graph: its rows, toggles and label field own
+        // the press.
+        if !control
+            && editor.mode == Mode::Build
+            && over_outliner_panel(pos, size, outliner.collapsed, &state)
+        {
+            control = true;
+        }
         state.tracks.insert(
             id,
             TouchTrack {
@@ -216,6 +236,8 @@ pub(super) fn touch_gizmo_fallback(
     mut touch: ResMut<TouchState>,
     focus: Res<InputFocus>,
     menu: Res<AddMenu>,
+    panel_state: Res<PropertiesPanelState>,
+    outliner: Res<OutlinerState>,
 ) {
     if !touch.enabled || capture.grabbed || menu.open {
         return;
@@ -244,6 +266,10 @@ pub(super) fn touch_gizmo_fallback(
         if grabs_stick(pos, centre, reach)
             || over_controls(pos, size, s)
             || over_pad_cluster(pos, size, s)
+            || (editor.selected.is_some()
+                && over_properties_panel(pos, size, true, panel_state.collapsed, &touch))
+            || (editor.mode == Mode::Build
+                && over_outliner_panel(pos, size, outliner.collapsed, &touch))
         {
             continue;
         }
@@ -521,6 +547,7 @@ pub(super) fn run_touch_action(
     spatial_query: &SpatialQuery,
     filter: &SpatialQueryFilter,
     controls: &Controls,
+    movers: &Movers,
 ) {
     match action {
         TouchAction::Play => set_mode(editor, editor.mode.toggled()),
@@ -614,7 +641,7 @@ pub(super) fn run_touch_action(
             editor.load_course();
             focus_character(orbit, editor.character);
         }
-        TouchAction::CopyJson => copy_level_json(editor, clipboard),
+        TouchAction::CopyJson => copy_level_json(editor, orbit, movers, clipboard),
         // The search button toggles the Add menu in `on_touch_button`, which
         // owns the menu focus and list state. Nothing to do on the level.
         TouchAction::Search => {}
@@ -680,6 +707,8 @@ pub(super) fn on_path_press(
     mut touch: ResMut<TouchState>,
     focus: Res<InputFocus>,
     menu: Res<AddMenu>,
+    panel_state: Res<PropertiesPanelState>,
+    outliner: Res<OutlinerState>,
 ) {
     if event.button != PointerButton::Primary || capture.grabbed {
         return;
@@ -694,9 +723,13 @@ pub(super) fn on_path_press(
         touch.multi = true;
     }
     let pos = event.pointer.position;
-    if !touch.enabled
-        && editor.selected.is_some()
-        && over_properties_panel(pos, window.size(), true)
+    if editor.selected.is_some()
+        && over_properties_panel(pos, window.size(), true, panel_state.collapsed, &touch)
+    {
+        return;
+    }
+    if editor.mode == Mode::Build
+        && over_outliner_panel(pos, window.size(), outliner.collapsed, &touch)
     {
         return;
     }
@@ -970,6 +1003,7 @@ pub(super) fn on_touch_button(
     mut search_query: Query<(Entity, &mut bevy::text::EditableText), With<AddMenuSearch>>,
     mut root_query: Query<&mut Node, With<AddMenuRoot>>,
     controls: Res<Controls>,
+    movers: Res<Movers>,
 ) {
     if editor.keyboard_transform.is_some() {
         return;
@@ -1032,5 +1066,6 @@ pub(super) fn on_touch_button(
         &spatial_query,
         &filter,
         &controls,
+        &movers,
     );
 }

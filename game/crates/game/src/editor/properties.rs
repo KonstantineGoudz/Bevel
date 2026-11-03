@@ -10,6 +10,11 @@ use bevy::ui_widgets::TextInput;
 pub(super) const PROPERTIES_WIDTH: f32 = 230.0;
 pub(super) const PROPERTIES_MARGIN: f32 = 12.0;
 pub(super) const PROPERTIES_HEIGHT: f32 = 910.0;
+/// Panel top on touch: below the toolbar / carousel / status rows so the
+/// floating window never covers the mobile controls.
+pub(super) const PROPERTIES_TOP_TOUCH: f32 = 140.0;
+/// Height of the title bar when the panel is collapsed to just its header.
+pub(super) const PROPERTIES_COLLAPSED_HEIGHT: f32 = 40.0;
 
 #[derive(Component)]
 pub(super) struct PlatformSection;
@@ -54,15 +59,45 @@ pub(super) struct InteractButton;
 pub(super) struct InteractLabel;
 
 /// Whether a logical screen point is over the floating property panel.
-pub(super) fn over_properties_panel(screen: Vec2, size: Vec2, selected: bool) -> bool {
+/// Geometry mirrors `sync_properties_panel`: the touch layout sits below the
+/// toolbar and renders at `ui_scale`, and a collapsed panel is just its
+/// header.
+pub(super) fn over_properties_panel(
+    screen: Vec2,
+    size: Vec2,
+    selected: bool,
+    collapsed: bool,
+    touch: &TouchState,
+) -> bool {
+    let s = if touch.enabled { touch.ui_scale } else { 1.0 };
+    let top = if touch.enabled {
+        PROPERTIES_TOP_TOUCH
+    } else {
+        PROPERTIES_MARGIN
+    };
+    let height = if collapsed {
+        PROPERTIES_COLLAPSED_HEIGHT
+    } else {
+        PROPERTIES_HEIGHT
+    };
     selected
-        && screen.x >= size.x - PROPERTIES_WIDTH - PROPERTIES_MARGIN
-        && screen.y >= PROPERTIES_MARGIN
-        && screen.y <= PROPERTIES_MARGIN + PROPERTIES_HEIGHT
+        && screen.x >= size.x - (PROPERTIES_WIDTH + PROPERTIES_MARGIN) * s
+        && screen.y >= top * s
+        && screen.y <= (top + height) * s
 }
 
 #[derive(Component)]
 pub(super) struct PropertiesPanel;
+
+/// The collapsible half of the panel (everything below the header).
+#[derive(Component)]
+pub(super) struct PropertiesBody;
+
+#[derive(Component)]
+pub(super) struct PropertiesCollapseButton;
+
+#[derive(Component)]
+pub(super) struct PropertiesCollapseLabel;
 
 #[derive(Component)]
 pub(super) struct PropertyShapeLabel;
@@ -195,6 +230,15 @@ impl PropertyField {
     }
 }
 
+/// Collapse state for the property panel. The panel starts expanded on
+/// desktop; on touch it starts collapsed so a selection never opens covering
+/// the viewport.
+#[derive(Resource, Default)]
+pub(super) struct PropertiesPanelState {
+    pub(super) collapsed: bool,
+    pub(super) touch_seen: bool,
+}
+
 #[derive(Resource, Default)]
 pub(super) struct PropertyEditState {
     selected: Option<u32>,
@@ -221,6 +265,8 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
                 row_gap: px(5),
                 border: UiRect::all(px(1)),
                 border_radius: BorderRadius::all(px(6)),
+                // Tall content scrolls instead of running off small screens.
+                overflow: Overflow::scroll_y(),
                 display: Display::None,
                 ..default()
             },
@@ -233,11 +279,39 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
         .spawn(Node {
             width: percent(100),
             flex_direction: FlexDirection::Row,
-            justify_content: JustifyContent::SpaceBetween,
             align_items: AlignItems::Center,
+            column_gap: px(6),
             ..default()
         })
         .id();
+    let collapse = commands
+        .spawn((
+            Button,
+            PropertiesCollapseButton,
+            Node {
+                width: px(16),
+                height: px(16),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(4)),
+                ..default()
+            },
+            BackgroundColor(BUTTON_BG),
+            BorderColor::all(BORDER),
+            children![(
+                PropertiesCollapseLabel,
+                Text::new("v"),
+                TextFont {
+                    font_size: FontSize::Px(10.0),
+                    ..default()
+                },
+                TextColor(MUTED),
+                TextLayout::no_wrap(),
+            )],
+        ))
+        .id();
+    commands.entity(collapse).observe(on_properties_collapse);
     let title = commands
         .spawn((
             Text::new("PROPERTIES"),
@@ -247,6 +321,12 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
             },
             TextColor(MUTED),
         ))
+        .id();
+    let spacer = commands
+        .spawn(Node {
+            flex_grow: 1.0,
+            ..default()
+        })
         .id();
     let shape = commands
         .spawn((
@@ -259,11 +339,26 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
             TextColor(Color::srgb_u8(0xc3, 0xd0, 0xdf)),
         ))
         .id();
-    commands.entity(header).add_children(&[title, shape]);
+    commands
+        .entity(header)
+        .add_children(&[collapse, title, spacer, shape]);
     commands.entity(panel).add_child(header);
 
+    // Everything below the header collapses away.
+    let body = commands
+        .spawn((
+            PropertiesBody,
+            Node {
+                width: percent(100),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(5),
+                ..default()
+            },
+        ))
+        .id();
+
     let position_label = section_label(commands, "POSITION");
-    commands.entity(panel).add_child(position_label);
+    commands.entity(body).add_child(position_label);
     for (index, field) in [
         PropertyField::PosX,
         PropertyField::PosY,
@@ -273,10 +368,10 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
     .enumerate()
     {
         let row = property_row(commands, field, index);
-        commands.entity(panel).add_child(row);
+        commands.entity(body).add_child(row);
     }
     let rotation_label = section_label(commands, "ROTATION (DEGREES)");
-    commands.entity(panel).add_child(rotation_label);
+    commands.entity(body).add_child(rotation_label);
     for (index, field) in [
         PropertyField::RotX,
         PropertyField::RotY,
@@ -286,20 +381,20 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
     .enumerate()
     {
         let row = property_row(commands, field, index + 3);
-        commands.entity(panel).add_child(row);
+        commands.entity(body).add_child(row);
     }
     // Collision trigger: per-piece damage. Any object can hurt; 0 is
     // harmless. Future trigger effects get their own rows here.
     let damage_label = section_label(commands, "TRIGGER (DAMAGE PER HIT)");
-    commands.entity(panel).add_child(damage_label);
+    commands.entity(body).add_child(damage_label);
     let damage_row = property_row(commands, PropertyField::Damage, 6);
-    commands.entity(panel).add_child(damage_row);
+    commands.entity(body).add_child(damage_row);
 
     // Parametric trigger volume (only meaningful for trigger shapes, but shown
     // for any selection to keep the panel layout stable; values are ignored
     // for non-triggers).
     let trigger_vol_label = section_label(commands, "TRIGGER VOLUME (W / H / L)");
-    commands.entity(panel).add_child(trigger_vol_label);
+    commands.entity(body).add_child(trigger_vol_label);
     for (offset, field) in [
         PropertyField::TriggerWidth,
         PropertyField::TriggerHeight,
@@ -309,7 +404,7 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
     .enumerate()
     {
         let row = property_row(commands, field, 7 + offset);
-        commands.entity(panel).add_child(row);
+        commands.entity(body).add_child(row);
     }
     let shape_toggle = commands
         .spawn((
@@ -339,13 +434,13 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
         ))
         .id();
     commands.entity(shape_toggle).observe(on_trigger_shape);
-    commands.entity(panel).add_child(shape_toggle);
+    commands.entity(body).add_child(shape_toggle);
 
     // Transparency slider for trigger zones.
     let transp_label = section_label(commands, "TRANSPARENCY");
-    commands.entity(panel).add_child(transp_label);
+    commands.entity(body).add_child(transp_label);
     let alpha_row = property_row(commands, PropertyField::TriggerAlpha, 10);
-    commands.entity(panel).add_child(alpha_row);
+    commands.entity(body).add_child(alpha_row);
     // Visual slider: track + fill + value label.
     let slider_row = commands
         .spawn(Node {
@@ -418,11 +513,11 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
     commands
         .entity(slider_row)
         .add_children(&[slider_caption, slider_track, slider_value]);
-    commands.entity(panel).add_child(slider_row);
+    commands.entity(body).add_child(slider_row);
 
     // Trigger color: preset swatches for quick assignment.
     let color_label = section_label(commands, "TRIGGER COLOR");
-    commands.entity(panel).add_child(color_label);
+    commands.entity(body).add_child(color_label);
     let color_row = commands
         .spawn(Node {
             width: percent(100),
@@ -450,7 +545,7 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
         commands.entity(btn).observe(on_trigger_color);
         commands.entity(color_row).add_child(btn);
     }
-    commands.entity(panel).add_child(color_row);
+    commands.entity(body).add_child(color_row);
 
     // Visibility toggle for edit mode (always selectable via scene graph).
     let visible_toggle = commands
@@ -481,7 +576,7 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
         ))
         .id();
     commands.entity(visible_toggle).observe(on_trigger_visible);
-    commands.entity(panel).add_child(visible_toggle);
+    commands.entity(body).add_child(visible_toggle);
 
     let toggle = commands
         .spawn((
@@ -511,7 +606,7 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
         ))
         .id();
     commands.entity(toggle).observe(on_physics_toggle);
-    commands.entity(panel).add_child(toggle);
+    commands.entity(body).add_child(toggle);
 
     // Motion section: mode / pause / speed / clear for the selected piece.
     let motion = commands
@@ -592,15 +687,30 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
     );
     commands.entity(clear).observe(on_platform_clear);
     commands.entity(motion).add_child(clear);
-    commands.entity(panel).add_child(motion);
+    commands.entity(body).add_child(motion);
 
     // Interact section: what happens when the player presses E / Interact
     // near the selected piece. New actions get new variants, not new UI.
     let interact_label = section_label(commands, "INTERACT (E KEY / USE BUTTON)");
-    commands.entity(panel).add_child(interact_label);
+    commands.entity(body).add_child(interact_label);
     let interact = platform_button(commands, InteractButton, InteractLabel, "Interact: off");
     commands.entity(interact).observe(on_interact_toggle);
-    commands.entity(panel).add_child(interact);
+    commands.entity(body).add_child(interact);
+    commands.entity(panel).add_child(body);
+}
+
+pub(super) fn on_properties_collapse(
+    event: On<Activate>,
+    buttons: Query<&PropertiesCollapseButton>,
+    mut state: ResMut<PropertiesPanelState>,
+    mut focus: ResMut<InputFocus>,
+) {
+    if buttons.get(event.entity).is_ok() {
+        state.collapsed = !state.collapsed;
+        if focus.get().is_some() {
+            focus.clear();
+        }
+    }
 }
 
 fn platform_button<C: Component, L: Component>(
@@ -1118,7 +1228,6 @@ pub(super) fn apply_property_edits(
 pub(super) fn sync_properties_panel(
     editor: Res<Editor>,
     movers: Res<Movers>,
-    touch: Res<TouchState>,
     mut focus: ResMut<InputFocus>,
     mut state: ResMut<PropertyEditState>,
     mut panel: Single<&mut Node, With<PropertiesPanel>>,
@@ -1214,12 +1323,12 @@ pub(super) fn sync_properties_panel(
             Without<TriggerShapeLabel>,
         ),
     >,
-    mut trigger_shape_label: Single<&mut Text, With<TriggerShapeLabel>>,
+    mut trigger_shape_label: Single<&mut Text, (With<TriggerShapeLabel>,)>,
 ) {
     let selected = editor
         .selected
         .and_then(|id| editor.pieces.iter().find(|piece| piece.id == id).copied());
-    let visible = editor.mode == Mode::Build && !touch.enabled && selected.is_some();
+    let visible = editor.mode == Mode::Build && selected.is_some();
     panel.display = if visible {
         Display::Flex
     } else {
@@ -1307,6 +1416,61 @@ pub(super) fn sync_properties_panel(
     }
 }
 
+/// Panel chrome: per-layer geometry, collapse height, body visibility and the
+/// header glyph. Split out of `sync_properties_panel` so that system stays
+/// under the function-system parameter limit.
+pub(super) fn sync_properties_chrome(
+    touch: Res<TouchState>,
+    mut panel_state: ResMut<PropertiesPanelState>,
+    mut panels: Query<&mut Node, (With<PropertiesPanel>, Without<PropertiesBody>)>,
+    mut bodies: Query<&mut Node, (With<PropertiesBody>, Without<PropertiesPanel>)>,
+    mut collapse_labels: Query<&mut Text, With<PropertiesCollapseLabel>>,
+) {
+    // A fresh touch selection opens collapsed so the panel never covers the
+    // viewport; the user expands it with the header button.
+    if touch.enabled && !panel_state.touch_seen {
+        panel_state.touch_seen = true;
+        panel_state.collapsed = true;
+    }
+    // Touch docks the panel below the toolbar; both layouts render at the
+    // input layer's scale (see `over_properties_panel`).
+    let top = if touch.enabled {
+        PROPERTIES_TOP_TOUCH
+    } else {
+        PROPERTIES_MARGIN
+    };
+    let height = if panel_state.collapsed {
+        PROPERTIES_COLLAPSED_HEIGHT
+    } else {
+        PROPERTIES_HEIGHT
+    };
+    for mut panel in &mut panels {
+        if panel.top != px(top) {
+            panel.top = px(top);
+        }
+        if panel.height != px(height) {
+            panel.height = px(height);
+        }
+        // Visibility itself lives in `sync_properties_panel`.
+    }
+    for mut body in &mut bodies {
+        let display = if panel_state.collapsed {
+            Display::None
+        } else {
+            Display::Flex
+        };
+        if body.display != display {
+            body.display = display;
+        }
+    }
+    let glyph = if panel_state.collapsed { ">" } else { "v" };
+    for mut label in &mut collapse_labels {
+        if label.0.as_str() != glyph {
+            label.0 = glyph.to_owned();
+        }
+    }
+}
+
 pub(super) fn sync_transparency_slider(
     editor: Res<Editor>,
     mut fill_query: Query<&mut Node, With<TransparencySliderFill>>,
@@ -1329,12 +1493,16 @@ pub(super) fn sync_transparency_slider(
 
 pub(super) fn handle_transparency_slider(
     mouse: Res<ButtonInput<MouseButton>>,
+    touches: Res<Touches>,
     slider_query: Query<(&RelativeCursorPosition, &Interaction), With<TransparencySlider>>,
     mut editor: ResMut<Editor>,
     mut committed: Local<bool>,
 ) {
-    // Reset commit flag when mouse is released.
-    if !mouse.pressed(MouseButton::Left) {
+    // A held touch drags the slider just like the held mouse button; the
+    // `Pressed` interaction itself is pointer-driven either way.
+    let held = mouse.pressed(MouseButton::Left) || touches.iter().next().is_some();
+    // Reset commit flag when nothing holds the slider.
+    if !held {
         *committed = false;
         return;
     }

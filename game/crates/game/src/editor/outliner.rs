@@ -21,22 +21,42 @@ use bevy::ui_widgets::TextInput;
 pub(super) const OUTLINER_WIDTH: f32 = 250.0;
 pub(super) const OUTLINER_MARGIN: f32 = 8.0;
 pub(super) const OUTLINER_TOP: f32 = 38.0;
+/// Touch geometry: docked below the toolbar like the properties panel.
+pub(super) const OUTLINER_TOUCH_LEFT: f32 = 8.0;
+pub(super) const OUTLINER_TOUCH_TOP: f32 = 140.0;
 pub(super) const OUTLINER_HEIGHT: f32 = 350.0;
 /// Height of the title bar when the graph is collapsed to just its header.
 pub(super) const OUTLINER_COLLAPSED_HEIGHT: f32 = 34.0;
 
 /// Whether a logical screen point is over the floating object graph.
-pub(super) fn over_outliner_panel(screen: Vec2, _size: Vec2, collapsed: bool) -> bool {
+/// Geometry mirrors `sync_outliner_panel`: the touch layout docks below the
+/// toolbar and renders at the input layer's scale.
+pub(super) fn over_outliner_panel(
+    screen: Vec2,
+    _size: Vec2,
+    collapsed: bool,
+    touch: &TouchState,
+) -> bool {
+    let s = if touch.enabled { touch.ui_scale } else { 1.0 };
+    let left = if touch.enabled {
+        OUTLINER_TOUCH_LEFT
+    } else {
+        PANEL_WIDTH + OUTLINER_MARGIN
+    };
+    let top = if touch.enabled {
+        OUTLINER_TOUCH_TOP
+    } else {
+        OUTLINER_TOP
+    };
     let height = if collapsed {
         OUTLINER_COLLAPSED_HEIGHT
     } else {
         OUTLINER_HEIGHT
     };
-    let left = PANEL_WIDTH + OUTLINER_MARGIN;
-    screen.x >= left
-        && screen.x <= left + OUTLINER_WIDTH
-        && screen.y >= OUTLINER_TOP
-        && screen.y <= OUTLINER_TOP + height
+    screen.x >= left * s
+        && screen.x <= (left + OUTLINER_WIDTH) * s
+        && screen.y >= top * s
+        && screen.y <= (top + height) * s
 }
 
 #[derive(Component)]
@@ -114,11 +134,6 @@ pub(super) fn spawn_object_graph(commands: &mut Commands) {
     let panel = commands
         .spawn((
             OutlinerPanel,
-            InputLayer { desktop: true },
-            ModeUi {
-                desktop: true,
-                play: false,
-            },
             Node {
                 position_type: PositionType::Absolute,
                 left: px(PANEL_WIDTH + OUTLINER_MARGIN),
@@ -340,6 +355,8 @@ pub(super) fn spawn_object_graph(commands: &mut Commands) {
 }
 
 pub(super) fn sync_outliner_panel(
+    editor: Res<Editor>,
+    touch: Res<TouchState>,
     state: Res<OutlinerState>,
     mut panels: Query<&mut Node, (With<OutlinerPanel>, Without<OutlinerBody>)>,
     mut bodies: Query<&mut Node, (With<OutlinerBody>, Without<OutlinerPanel>)>,
@@ -350,9 +367,34 @@ pub(super) fn sync_outliner_panel(
     } else {
         OUTLINER_HEIGHT
     };
+    let left = if touch.enabled {
+        OUTLINER_TOUCH_LEFT
+    } else {
+        PANEL_WIDTH + OUTLINER_MARGIN
+    };
+    let top = if touch.enabled {
+        OUTLINER_TOUCH_TOP
+    } else {
+        OUTLINER_TOP
+    };
+    let visible = editor.mode == Mode::Build;
     for mut panel in &mut panels {
+        if panel.left != px(left) {
+            panel.left = px(left);
+        }
+        if panel.top != px(top) {
+            panel.top = px(top);
+        }
         if panel.height != px(height) {
             panel.height = px(height);
+        }
+        let display = if visible {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if panel.display != display {
+            panel.display = display;
         }
     }
     for mut body in &mut bodies {
@@ -959,6 +1001,7 @@ pub(super) fn on_outliner_release(
     event: On<PointerRelease>,
     mut editor: ResMut<Editor>,
     mut state: ResMut<OutlinerState>,
+    touch: Res<TouchState>,
     rows: Query<&OutlinerRow>,
     toggles: Query<&OutlinerToggle>,
     locks: Query<&OutlinerLockButton>,
@@ -977,8 +1020,10 @@ pub(super) fn on_outliner_release(
     };
     // Selecting the row can change the panel layout (for example the label
     // field becomes active), which can move a different row under a still
-    // pointer. Only a deliberate drag may reparent anything.
-    if event.pointer.position.distance(start) < 4.0 {
+    // pointer. Only a deliberate drag may reparent anything. Fingers get a
+    // fingertip tolerance; a mouse keeps the exact few pixels.
+    let threshold = if touch.enabled { 24.0 } else { 4.0 };
+    if event.pointer.position.distance(start) < threshold {
         return;
     }
     let target = match outliner_hit(
@@ -1113,13 +1158,13 @@ pub(super) fn outliner_scroll(
             MouseScrollUnit::Pixel => wheel.y,
         })
         .sum();
-    if touch.enabled || state.collapsed || editor.mode != Mode::Build || raw == 0.0 {
+    if state.collapsed || editor.mode != Mode::Build || raw == 0.0 {
         return;
     }
     let Some(cursor) = window.cursor_position() else {
         return;
     };
-    if !over_outliner_panel(cursor, window.size(), state.collapsed) {
+    if !over_outliner_panel(cursor, window.size(), state.collapsed, &touch) {
         return;
     }
     let Ok((mut position, computed)) = list.single_mut() else {

@@ -49,6 +49,9 @@ fn test_route(valid: bool) -> Route {
 fn touch_app(scale_factor: f32) -> (App, Entity) {
     let mut app = App::new();
     app.init_resource::<Touches>();
+    app.init_resource::<Editor>();
+    app.init_resource::<OutlinerState>();
+    app.init_resource::<PropertiesPanelState>();
     app.insert_resource(TouchState {
         enabled: true,
         ui_scale: 1.0,
@@ -156,7 +159,8 @@ fn tick_walk(app: &mut App) {
 }
 
 /// Movers run before the character, like the live schedule: platforms carry
-/// the rider, then physics jumps or lands on the carried pose.
+/// the rider, then physics jumps or lands on the carried pose. The final
+/// depenetration runs last, also like the live schedule.
 fn tick_rider(app: &mut App) {
     app.world_mut()
         .resource_mut::<Time>()
@@ -167,6 +171,9 @@ fn tick_rider(app: &mut App) {
     app.world_mut()
         .run_system_once(character_move)
         .expect("character move");
+    app.world_mut()
+        .run_system_once(resolve_platform_push)
+        .expect("resolve platform push");
 }
 
 fn test_piece(id: u32) -> Piece {

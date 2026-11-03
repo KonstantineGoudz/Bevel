@@ -42,13 +42,157 @@ fn damage_property_maps_to_trigger_and_clamps() {
 
 #[test]
 fn the_property_panel_hit_box_matches_its_floating_window() {
+    let touch = TouchState::default();
     let size = Vec2::new(1000.0, 800.0);
     let inside = Vec2::new(1000.0 - PROPERTIES_WIDTH - 5.0, 40.0);
-    assert!(over_properties_panel(inside, size, true));
-    assert!(!over_properties_panel(inside, size, false));
-    assert!(!over_properties_panel(Vec2::new(100.0, 40.0), size, true));
+    assert!(over_properties_panel(inside, size, true, false, &touch));
+    assert!(!over_properties_panel(inside, size, false, false, &touch));
+    assert!(!over_properties_panel(
+        Vec2::new(100.0, 40.0),
+        size,
+        true,
+        false,
+        &touch
+    ));
     // Panel height is 910, so y=750 is still inside (12..922); check beyond.
-    assert!(!over_properties_panel(Vec2::new(760.0, 960.0), size, true));
+    assert!(!over_properties_panel(
+        Vec2::new(760.0, 960.0),
+        size,
+        true,
+        false,
+        &touch
+    ));
+    // Collapsed: only the header counts.
+    assert!(over_properties_panel(
+        Vec2::new(1000.0 - 5.0, 20.0),
+        size,
+        true,
+        true,
+        &touch
+    ));
+    assert!(!over_properties_panel(
+        Vec2::new(1000.0 - 5.0, 100.0),
+        size,
+        true,
+        true,
+        &touch
+    ));
+}
+
+#[test]
+fn the_touch_property_panel_docks_below_the_toolbar() {
+    let mobile = TouchState {
+        enabled: true,
+        ui_scale: 0.5,
+        ..Default::default()
+    };
+    let size = Vec2::new(390.0, 844.0);
+    // Right zone shrinks with the UI scale; top sits below the toolbar.
+    assert!(over_properties_panel(
+        Vec2::new(300.0, 100.0),
+        size,
+        true,
+        false,
+        &mobile
+    ));
+    assert!(!over_properties_panel(
+        Vec2::new(300.0, 30.0),
+        size,
+        true,
+        false,
+        &mobile
+    ));
+    assert!(!over_properties_panel(
+        Vec2::new(100.0, 100.0),
+        size,
+        true,
+        false,
+        &mobile
+    ));
+    // Collapsed on touch: a short header strip only.
+    assert!(over_properties_panel(
+        Vec2::new(300.0, 80.0),
+        size,
+        true,
+        true,
+        &mobile
+    ));
+    assert!(!over_properties_panel(
+        Vec2::new(300.0, 100.0),
+        size,
+        true,
+        true,
+        &mobile
+    ));
+}
+
+#[test]
+fn collapsing_the_properties_panel_hides_its_body() {
+    let mut app = App::new();
+    app.init_resource::<TouchState>();
+    app.init_resource::<InputFocus>();
+    app.init_resource::<PropertiesPanelState>();
+    app.world_mut().spawn((
+        PropertiesPanel,
+        Node {
+            height: px(PROPERTIES_HEIGHT),
+            ..default()
+        },
+    ));
+    app.world_mut().spawn((
+        PropertiesBody,
+        Node {
+            display: Display::Flex,
+            ..default()
+        },
+    ));
+    app.world_mut()
+        .spawn((PropertiesCollapseLabel, Text::new("v")));
+    let button = app
+        .world_mut()
+        .spawn((PropertiesCollapseButton, Button))
+        .observe(on_properties_collapse)
+        .id();
+
+    // Collapse through the header button.
+    app.world_mut().trigger(Activate { entity: button });
+    assert!(app.world().resource::<PropertiesPanelState>().collapsed);
+
+    app.world_mut()
+        .run_system_once(sync_properties_chrome)
+        .expect("sync chrome");
+    let world = app.world_mut();
+    let mut panels: Vec<_> = world
+        .query_filtered::<&Node, With<PropertiesPanel>>()
+        .iter(world)
+        .collect();
+    assert_eq!(panels.len(), 1);
+    assert_eq!(panels[0].height, px(PROPERTIES_COLLAPSED_HEIGHT));
+    let mut bodies: Vec<_> = world
+        .query_filtered::<&Node, With<PropertiesBody>>()
+        .iter(world)
+        .collect();
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0].display, Display::None);
+}
+
+#[test]
+fn touch_starts_with_the_properties_panel_collapsed() {
+    let mut app = App::new();
+    app.init_resource::<PropertiesPanelState>();
+    app.insert_resource(TouchState {
+        enabled: true,
+        ui_scale: 0.5,
+        ..default()
+    });
+    app.world_mut().spawn((PropertiesPanel, Node::default()));
+    app.world_mut().spawn((PropertiesBody, Node::default()));
+    app.world_mut()
+        .run_system_once(sync_properties_chrome)
+        .expect("sync chrome");
+    let state = app.world().resource::<PropertiesPanelState>();
+    assert!(state.touch_seen);
+    assert!(state.collapsed);
 }
 
 #[test]
@@ -152,13 +296,15 @@ fn visuals_system_has_disjoint_queries() {
 
 #[test]
 fn the_object_graph_hit_box_matches_its_floating_window() {
+    let touch = TouchState::default();
     let size = Vec2::new(1000.0, 800.0);
     let inside = Vec2::new(PANEL_WIDTH + OUTLINER_MARGIN + 20.0, OUTLINER_TOP + 20.0);
-    assert!(over_outliner_panel(inside, size, false));
+    assert!(over_outliner_panel(inside, size, false, &touch));
     assert!(!over_outliner_panel(
         Vec2::new(PANEL_WIDTH + 2.0, OUTLINER_TOP),
         size,
-        false
+        false,
+        &touch
     ));
     assert!(!over_outliner_panel(
         Vec2::new(
@@ -166,19 +312,102 @@ fn the_object_graph_hit_box_matches_its_floating_window() {
             OUTLINER_TOP + OUTLINER_HEIGHT + 1.0
         ),
         size,
-        false
+        false,
+        &touch
     ));
     // Collapsed: only the title bar occupies space.
     assert!(!over_outliner_panel(
         Vec2::new(PANEL_WIDTH + OUTLINER_MARGIN + 20.0, OUTLINER_TOP + 40.0),
         size,
-        true
+        true,
+        &touch
     ));
     assert!(over_outliner_panel(
         Vec2::new(PANEL_WIDTH + OUTLINER_MARGIN + 4.0, OUTLINER_TOP + 4.0),
         size,
-        true
+        true,
+        &touch
     ));
+}
+
+#[test]
+fn the_touch_object_graph_docks_below_the_toolbar() {
+    let mobile = TouchState {
+        enabled: true,
+        ui_scale: 0.5,
+        ..Default::default()
+    };
+    let size = Vec2::new(390.0, 844.0);
+    // Left edge and below-toolbar top shrink with the UI scale.
+    assert!(over_outliner_panel(
+        Vec2::new(20.0, 100.0),
+        size,
+        false,
+        &mobile
+    ));
+    assert!(!over_outliner_panel(
+        Vec2::new(20.0, 30.0),
+        size,
+        false,
+        &mobile
+    ));
+    assert!(!over_outliner_panel(
+        Vec2::new(200.0, 100.0),
+        size,
+        false,
+        &mobile
+    ));
+    // Collapsed: a short header strip only.
+    assert!(over_outliner_panel(
+        Vec2::new(20.0, 80.0),
+        size,
+        true,
+        &mobile
+    ));
+    assert!(!over_outliner_panel(
+        Vec2::new(20.0, 100.0),
+        size,
+        true,
+        &mobile
+    ));
+}
+
+#[test]
+fn the_object_graph_shows_on_touch_and_hides_in_play() {
+    fn spawn_panel(mut commands: Commands) {
+        spawn_object_graph(&mut commands);
+    }
+
+    let mut app = App::new();
+    app.init_resource::<Editor>();
+    app.init_resource::<OutlinerState>();
+    app.init_resource::<OutlinerEdit>();
+    app.init_resource::<InputFocus>();
+    app.insert_resource(TouchState {
+        enabled: true,
+        ui_scale: 0.5,
+        ..Default::default()
+    });
+    app.add_systems(Startup, spawn_panel);
+    app.add_systems(Update, sync_outliner_panel);
+    app.update();
+
+    // Build on touch: visible, docked left below the toolbar.
+    let panel = app
+        .world_mut()
+        .query_filtered::<Entity, With<OutlinerPanel>>()
+        .single(app.world())
+        .expect("outliner panel");
+    let node = app.world().entity(panel).get::<Node>().unwrap();
+    assert_eq!(node.display, Display::Flex);
+    assert_eq!(node.left, px(OUTLINER_TOUCH_LEFT));
+    assert_eq!(node.top, px(OUTLINER_TOUCH_TOP));
+
+    // Play hides it again.
+    app.world_mut().resource_mut::<Editor>().mode = Mode::Play;
+    app.update();
+    let node = app.world().entity(panel).get::<Node>().unwrap();
+    assert_eq!(node.display, Display::None);
 }
 
 #[test]
@@ -192,6 +421,7 @@ fn the_object_graph_panel_spawns_and_lists_pieces_and_groups() {
     app.init_resource::<OutlinerState>();
     app.init_resource::<OutlinerEdit>();
     app.init_resource::<InputFocus>();
+    app.init_resource::<TouchState>();
     app.add_systems(Startup, spawn_panel);
     app.add_systems(
         Update,
@@ -386,6 +616,7 @@ fn clicking_a_lock_badge_toggles_lock_without_selecting() {
     app.init_resource::<OutlinerState>();
     app.init_resource::<OutlinerEdit>();
     app.init_resource::<InputFocus>();
+    app.init_resource::<TouchState>();
     app.init_resource::<Orbit>();
     app.add_systems(Startup, spawn_panel);
     app.add_systems(

@@ -118,20 +118,26 @@ pub(super) fn camera_control(
     input_focus: Res<InputFocus>,
     menu: Res<AddMenu>,
     outliner: Res<OutlinerState>,
+    panel_state: Res<PropertiesPanelState>,
 ) {
     // The modal transform, a focused property field, or a pointer over the
     // property panel owns the mouse. Drain the deltas so the camera does not
     // jump when editing ends.
     let over_properties = editor.selected.is_some()
-        && window
-            .cursor_position()
-            .is_some_and(|p| over_properties_panel(p, window.size(), editor.selected.is_some()));
+        && window.cursor_position().is_some_and(|p| {
+            over_properties_panel(
+                p,
+                window.size(),
+                editor.selected.is_some(),
+                panel_state.collapsed,
+                &touch,
+            )
+        });
     let over_outliner = !capture.grabbed
         && editor.mode == Mode::Build
-        && !touch.enabled
         && window
             .cursor_position()
-            .is_some_and(|p| over_outliner_panel(p, window.size(), outliner.collapsed));
+            .is_some_and(|p| over_outliner_panel(p, window.size(), outliner.collapsed, &touch));
     if editor.keyboard_transform.is_some()
         || input_focus.get().is_some()
         || over_properties
