@@ -192,18 +192,12 @@ pub(super) fn contact_gap(ray_distance: f32, normal_y: f32) -> f32 {
 /// airborne motion only, where the capsule is not resting on terrain.
 ///
 /// Sample the walkable surface under `at`, returning the foot height the
-/// capsule stands at there plus the surface normal's vertical component.
-/// The ray starts just above the tallest acceptable step, so a wall top
-/// beside the path is never sampled as ground. The standing height is
-/// lifted by `R * (1/ny - 1)`: a capsule resting on a slope touches along
-/// the normal, so its lowest point sits that far above the surface point
-/// directly beneath its centre.
-fn ground_at(
-    rapier: &RapierContext,
-    filter: QueryFilter,
-    at: Vec2,
-    feet: f32,
-) -> Option<(f32, f32)> {
+/// capsule stands at there. The ray starts just above the tallest acceptable
+/// step, so a wall top beside the path is never sampled as ground. The
+/// standing height is lifted by `R * (1/ny - 1)`: a capsule resting on a
+/// slope touches along the normal, so its lowest point sits that far above
+/// the surface point directly beneath its centre.
+fn ground_at(rapier: &RapierContext, filter: QueryFilter, at: Vec2, feet: f32) -> Option<f32> {
     let origin_y = feet + STEP_UP + 0.06;
     let (_, hit) = rapier.cast_ray_and_get_normal(
         Vec3::new(at.x, origin_y, at.y),
@@ -216,8 +210,7 @@ fn ground_at(
         return None;
     }
     let raw = origin_y - hit.time_of_impact;
-    let stand = raw + PILL_RADIUS * (1.0 / hit.normal.y - 1.0);
-    Some((stand, hit.normal.y))
+    Some(raw + PILL_RADIUS * (1.0 / hit.normal.y - 1.0))
 }
 
 /// A wall blocking movement from `pos` along `dir`, if one reaches the
@@ -309,9 +302,9 @@ fn grounded_substep(
         // No wish travel: settle onto whatever is underfoot (a platform
         // may have carried the capsule) without drifting.
         let ground = ground_at(rapier, filter, motion.pos, motion.feet)
-            .filter(|(stand, _)| (stand - motion.feet).abs() <= STEP_DOWN.max(STEP_UP));
+            .filter(|stand| (*stand - motion.feet).abs() <= STEP_DOWN.max(STEP_UP));
         match ground {
-            Some((stand, _)) => motion.feet = stand,
+            Some(stand) => motion.feet = stand,
             None => motion.grounded = false,
         }
         return 0.0;
@@ -341,7 +334,7 @@ fn grounded_substep(
             }
             continue;
         }
-        let Some((stand, normal_y)) = ground_at(rapier, filter, cand, motion.feet) else {
+        let Some(stand) = ground_at(rapier, filter, cand, motion.feet) else {
             // Nothing walkable below within reach: walked off the world.
             motion.pos = cand;
             motion.grounded = false;
@@ -352,16 +345,8 @@ fn grounded_substep(
             continue;
         }
         if rise < -STEP_DOWN {
-            // A ledge drops away — unless walkable ground continues just
-            // past the capsule's centre, which bridges seams and cracks
-            // (ramp ridge onto the next block) instead of dipping in.
-            let ahead = cand + step.normalize_or_zero() * PILL_RADIUS;
-            let bridges = ground_at(rapier, filter, ahead, motion.feet)
-                .is_some_and(|(ahead_stand, _)| (ahead_stand - motion.feet).abs() <= STEP_UP);
-            if bridges {
-                motion.pos = cand;
-                return step.length();
-            }
+            // A ledge drops away: keep walking into the fall and let the
+            // landing probe re-ground the capsule on whatever is below.
             motion.pos = cand;
             motion.grounded = false;
             return step.length();
@@ -370,17 +355,10 @@ fn grounded_substep(
             continue;
         }
         motion.pos = cand;
-        // On a slope the feet may only gain or lose height as fast as the
-        // terrain rises over the distance travelled, so the flat-to-slope
-        // normal change at a ramp's toe cannot snap the capsule up in one
-        // frame. Flat ground (a genuine step) still seats instantly.
-        motion.feet = if normal_y < 0.99 {
-            let grade = ((1.0 - normal_y * normal_y).max(0.0)).sqrt() / normal_y;
-            let max_delta = step.length() * grade + 0.005;
-            motion.feet + (stand - motion.feet).clamp(-max_delta, max_delta)
-        } else {
-            stand
-        };
+        // The feet follow the surface sampled straight down at the
+        // destination. Per-substep travel is short, so climbing a slope
+        // reads as a small step up each frame — no grade math needed.
+        motion.feet = stand;
         if step != disp {
             // A reduced slide: keep only the velocity that was used.
             motion.hv = step / dt;
@@ -482,9 +460,9 @@ fn step_motion(
         motion.hv = Vec2::ZERO;
         motion.vy = 0.0;
         let ground = ground_at(rapier, filter, motion.pos, motion.feet)
-            .filter(|(stand, _)| (stand - motion.feet).abs() <= STEP_DOWN.max(STEP_UP));
+            .filter(|stand| (*stand - motion.feet).abs() <= STEP_DOWN.max(STEP_UP));
         match ground {
-            Some((stand, _)) => {
+            Some(stand) => {
                 motion.feet = stand;
                 motion.grounded = true;
             }

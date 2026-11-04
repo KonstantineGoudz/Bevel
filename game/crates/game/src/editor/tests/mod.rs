@@ -126,6 +126,9 @@ fn physics_app() -> App {
     });
     app.init_resource::<Editor>();
     app.init_resource::<Orbit>();
+    // resolve_dynamic_push reads both every tick; live app always has them.
+    app.init_resource::<Movers>();
+    app.init_resource::<Visuals>();
     app.init_resource::<TouchState>();
     app.init_resource::<AddMenu>();
     app.init_resource::<ButtonInput<KeyCode>>();
@@ -174,6 +177,9 @@ fn tick_rider(app: &mut App) {
     app.world_mut()
         .run_system_once(resolve_platform_push)
         .expect("resolve platform push");
+    app.world_mut()
+        .run_system_once(resolve_dynamic_push)
+        .expect("resolve dynamic push");
 }
 
 fn test_piece(id: u32) -> Piece {

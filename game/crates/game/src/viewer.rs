@@ -7,6 +7,7 @@
 //!   picked through the **Import .glb / .gltf** button (browser file picker on
 //!   wasm),
 //! * orbit / zoom the camera around the model,
+//! * browse every item in the file in the **Scene tree** on the right,
 //! * report file name, load state, and scene stats in Bevy UI.
 //!
 //! Imports go through a `viewer://` in-memory asset source, so picked bytes
@@ -17,6 +18,7 @@
 //! `Cargo.toml`; without it, models like `PotOfCoals.glb` fail with
 //! `invalid image mime type: image/jpeg`.
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -34,6 +36,14 @@ const BUTTON_BG: Color = Color::srgb_u8(0x14, 0x1c, 0x26);
 const BUTTON_BORDER: Color = Color::srgb_u8(0x24, 0x30, 0x3f);
 const BUTTON_TEXT: Color = Color::srgb_u8(0xc3, 0xd0, 0xdf);
 const MUTED: Color = Color::srgb_u8(0x86, 0x97, 0xab);
+const ROW_BG: Color = Color::srgb_u8(0x16, 0x1e, 0x29);
+const ROW_BG_SELECTED: Color = Color::srgb_u8(0x3a, 0x2c, 0x12);
+const ROW_BORDER_SELECTED: Color = Color::srgb_u8(0xf0, 0xa6, 0x3c);
+const TREE_WIDTH: f32 = 300.0;
+/// Top offset clearing the title + buttons + status bar on the left.
+const TREE_TOP: f32 = 150.0;
+/// Never build more rows than this; huge scenes get a "+ N more" cap note.
+const MAX_TREE_ROWS: usize = 1500;
 /// `WorldAssetRoot` spawns its children from the `SpawnScene` schedule, which
 /// runs after `Update`. Wait this many frames for meshes before falling back to
 /// node origins (for scenes that have no meshes at all).
@@ -119,6 +129,57 @@ enum ViewerAction {
 #[derive(Component)]
 struct ViewerStatus;
 
+/// UI state for the Scene tree. The hierarchy itself is read live from the
+/// spawned entities, so this only tracks what is expanded/selected plus a
+/// rebuild marker.
+#[derive(Resource, Default)]
+struct ViewerTree {
+    expanded: HashSet<Entity>,
+    selected: Option<Entity>,
+    /// Entities with children seen on the last rebuild (for Expand all).
+    expandable: Vec<Entity>,
+    last_root: Option<Entity>,
+    last_count: usize,
+    dirty: bool,
+}
+
+impl ViewerTree {
+    fn reset(&mut self) {
+        self.expanded.clear();
+        self.expandable.clear();
+        self.selected = None;
+        self.last_root = None;
+        self.last_count = 0;
+        self.dirty = true;
+    }
+}
+
+#[derive(Component)]
+struct TreePanel;
+
+#[derive(Component)]
+struct TreeList;
+
+#[derive(Component)]
+struct TreeCount;
+
+#[derive(Component)]
+struct TreeRow(Entity);
+
+#[derive(Component)]
+struct TreeToggle(Entity);
+
+#[derive(Component)]
+struct TreeButton(TreeAction);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TreeAction {
+    Toggle(Entity),
+    Select(Entity),
+    ExpandAll,
+    CollapseAll,
+}
+
 pub struct ViewerPlugin;
 
 impl Plugin for ViewerPlugin {
@@ -126,6 +187,7 @@ impl Plugin for ViewerPlugin {
         app.init_resource::<Viewer>()
             .init_resource::<ViewerOrbit>()
             .init_resource::<PendingUploads>()
+            .init_resource::<ViewerTree>()
             .insert_resource(crate::controls::Controls::load())
             .add_systems(Startup, (setup_viewer, setup_wasm_picker))
             .add_systems(
@@ -134,12 +196,14 @@ impl Plugin for ViewerPlugin {
                     drain_file_drops,
                     drain_uploads,
                     frame_when_ready,
+                    refresh_tree,
                     orbit_camera,
                     refresh_status,
                 )
                     .chain(),
             )
-            .add_observer(on_viewer_button);
+            .add_observer(on_viewer_button)
+            .add_observer(on_tree_button);
     }
 }
 
@@ -257,6 +321,135 @@ fn setup_viewer(
         .id();
 
     commands.entity(root).add_children(&[title, row, status]);
+
+    spawn_tree_panel(&mut commands);
+}
+
+fn spawn_tree_panel(commands: &mut Commands) {
+    let panel = commands
+        .spawn((
+            TreePanel,
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(8),
+                top: px(TREE_TOP),
+                bottom: px(8),
+                width: px(TREE_WIDTH),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(px(10)),
+                row_gap: px(6),
+                border: UiRect::all(px(1)),
+                ..default()
+            },
+            BackgroundColor(PANEL_BG),
+            BorderColor::all(BUTTON_BORDER),
+        ))
+        .id();
+
+    let header = commands
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Baseline,
+            justify_content: JustifyContent::SpaceBetween,
+            ..default()
+        })
+        .id();
+    let heading = commands
+        .spawn((
+            Text::new("Scene"),
+            TextFont {
+                font_size: FontSize::Px(13.0),
+                ..default()
+            },
+            TextColor(Color::WHITE),
+        ))
+        .id();
+    let count = commands
+        .spawn((
+            TreeCount,
+            Text::new("no model"),
+            TextFont {
+                font_size: FontSize::Px(11.0),
+                ..default()
+            },
+            TextColor(MUTED),
+        ))
+        .id();
+    commands.entity(header).add_children(&[heading, count]);
+
+    let toolbar = commands
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            column_gap: px(6),
+            ..default()
+        })
+        .id();
+    let expand = tree_action_button(commands, TreeAction::ExpandAll, "Expand all");
+    let collapse = tree_action_button(commands, TreeAction::CollapseAll, "Collapse");
+    commands.entity(toolbar).add_children(&[expand, collapse]);
+
+    let list = commands
+        .spawn((
+            TreeList,
+            ScrollPosition::default(),
+            Node {
+                width: percent(100),
+                flex_grow: 1.0,
+                flex_shrink: 1.0,
+                min_height: px(0),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(2),
+                overflow: Overflow::scroll_y(),
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+        ))
+        .id();
+
+    let hint = commands
+        .spawn((
+            Text::new("Every item in the .glb, top to bottom. Click a row to focus it."),
+            TextFont {
+                font_size: FontSize::Px(10.0),
+                ..default()
+            },
+            TextColor(Color::srgb_u8(0x5b, 0x6a, 0x7d)),
+            Pickable::IGNORE,
+        ))
+        .id();
+
+    commands
+        .entity(panel)
+        .add_children(&[header, toolbar, list, hint]);
+}
+
+fn tree_action_button(commands: &mut Commands, action: TreeAction, text: &str) -> Entity {
+    commands
+        .spawn((
+            Button,
+            TreeButton(action),
+            Node {
+                flex_grow: 1.0,
+                flex_basis: px(0),
+                padding: UiRect::axes(px(8), px(4)),
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(6)),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            BackgroundColor(BUTTON_BG),
+            BorderColor::all(BUTTON_BORDER),
+            children![(
+                Text::new(text),
+                TextFont {
+                    font_size: FontSize::Px(11.0),
+                    ..default()
+                },
+                TextColor(BUTTON_TEXT),
+            )],
+        ))
+        .id()
 }
 
 fn viewer_button(commands: &mut Commands, action: ViewerAction, text: &str) -> Entity {
@@ -395,6 +588,7 @@ fn drain_uploads(
     uploads: Res<PendingUploads>,
     asset_server: Res<AssetServer>,
     mut viewer: ResMut<Viewer>,
+    mut tree: ResMut<ViewerTree>,
     mut counter: Local<usize>,
 ) {
     let pending: Vec<ViewerUpload> = uploads
@@ -432,6 +626,9 @@ fn drain_uploads(
         viewer.file_name = Some(name.clone());
         viewer.mesh_count = 0;
         viewer.status = format!("Loading \"{name}\" ({} bytes)...", bytes.len());
+        // A new file means a new hierarchy: drop the old expansion/selection
+        // so the tree rebuilds from the fresh scene graph.
+        tree.reset();
     }
 }
 
@@ -624,6 +821,392 @@ fn scene_bounds(
         }
     }
     (from_meshes, from_nodes)
+}
+
+// ---------------------------------------------------------------------------
+// Scene tree
+// ---------------------------------------------------------------------------
+
+/// Kind badge shown in front of every tree row.
+fn node_kind(has_mesh: bool, has_light: bool, has_camera: bool) -> &'static str {
+    if has_mesh {
+        "Mesh"
+    } else if has_light {
+        "Light"
+    } else if has_camera {
+        "Camera"
+    } else {
+        "Node"
+    }
+}
+
+/// Human label for a row. glTF nodes without names still get a stable,
+/// kind-prefixed fallback so the tree never shows a blank row.
+fn tree_label(raw: Option<&str>, kind: &str, fallback_id: impl std::fmt::Display) -> String {
+    let name = raw.map(str::trim).filter(|n| !n.is_empty());
+    match name {
+        Some(name) => format!("{kind}  {name}"),
+        None => format!("{kind}  #{fallback_id}"),
+    }
+}
+
+/// Depth-first visible rows for a forest. `children` maps a node id to its
+/// ordered children; only descendants of expanded nodes are emitted.
+/// Returns `(id, depth, has_children)` in display order.
+fn flatten_tree(
+    roots: &[usize],
+    children: &HashMap<usize, Vec<usize>>,
+    expanded: &HashSet<usize>,
+) -> Vec<(usize, usize, bool)> {
+    let mut out = Vec::new();
+    let mut stack: Vec<(usize, usize)> = roots.iter().rev().map(|id| (*id, 0)).collect();
+    while let Some((id, depth)) = stack.pop() {
+        let kids = children.get(&id).cloned().unwrap_or_default();
+        out.push((id, depth, !kids.is_empty()));
+        if expanded.contains(&id) {
+            for kid in kids.iter().rev() {
+                stack.push((*kid, depth + 1));
+            }
+        }
+    }
+    out
+}
+
+fn on_tree_button(
+    event: On<Activate>,
+    buttons: Query<&TreeButton>,
+    mut tree: ResMut<ViewerTree>,
+    mut viewer: ResMut<Viewer>,
+    mut orbit: ResMut<ViewerOrbit>,
+    transforms: Query<&GlobalTransform>,
+) {
+    let Ok(button) = buttons.get(event.entity) else {
+        return;
+    };
+    match button.0 {
+        TreeAction::Toggle(entity) => {
+            if !tree.expanded.remove(&entity) {
+                tree.expanded.insert(entity);
+            }
+            tree.dirty = true;
+        }
+        TreeAction::Select(entity) => {
+            tree.selected = Some(entity);
+            tree.dirty = true;
+            if let Ok(global) = transforms.get(entity) {
+                orbit.target = global.translation();
+            }
+            viewer.status = format!(
+                "Selected {} - right-drag to orbit around it",
+                entity_label(entity, &transforms),
+            );
+        }
+        TreeAction::ExpandAll => {
+            let all = tree.expandable.clone();
+            tree.expanded.extend(all);
+            tree.dirty = true;
+        }
+        TreeAction::CollapseAll => {
+            tree.expanded.clear();
+            tree.dirty = true;
+        }
+    }
+}
+
+fn entity_label(entity: Entity, transforms: &Query<&GlobalTransform>) -> String {
+    // Names are resolved at rebuild time; the status line only needs something
+    // stable, so fall back to the entity index here.
+    let _ = transforms;
+    format!("item {}", entity.index())
+}
+
+/// Rebuild the tree rows whenever the scene graph changes (new model, spawner
+/// progress) or the user expands/collapses/selects. The hierarchy is read live
+/// from `Children`, so the panel always mirrors the loaded .glb.
+#[allow(clippy::too_many_arguments)]
+fn refresh_tree(
+    mut commands: Commands,
+    viewer: Res<Viewer>,
+    mut tree: ResMut<ViewerTree>,
+    children: Query<&Children>,
+    names: Query<&Name>,
+    mesh_marks: Query<(), With<Mesh3d>>,
+    light_marks: Query<(), Or<(With<DirectionalLight>, With<PointLight>, With<SpotLight>)>>,
+    camera_marks: Query<(), With<Camera>>,
+    lists: Query<Entity, With<TreeList>>,
+    rows: Query<Entity, Or<(With<TreeRow>, With<TreeToggle>)>>,
+    mut counts: Query<&mut Text, With<TreeCount>>,
+) {
+    let Ok(list) = lists.single() else {
+        return;
+    };
+    let Some(root) = viewer.root else {
+        if tree.last_root.is_some() || tree.last_count != 0 {
+            for row in &rows {
+                commands.entity(row).despawn();
+            }
+            tree.reset();
+            for mut text in &mut counts {
+                text.0 = "no model".to_owned();
+            }
+        }
+        return;
+    };
+
+    // Walk the live graph: entity -> ordered children, plus kind/name lookups.
+    let mut child_map: HashMap<Entity, Vec<Entity>> = HashMap::new();
+    let mut order: Vec<Entity> = Vec::new();
+    let mut visited = 0usize;
+    let mut stack: Vec<Entity> = children
+        .get(root)
+        .map(|kids| kids.iter().rev().collect())
+        .unwrap_or_default();
+    while let Some(entity) = stack.pop() {
+        visited += 1;
+        if visited > 20_000 {
+            break;
+        }
+        order.push(entity);
+        if let Ok(kids) = children.get(entity) {
+            let kids: Vec<Entity> = kids.iter().collect();
+            if !kids.is_empty() {
+                child_map.insert(entity, kids.clone());
+                for kid in kids.iter().rev() {
+                    stack.push(*kid);
+                }
+            }
+        }
+    }
+
+    let total = order.len();
+    if !tree.dirty && tree.last_root == Some(root) && tree.last_count == total {
+        return;
+    }
+
+    // First build after a load: auto-expand the top levels (or everything for
+    // small scenes) so the tree is useful without any clicking.
+    if tree.last_root != Some(root) {
+        tree.expanded.clear();
+        if total <= 300 {
+            tree.expanded.extend(child_map.keys().copied());
+        } else {
+            // Depth-limited expansion for huge scenes.
+            let mut depth_of: HashMap<Entity, usize> = HashMap::new();
+            let mut depth_stack: Vec<(Entity, usize)> = children
+                .get(root)
+                .map(|kids| kids.iter().map(|e| (e, 0)).collect())
+                .unwrap_or_default();
+            while let Some((entity, depth)) = depth_stack.pop() {
+                depth_of.insert(entity, depth);
+                if depth < 2 {
+                    if child_map.contains_key(&entity) {
+                        tree.expanded.insert(entity);
+                    }
+                    if let Some(kids) = child_map.get(&entity) {
+                        for kid in kids {
+                            depth_stack.push((*kid, depth + 1));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    tree.expandable = child_map.keys().copied().collect();
+
+    for row in &rows {
+        commands.entity(row).despawn();
+    }
+
+    // Visible rows: depth-first, descending only into expanded nodes.
+    let mut visible: Vec<(Entity, usize, bool)> = Vec::new();
+    let mut dfs: Vec<(Entity, usize)> = children
+        .get(root)
+        .map(|kids| kids.iter().rev().map(|e| (e, 0)).collect())
+        .unwrap_or_default();
+    while let Some((entity, depth)) = dfs.pop() {
+        let kids = child_map.get(&entity).cloned().unwrap_or_default();
+        visible.push((entity, depth, !kids.is_empty()));
+        if visible.len() >= MAX_TREE_ROWS {
+            break;
+        }
+        if tree.expanded.contains(&entity) {
+            for kid in kids.iter().rev() {
+                dfs.push((*kid, depth + 1));
+            }
+        }
+    }
+    let capped = total > visible.len();
+
+    let mut row_entities = Vec::with_capacity(visible.len());
+    for (entity, depth, has_children) in visible {
+        row_entities.push(spawn_tree_row(
+            &mut commands,
+            entity,
+            depth,
+            has_children,
+            tree.expanded.contains(&entity),
+            tree.selected == Some(entity),
+            names.get(entity).ok().map(|n| n.as_str()),
+            node_kind(
+                mesh_marks.contains(entity),
+                light_marks.contains(entity),
+                camera_marks.contains(entity),
+            ),
+        ));
+    }
+    commands.entity(list).add_children(&row_entities);
+
+    if capped {
+        let more = commands
+            .spawn((
+                Text::new(format!(
+                    "... {} more items (collapse branches to browse)",
+                    total - row_entities.len()
+                )),
+                TextFont {
+                    font_size: FontSize::Px(11.0),
+                    ..default()
+                },
+                TextColor(MUTED),
+            ))
+            .id();
+        commands.entity(list).add_child(more);
+    }
+
+    if total == 0 {
+        let empty = commands
+            .spawn((
+                Text::new("No items under the scene root."),
+                TextFont {
+                    font_size: FontSize::Px(11.0),
+                    ..default()
+                },
+                TextColor(MUTED),
+            ))
+            .id();
+        commands.entity(list).add_child(empty);
+    }
+
+    for mut text in &mut counts {
+        text.0 = if total == 1 {
+            "1 item".to_owned()
+        } else {
+            format!("{total} items")
+        };
+    }
+
+    tree.last_root = Some(root);
+    tree.last_count = total;
+    tree.dirty = false;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_tree_row(
+    commands: &mut Commands,
+    target: Entity,
+    depth: usize,
+    has_children: bool,
+    is_expanded: bool,
+    is_selected: bool,
+    raw_name: Option<&str>,
+    kind: &str,
+) -> Entity {
+    let label = tree_label(raw_name, kind, target.index());
+    let row = commands
+        .spawn((
+            TreeRow(target),
+            Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: px(4),
+                padding: UiRect {
+                    left: px(6.0 + depth as f32 * 14.0),
+                    right: px(4),
+                    top: px(2),
+                    bottom: px(2),
+                },
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(6)),
+                ..default()
+            },
+            BackgroundColor(if is_selected { ROW_BG_SELECTED } else { ROW_BG }),
+            BorderColor::all(if is_selected {
+                ROW_BORDER_SELECTED
+            } else {
+                BUTTON_BORDER
+            }),
+        ))
+        .id();
+
+    let mut parts = Vec::with_capacity(2);
+    if has_children {
+        let toggle = commands
+            .spawn((
+                Button,
+                TreeButton(TreeAction::Toggle(target)),
+                TreeToggle(target),
+                Node {
+                    width: px(20),
+                    height: px(20),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    border: UiRect::all(px(1)),
+                    border_radius: BorderRadius::all(px(4)),
+                    ..default()
+                },
+                BackgroundColor(BUTTON_BG),
+                BorderColor::all(BUTTON_BORDER),
+                children![(
+                    Text::new(if is_expanded { "-" } else { "+" }),
+                    TextFont {
+                        font_size: FontSize::Px(12.0),
+                        ..default()
+                    },
+                    TextColor(BUTTON_TEXT),
+                )],
+            ))
+            .id();
+        parts.push(toggle);
+    } else {
+        let spacer = commands
+            .spawn(Node {
+                width: px(20),
+                height: px(20),
+                ..default()
+            })
+            .id();
+        parts.push(spacer);
+    }
+
+    let pick = commands
+        .spawn((
+            Button,
+            TreeButton(TreeAction::Select(target)),
+            Node {
+                flex_grow: 1.0,
+                min_width: px(0),
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+            children![(
+                Text::new(label),
+                TextFont {
+                    font_size: FontSize::Px(11.0),
+                    ..default()
+                },
+                TextColor(if is_selected {
+                    Color::WHITE
+                } else {
+                    BUTTON_TEXT
+                }),
+            )],
+        ))
+        .id();
+    parts.push(pick);
+
+    commands.entity(row).add_children(&parts);
+    row
 }
 
 // ---------------------------------------------------------------------------
@@ -961,5 +1544,57 @@ mod tests {
             &GlobalTransform::IDENTITY,
         );
         assert!((meshes.radius() - 3.0 * 3.0_f32.sqrt() * 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn tree_kinds_prefer_mesh_over_light_and_camera() {
+        assert_eq!(node_kind(true, true, true), "Mesh");
+        assert_eq!(node_kind(false, true, true), "Light");
+        assert_eq!(node_kind(false, false, true), "Camera");
+        assert_eq!(node_kind(false, false, false), "Node");
+    }
+
+    #[test]
+    fn tree_labels_never_come_back_blank() {
+        assert_eq!(tree_label(Some("Prop"), "Mesh", 3), "Mesh  Prop");
+        assert_eq!(tree_label(Some("  "), "Node", 7), "Node  #7");
+        assert_eq!(tree_label(None, "Light", 9), "Light  #9");
+    }
+
+    fn sample_forest() -> (Vec<usize>, HashMap<usize, Vec<usize>>) {
+        // 0 -> [1, 2], 1 -> [3]; 2 and 3 are leaves.
+        let roots = vec![0];
+        let children: HashMap<usize, Vec<usize>> =
+            [(0, vec![1, 2]), (1, vec![3])].into_iter().collect();
+        (roots, children)
+    }
+
+    #[test]
+    fn collapsed_branches_hide_their_descendants() {
+        let (roots, children) = sample_forest();
+        let expanded: HashSet<usize> = [0].into_iter().collect();
+        assert_eq!(
+            flatten_tree(&roots, &children, &expanded),
+            vec![(0, 0, true), (1, 1, true), (2, 1, false)]
+        );
+    }
+
+    #[test]
+    fn expanded_branches_show_depth_first() {
+        let (roots, children) = sample_forest();
+        let expanded: HashSet<usize> = [0, 1].into_iter().collect();
+        assert_eq!(
+            flatten_tree(&roots, &children, &expanded),
+            vec![(0, 0, true), (1, 1, true), (3, 2, false), (2, 1, false)]
+        );
+    }
+
+    #[test]
+    fn a_fully_collapsed_tree_shows_only_roots() {
+        let (roots, children) = sample_forest();
+        assert_eq!(
+            flatten_tree(&roots, &children, &HashSet::new()),
+            vec![(0, 0, true)]
+        );
     }
 }

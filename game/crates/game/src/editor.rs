@@ -157,6 +157,7 @@ impl Plugin for EditorPlugin {
                 Update,
                 (
                     resolve_platform_push,
+                    resolve_dynamic_push,
                     shoot_cone,
                     advance_cones,
                     update_cursor,

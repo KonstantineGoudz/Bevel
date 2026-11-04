@@ -281,6 +281,7 @@ fn visuals_system_has_disjoint_queries() {
     app.init_resource::<Editor>();
     app.init_resource::<Orbit>();
     app.init_resource::<Visuals>();
+    app.init_resource::<Movers>();
     app.insert_resource(Kit {
         parts: Vec::new(),
         mats: Vec::new(),
@@ -760,4 +761,36 @@ fn motion_editing_pins_the_paths_piece_in_the_outliner() {
         app.world().resource::<OutlinerState>().selection,
         GraphNode::Piece(2)
     );
+}
+
+#[test]
+fn outliner_list_has_zero_min_height_and_scroll_overflow() {
+    fn spawn_panel(mut commands: Commands) {
+        spawn_object_graph(&mut commands);
+    }
+
+    let mut app = App::new();
+    app.init_resource::<Editor>();
+    app.init_resource::<OutlinerState>();
+    app.init_resource::<OutlinerEdit>();
+    app.init_resource::<InputFocus>();
+    app.add_systems(Startup, spawn_panel);
+    app.update();
+
+    let list = app
+        .world_mut()
+        .query_filtered::<&Node, With<OutlinerList>>()
+        .single(app.world())
+        .expect("outliner list node");
+    assert_eq!(list.min_height, px(0));
+    assert_eq!(list.overflow, Overflow::scroll_y());
+    assert_eq!(list.flex_shrink, 1.0);
+
+    let body = app
+        .world_mut()
+        .query_filtered::<&Node, With<OutlinerBody>>()
+        .single(app.world())
+        .expect("outliner body node");
+    assert_eq!(body.min_height, px(0));
+    assert_eq!(body.flex_shrink, 1.0);
 }

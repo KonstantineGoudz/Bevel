@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use super::walking::{PUSH_FACTOR, PUSH_MIN_SPEED};
 use super::*;
 use crate::platforms::{self, PlatformMode, PlatformWaypoint};
 use bevy_rapier3d::parry::math::Pose;
@@ -256,11 +257,10 @@ const PUSH_EPSILON: f32 = 0.001;
 /// Extra clearance added to a depenetration push so float error does not
 /// re-trigger contact on the next frame.
 const PUSH_SKIN: f32 = 0.01;
-/// A contact whose platform normal points this far up is deck support (a
-/// flat top or a ramp slope), not a wall. Flat decks report 1.0 and ramp
-/// slopes ~0.91; edge and corner clips fall well below, so they shove
-/// instead of carrying — that is what keeps a capsule brushed by the side
-/// from getting dragged along as a "rider".
+/// A contact whose platform normal points this far up is deck support, not
+/// a wall. Edge and corner clips fall well below, so they shove instead of
+/// carrying — that is what keeps a capsule brushed by the side from getting
+/// dragged along as a "rider".
 const SUPPORT_NORMAL_Y: f32 = 0.7;
 /// Minimum alignment between the push direction and the contact normal for
 /// a deflected shove. Below this the sideways escape would barely separate,
@@ -283,21 +283,19 @@ fn platform_pose(piece: &Piece) -> (Vec3, Quat) {
     )
 }
 
-/// Deck height under `at` for ride checks. Flat decks report their top;
-/// wedges interpolate along the rise so ramp riders count as standing.
-/// Shapes with no standable surface (bars, pillars, …) report `None` and
-/// can never carry.
-fn deck_height_at(shape: &model::Shape, piece: &Piece, at: Vec2) -> Option<f32> {
-    match &shape.geom {
-        model::Geometry::Wedge { d, h, .. } => {
-            let local = model::to_local(piece, at);
-            let t = ((local.y + d * 0.5) / d).clamp(0.0, 1.0);
-            Some(piece.elevation + shape.base + t * h)
-        }
-        model::Geometry::Rect { .. }
-        | model::Geometry::Hex { .. }
-        | model::Geometry::Diamond { .. } => Some(piece.elevation + shape.top()),
-        _ => None,
+/// Physics body for an editor piece. Simulated props stay `Dynamic`.
+/// Pieces riding a motion path are `KinematicPositionBased`: the editor
+/// still authors every teleport, but Rapier derives a velocity from each
+/// displacement and shoves dynamic bodies with real momentum instead of
+/// phasing through them like a `Fixed` teleport would. Everything else is
+/// a plain static.
+pub(super) fn piece_body(piece: &Piece, movers: &Movers) -> RigidBody {
+    if piece.dynamic {
+        RigidBody::Dynamic
+    } else if movers.map.get(&piece.id).is_some_and(|m| m.track.is_some()) {
+        RigidBody::KinematicPositionBased
+    } else {
+        RigidBody::Fixed
     }
 }
 
@@ -311,27 +309,31 @@ pub(super) fn iso(pos: Vec3, rot: Quat) -> Pose {
 }
 
 /// True rider: deck-like contact normal, capsule over the deck footprint,
-/// feet on the surface. A rim clip or side brush fails the footprint or
-/// height test and shoves instead of carrying, so a platform can never
-/// drag the capsule along from beside it — the thin-floor rim in particular
-/// touches bottom-on-deck with an upward normal while hanging off the edge.
-fn is_rider(pos: Vec2, feet: f32, piece: &Piece, shape: &model::Shape, normal_y: f32) -> bool {
+/// feet on the surface the contact itself reports. A rim clip or side brush
+/// fails the footprint or height test and shoves instead of carrying, so a
+/// platform can never drag the capsule along from beside it. The surface
+/// height comes straight from the contact point on the platform — no
+/// per-shape surface math, so sloped decks just work.
+fn is_rider(
+    pos: Vec2,
+    feet: f32,
+    piece: &Piece,
+    shape: &model::Shape,
+    normal_y: f32,
+    contact_y: f32,
+) -> bool {
     if normal_y <= SUPPORT_NORMAL_Y {
         return false;
     }
     if !model::hit_test(shape, piece, pos, 0.05) {
         return false;
     }
-    let Some(deck) = deck_height_at(shape, piece, pos) else {
-        return false;
-    };
-    (feet - deck).abs() <= RIDE_SKIN
+    (feet - contact_y).abs() <= RIDE_SKIN
 }
 
 /// True when the capsule rests on the platform deck: a contact within the
 /// ride skin that passes the full rider test (deck-like normal, over the
-/// footprint, feet on the surface). Ramps count via their sloped face
-/// normal and interpolated surface height.
+/// footprint, feet on the contacted surface).
 fn is_supported(
     capsule: &Collider,
     cap_pos: Vec3,
@@ -359,14 +361,14 @@ fn is_supported(
         return false;
     }
     let normal = hit.normal2;
-    is_rider(pos, feet, piece, shape, normal.y)
+    is_rider(pos, feet, piece, shape, normal.y, hit.point2.y)
 }
 
 /// Push needed to separate an overlapping capsule from a platform, in world
 /// space. Returns `None` for triggers (no collider), resting contact, and
 /// true riders — the carry owns that case. Pure Parry contact on the real
-/// collider shapes, so blocks, walls, and ramp wedges all separate exactly
-/// with no 2D footprint approximation.
+/// collider shapes, so every solid separates exactly with no footprint
+/// approximation.
 ///
 /// The shove runs along the horizontal offset from the platform centre,
 /// scaled so its along-normal component clears the penetration. An
@@ -408,8 +410,8 @@ fn contact_push(
     if normal == Vec3::ZERO {
         return None;
     }
-    if is_rider(pos, feet, piece, shape, normal.y) {
-        // True rider on the deck (or a ramp slope): carried, never shoved.
+    if is_rider(pos, feet, piece, shape, normal.y, hit.point2.y) {
+        // True rider on the deck: carried, never shoved.
         return None;
     }
     let distance = penetration + PUSH_SKIN;
@@ -634,6 +636,105 @@ pub(super) fn resolve_platform_push(
         if let Some(character) = editor.character.as_mut() {
             character.pos = pos;
             character.feet = feet;
+        }
+        if push != Vec2::ZERO {
+            if orbit.mode == ViewMode::Third {
+                orbit.target.x += push.x;
+                orbit.target.z += push.y;
+            }
+        }
+        editor.soft_dirty = true;
+    }
+}
+
+/// Final depenetration against *dynamic* bodies, right after the platform
+/// sweep: a crate shoved by a platform (or falling, or rolling) that reaches
+/// the capsule must push the *character*, not treat it as an immovable wall.
+/// The character is a kinematic body with infinite mass, so Rapier stops the
+/// crate dead on contact instead of yielding — this pass yields on the
+/// character side instead: it steps the capsule out of the penetration (same
+/// deflection as platforms, riders excepted) and folds part of the body's
+/// approach speed into `hv` as knockback, mirroring `push_impulse` with the
+/// roles swapped. `ride_vel` is left alone: there is no tracked platform
+/// delta to inherit, and `hv` already decays through ground/air control.
+pub(super) fn resolve_dynamic_push(
+    mut editor: ResMut<Editor>,
+    mut orbit: ResMut<Orbit>,
+    kit: Res<Kit>,
+    movers: Res<Movers>,
+    visuals: Res<Visuals>,
+    bodies: Query<&Velocity>,
+) {
+    let Some(snapshot) = editor
+        .character
+        .as_ref()
+        .map(|c| (c.pos, c.feet, c.yaw, c.hv))
+    else {
+        return;
+    };
+    let (mut pos, mut feet, yaw, mut hv) = snapshot;
+    let capsule = kit.character_collider.clone();
+    let mut push = Vec2::ZERO;
+    let mut touched = false;
+    // Settle stacked props: a shove out of one can land inside the next, so
+    // re-scan until clear (or the bound below trips).
+    for _ in 0..3 {
+        let mut moved = false;
+        let (cap_pos, cap_rot) = capsule_pose(pos, feet, yaw);
+        for piece in &editor.pieces {
+            if !piece.dynamic {
+                continue;
+            }
+            // Tracked movers are swept by `resolve_platform_push` on their
+            // authoritative editor pose; touching them twice would
+            // double-shove.
+            if movers.map.get(&piece.id).is_some_and(|m| m.track.is_some()) {
+                continue;
+            }
+            let shape = &shapes()[piece.shape];
+            let Some(prop) = piece_collider(shape) else {
+                continue;
+            };
+            let (piece_pos, piece_rot) = platform_pose(piece);
+            let Some(shove) = contact_push(
+                &capsule, cap_pos, cap_rot, &prop, piece_pos, piece_rot, pos, feet, piece, shape,
+            ) else {
+                continue;
+            };
+            pos += Vec2::new(shove.x, shove.z);
+            feet += shove.y;
+            push += Vec2::new(shove.x, shove.z);
+            // Knockback: fold part of the body's approach speed into the
+            // character so a shoved crate bulldozes instead of dying on
+            // contact. Bodies without a readable velocity still shove
+            // positionally; the push direction doubles as the knock direction.
+            let facing = Vec2::new(shove.x, shove.z);
+            if facing != Vec2::ZERO {
+                let dir = facing.normalize_or_zero();
+                let body_vel = visuals
+                    .map
+                    .get(&piece.id)
+                    .and_then(|entity| bodies.get(*entity).ok())
+                    .map(|velocity| Vec2::new(velocity.linear.x, velocity.linear.z))
+                    .unwrap_or(Vec2::ZERO);
+                let approach = dir.dot(body_vel - hv);
+                if approach >= PUSH_MIN_SPEED {
+                    hv += dir * approach * PUSH_FACTOR;
+                }
+            }
+            touched = true;
+            moved = true;
+            break;
+        }
+        if !moved {
+            break;
+        }
+    }
+    if touched {
+        if let Some(character) = editor.character.as_mut() {
+            character.pos = pos;
+            character.feet = feet;
+            character.hv = hv;
         }
         if push != Vec2::ZERO {
             if orbit.mode == ViewMode::Third {

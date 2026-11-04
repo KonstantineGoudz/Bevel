@@ -304,6 +304,8 @@ pub(super) fn spawn_object_graph(commands: &mut Commands) {
             Node {
                 width: percent(100),
                 flex_grow: 1.0,
+                flex_shrink: 1.0,
+                min_height: px(0),
                 flex_direction: FlexDirection::Column,
                 row_gap: px(2),
                 overflow: Overflow::scroll_y(),
@@ -342,6 +344,8 @@ pub(super) fn spawn_object_graph(commands: &mut Commands) {
             Node {
                 width: percent(100),
                 flex_grow: 1.0,
+                flex_shrink: 1.0,
+                min_height: px(0),
                 flex_direction: FlexDirection::Column,
                 row_gap: px(5),
                 ..default()

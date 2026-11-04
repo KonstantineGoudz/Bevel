@@ -2418,3 +2418,575 @@ fn user_level_pill_beside_the_track_is_untouched() {
     );
     assert_eq!(character.ride_vel, Vec2::ZERO);
 }
+
+/// A dynamic crate overlapping the idle capsule must shove the capsule out
+/// of the way instead of treating it as an immovable wall. No physics step
+/// needed: the sweep works on editor state through parry contacts, like the
+/// platform push.
+#[test]
+fn dynamic_crate_overlapping_idle_character_shoves_it() {
+    let mut app = physics_app();
+    app.init_resource::<Movers>();
+    app.init_resource::<Visuals>();
+    let block = model::shape_index("block").unwrap();
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: Vec2::ZERO,
+            feet: 0.0,
+            yaw: 0.0,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            sliding: false,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+        // Block half-width 0.9, capsule radius 0.32: centred at x = -1.0
+        // the block face intrudes 0.22 into the capsule's -x side, so the
+        // shortest exit shoves the capsule +x, away from the crate.
+        editor.pieces.push(Piece {
+            id: 9,
+            shape: block,
+            pos: Vec2::new(-1.0, 0.0),
+            rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
+            elevation: 0.0,
+            dynamic: true,
+            trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
+        });
+    }
+    let prop = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            piece_collider(&shapes()[block]).unwrap(),
+            Velocity::zero(),
+            ExternalImpulse::default(),
+            Transform::from_xyz(-1.0, 0.0, 0.0),
+        ))
+        .id();
+    app.world_mut()
+        .resource_mut::<Visuals>()
+        .map
+        .insert(9, prop);
+    app.update();
+    app.update();
+
+    tick_rider(&mut app);
+
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        character.pos.x > 0.05,
+        "the capsule must be shoved out of the crate, pos={:?}",
+        character.pos
+    );
+    assert!(
+        character.hv.x.abs() < 0.05,
+        "a stationary crate imparts no knockback, hv={:?}",
+        character.hv
+    );
+    // The frame must end clear: no residual penetration at rest.
+    use bevy_rapier3d::parry::query::contact;
+    let world = app.world();
+    let editor = world.resource::<Editor>();
+    let shape = &shapes()[block];
+    let cap_iso = super::super::movers::iso(
+        Vec3::new(character.pos.x, character.feet + PILL_HALF, character.pos.y),
+        Quat::from_rotation_y(character.yaw),
+    );
+    let piece = &editor.pieces[0];
+    let prop_iso = super::super::movers::iso(
+        Vec3::new(piece.pos.x, piece.elevation, piece.pos.y),
+        model::piece_quat(piece),
+    );
+    let hit = contact(
+        &cap_iso,
+        world.resource::<Kit>().character_collider.as_shape(),
+        &prop_iso,
+        piece_collider(shape).unwrap().as_shape(),
+        0.0,
+    )
+    .expect("contact query");
+    assert!(
+        hit.map_or(true, |hit| hit.dist >= -0.002),
+        "capsule and crate must end clear of each other"
+    );
+}
+
+/// A moving crate imparts part of its approach speed as knockback, mirroring
+/// `push_impulse` with the roles swapped: the faster the crate, the harder
+/// the shove, but it never overshoots the body's own speed.
+#[test]
+fn dynamic_crate_knockback_transfers_approach_speed() {
+    let mut app = physics_app();
+    app.init_resource::<Movers>();
+    app.init_resource::<Visuals>();
+    let block = model::shape_index("block").unwrap();
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: Vec2::ZERO,
+            feet: 0.0,
+            yaw: 0.0,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            sliding: false,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+        editor.pieces.push(Piece {
+            id: 9,
+            shape: block,
+            pos: Vec2::new(-1.0, 0.0),
+            rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
+            elevation: 0.0,
+            dynamic: true,
+            trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
+        });
+    }
+    let prop = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            piece_collider(&shapes()[block]).unwrap(),
+            Velocity {
+                linear: Vec3::new(2.0, 0.0, 0.0),
+                ..Velocity::zero()
+            },
+            ExternalImpulse::default(),
+            Transform::from_xyz(-1.0, 0.0, 0.0),
+        ))
+        .id();
+    app.world_mut()
+        .resource_mut::<Visuals>()
+        .map
+        .insert(9, prop);
+
+    tick_rider(&mut app);
+
+    let character = app.world().resource::<Editor>().character.unwrap();
+    // Approach speed 2.0 along +x, PUSH_FACTOR 0.85: hv lands at ~1.7.
+    assert!(
+        (character.hv.x - 1.7).abs() < 0.15,
+        "knockback should carry most of the approach speed, hv={:?}",
+        character.hv
+    );
+    assert!(character.pos.x > 0.05, "pos={:?}", character.pos);
+}
+
+/// The frame must end with the capsule clear of the given piece, like
+/// `assert_platforms_clear` but for dynamic bodies shoved by anything.
+fn assert_no_penetration(app: &App, piece_id: u32, context: &str) {
+    use bevy_rapier3d::parry::query::contact;
+
+    let world = app.world();
+    let editor = world.resource::<Editor>();
+    let character = editor.character.expect("character");
+    let piece = editor
+        .pieces
+        .iter()
+        .find(|p| p.id == piece_id)
+        .expect("piece");
+    let shape = &shapes()[piece.shape];
+    let prop = piece_collider(shape).expect("collider");
+    let cap_iso = super::super::movers::iso(
+        Vec3::new(character.pos.x, character.feet + PILL_HALF, character.pos.y),
+        Quat::from_rotation_y(character.yaw),
+    );
+    let prop_iso = super::super::movers::iso(
+        Vec3::new(piece.pos.x, piece.elevation, piece.pos.y),
+        model::piece_quat(piece),
+    );
+    let hit = contact(
+        &cap_iso,
+        world.resource::<Kit>().character_collider.as_shape(),
+        &prop_iso,
+        prop.as_shape(),
+        0.0,
+    )
+    .expect("contact query");
+    if let Some(hit) = hit {
+        assert!(
+            -hit.dist <= 0.002,
+            "{context}: penetration {:.3}: char={:?} piece={:?}",
+            -hit.dist,
+            character.pos,
+            piece.pos,
+        );
+    }
+}
+
+/// Full chain from the report: a platform shuttles on its path while a
+/// dynamic crate with real momentum barrels into the idle capsule, and the
+/// capsule gets bulldozed instead of acting as an immovable wall.
+/// (The platform teleports each frame, so Rapier only creeps a crate it
+/// touches; the crate's velocity here stands in for a shove that already
+/// happened — a faster platform, a fall, or a thrown prop. The platform
+/// itself stays clear to prove tracked pieces are never double-shoved.)
+#[test]
+fn platform_shoves_crate_into_idle_character_shoves_character() {
+    let mut app = physics_app();
+    app.init_resource::<Movers>();
+    app.init_resource::<Visuals>();
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    let block = model::shape_index("block").unwrap();
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        // Tracked platform driving -x, kept clear of the action so any
+        // shove of the capsule can only arrive via the crate.
+        editor.pieces.push(Piece {
+            id: 7,
+            shape: block,
+            pos: Vec2::new(-6.0, 0.0),
+            rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
+            elevation: 0.0,
+            dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
+        });
+        // Dynamic crate launched at the idle capsule.
+        editor.pieces.push(Piece {
+            id: 8,
+            shape: block,
+            pos: Vec2::new(1.0, 0.0),
+            rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
+            elevation: 0.0,
+            dynamic: true,
+            trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
+        });
+        editor.character = Some(Character {
+            pos: Vec2::new(3.1, 0.0),
+            feet: 0.0,
+            yaw: 0.0,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            sliding: false,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+    {
+        let mut movers = Movers::default();
+        let mover = movers.mover_mut(7, Vec2::new(-6.0, 0.0));
+        mover
+            .waypoints
+            .push(crate::platforms::PlatformWaypoint::new(Vec2::new(
+                -2.0, 0.0,
+            )));
+        mover.rebuild();
+        mover.speed = 1.5;
+        app.insert_resource(movers);
+    }
+    let platform_entity = app
+        .world_mut()
+        .spawn((
+            // Kinematic, like the live schedule now spawns tracked movers:
+            // teleports carry velocity so the body can shove dynamics.
+            RigidBody::KinematicPositionBased,
+            piece_collider(&shapes()[block]).unwrap(),
+            Transform::from_xyz(-6.0, 0.0, 0.0),
+        ))
+        .id();
+    let crate_entity = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            piece_collider(&shapes()[block]).unwrap(),
+            Friction::coefficient(0.0),
+            Velocity {
+                linear: Vec3::new(4.0, 0.0, 0.0),
+                ..Velocity::zero()
+            },
+            ExternalImpulse::default(),
+            Transform::from_xyz(1.0, 0.0, 0.0),
+        ))
+        .id();
+    app.world_mut()
+        .resource_mut::<Visuals>()
+        .map
+        .insert(7, platform_entity);
+    app.world_mut()
+        .resource_mut::<Visuals>()
+        .map
+        .insert(8, crate_entity);
+    app.update();
+    app.update();
+
+    // Step real time per update so Rapier actually integrates motion
+    // (the default harness clock barely advances between updates).
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        std::time::Duration::from_millis(16),
+    ));
+
+    let start = app.world().resource::<Editor>().character.unwrap().pos.x;
+    let mut max_hv: f32 = 0.0;
+    for _ in 0..120 {
+        tick_rider(&mut app);
+        // The frame must always end clear of the crate.
+        assert_no_penetration(&app, 8, "rolling crate");
+        // Keep physics in step with the editor: the platform teleports by
+        // editing its piece, so copy the pose to its body before stepping.
+        let piece_pos = app
+            .world()
+            .resource::<Editor>()
+            .pieces
+            .iter()
+            .find(|p| p.id == 7)
+            .unwrap()
+            .pos;
+        app.world_mut()
+            .get_mut::<Transform>(platform_entity)
+            .unwrap()
+            .translation = Vec3::new(piece_pos.x, 0.0, piece_pos.y);
+        app.update();
+        // Pull the simulated crate back into the editor, like
+        // `sync_dynamic_pieces` does in the live schedule.
+        let crate_pos = app
+            .world()
+            .get::<Transform>(crate_entity)
+            .unwrap()
+            .translation;
+        {
+            let mut editor = app.world_mut().resource_mut::<Editor>();
+            let piece = editor.pieces.iter_mut().find(|p| p.id == 8).unwrap();
+            piece.pos = Vec2::new(crate_pos.x, crate_pos.z);
+            piece.elevation = crate_pos.y;
+        }
+        max_hv = max_hv.max(app.world().resource::<Editor>().character.unwrap().hv.x);
+    }
+
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        character.pos.x - start > 1.0,
+        "the crate must bulldoze the idle capsule down the track, start={start} end={:?}",
+        character.pos
+    );
+    assert!(
+        (1.0..=4.5).contains(&max_hv),
+        "knockback should carry most of the 4 m/s approach without flinging, max_hv={max_hv}"
+    );
+}
+
+/// A path follower ramming a stationary dynamic prop must shove it with
+/// real momentum, not creep through it. Tracked movers are kinematic, so
+/// Rapier derives velocity from the editor-authored teleports and the crate
+/// picks up speed instead of just depenetrating in place.
+#[test]
+fn path_platform_rams_stationary_crate_with_momentum() {
+    let mut app = physics_app();
+    app.init_resource::<Movers>();
+    app.init_resource::<Visuals>();
+    let block = model::shape_index("block").unwrap();
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.pieces.push(Piece {
+            id: 7,
+            shape: block,
+            pos: Vec2::ZERO,
+            rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
+            elevation: 0.0,
+            dynamic: false,
+            trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
+        });
+        editor.pieces.push(Piece {
+            id: 8,
+            shape: block,
+            pos: Vec2::new(3.0, 0.0),
+            rot: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
+            elevation: 0.0,
+            dynamic: true,
+            trigger: crate::model::Trigger::harmless(),
+            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_shape_override: crate::model::TriggerShape::Box,
+            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
+            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+            interact: crate::model::InteractAction::None,
+        });
+        editor.walk = None;
+    }
+    {
+        let mut movers = Movers::default();
+        let mover = movers.mover_mut(7, Vec2::ZERO);
+        mover
+            .waypoints
+            .push(crate::platforms::PlatformWaypoint::new(Vec2::X * 8.0));
+        mover.rebuild();
+        mover.speed = 3.0;
+        app.insert_resource(movers);
+    }
+    let platform_entity = app
+        .world_mut()
+        .spawn((
+            RigidBody::KinematicPositionBased,
+            piece_collider(&shapes()[block]).unwrap(),
+            Transform::from_xyz(0.0, 0.0, 0.0),
+        ))
+        .id();
+    let crate_entity = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            piece_collider(&shapes()[block]).unwrap(),
+            Velocity::zero(),
+            ExternalImpulse::default(),
+            Transform::from_xyz(3.0, 0.0, 0.0),
+        ))
+        .id();
+    app.world_mut()
+        .resource_mut::<Visuals>()
+        .map
+        .insert(7, platform_entity);
+    app.world_mut()
+        .resource_mut::<Visuals>()
+        .map
+        .insert(8, crate_entity);
+    app.update();
+    app.update();
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        std::time::Duration::from_millis(16),
+    ));
+
+    let mut max_crate_vx: f32 = 0.0;
+    for _ in 0..150 {
+        tick_rider(&mut app);
+        // The platform must never sit deep inside the crate: contact each
+        // frame, never a tunnel-through overlap.
+        assert_pieces_clear(&app, 7, 8, "platform rams crate");
+        let piece_pos = app
+            .world()
+            .resource::<Editor>()
+            .pieces
+            .iter()
+            .find(|p| p.id == 7)
+            .unwrap()
+            .pos;
+        app.world_mut()
+            .get_mut::<Transform>(platform_entity)
+            .unwrap()
+            .translation = Vec3::new(piece_pos.x, 0.0, piece_pos.y);
+        app.update();
+        let (crate_pos, crate_vel) = {
+            let crate_transform = app
+                .world()
+                .get::<Transform>(crate_entity)
+                .unwrap()
+                .translation;
+            let crate_vel = app
+                .world()
+                .get::<Velocity>(crate_entity)
+                .map(|v| v.linear.x)
+                .unwrap_or(0.0);
+            (crate_transform, crate_vel)
+        };
+        {
+            let mut editor = app.world_mut().resource_mut::<Editor>();
+            let piece = editor.pieces.iter_mut().find(|p| p.id == 8).unwrap();
+            piece.pos = Vec2::new(crate_pos.x, crate_pos.z);
+            piece.elevation = crate_pos.y;
+        }
+        max_crate_vx = max_crate_vx.max(crate_vel);
+    }
+
+    let editor = app.world().resource::<Editor>();
+    let platform_x = editor.pieces.iter().find(|p| p.id == 7).unwrap().pos.x;
+    let crate_x = editor.pieces.iter().find(|p| p.id == 8).unwrap().pos.x;
+    assert!(
+        max_crate_vx > 1.5,
+        "the crate must pick up real speed from the ram, max_vx={max_crate_vx}"
+    );
+    assert!(
+        crate_x - 3.0 > 1.0,
+        "the crate must travel with the shove, crate_x={crate_x}"
+    );
+    assert!(
+        crate_x > platform_x,
+        "the crate must end up ahead of the platform, not tunnelled through: crate={crate_x} platform={platform_x}"
+    );
+}
+
+/// Two editor pieces must end the frame clear of each other: contact at
+/// most, never a deep overlap. Piece-vs-piece version of
+/// `assert_no_penetration`.
+fn assert_pieces_clear(app: &App, a_id: u32, b_id: u32, context: &str) {
+    use bevy_rapier3d::parry::query::contact;
+
+    let world = app.world();
+    let editor = world.resource::<Editor>();
+    let find = |id| editor.pieces.iter().find(|p| p.id == id).expect("piece");
+    let a = find(a_id);
+    let b = find(b_id);
+    let shape_a = &shapes()[a.shape];
+    let shape_b = &shapes()[b.shape];
+    let Some(prop_a) = piece_collider(shape_a) else {
+        return;
+    };
+    let Some(prop_b) = piece_collider(shape_b) else {
+        return;
+    };
+    let iso_a = super::super::movers::iso(
+        Vec3::new(a.pos.x, a.elevation, a.pos.y),
+        model::piece_quat(a),
+    );
+    let iso_b = super::super::movers::iso(
+        Vec3::new(b.pos.x, b.elevation, b.pos.y),
+        model::piece_quat(b),
+    );
+    let hit =
+        contact(&iso_a, prop_a.as_shape(), &iso_b, prop_b.as_shape(), 0.0).expect("contact query");
+    if let Some(hit) = hit {
+        assert!(
+            -hit.dist <= 0.05,
+            "{context}: deep overlap {:.3}: a={:?} b={:?}",
+            -hit.dist,
+            a.pos,
+            b.pos,
+        );
+    }
+}

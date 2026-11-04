@@ -11,6 +11,7 @@ pub(super) fn spawn_piece(
     kit: &Kit,
     piece: &Piece,
     ghost: bool,
+    movers: &Movers,
 ) -> Entity {
     let shape = shapes().get(piece.shape);
     let is_trigger = shape.is_some_and(|s| s.is_trigger);
@@ -32,16 +33,20 @@ pub(super) fn spawn_piece(
             // Rapier reads Transform directly, so only the body + collider
             // are inserted here. Dynamic bodies also get velocity and
             // impulse components up front: the shove systems write through
-            // them and Rapier never auto-inserts them.
-            if piece.dynamic {
-                root.insert((
-                    RigidBody::Dynamic,
-                    collider,
-                    Velocity::zero(),
-                    ExternalImpulse::default(),
-                ));
-            } else {
-                root.insert((RigidBody::Fixed, collider));
+            // them and Rapier never auto-inserts them. Path-driven pieces
+            // spawn kinematic so the solver shoves dynamics with momentum.
+            match movers::piece_body(piece, movers) {
+                RigidBody::Dynamic => {
+                    root.insert((
+                        RigidBody::Dynamic,
+                        collider,
+                        Velocity::zero(),
+                        ExternalImpulse::default(),
+                    ));
+                }
+                body => {
+                    root.insert((body, collider));
+                }
             }
         }
     }
@@ -109,6 +114,7 @@ pub(super) fn sync_visuals(
     editor: Res<Editor>,
     orbit: Res<Orbit>,
     kit: Res<Kit>,
+    movers: Res<Movers>,
     mut visuals: ResMut<Visuals>,
     mut transforms: Query<&mut Transform, Or<(With<PieceVisual>, With<CharacterVisual>)>>,
     mut bodies: Query<(&RigidBody, Has<Sleeping>, Option<&mut Velocity>), With<PieceVisual>>,
@@ -135,11 +141,9 @@ pub(super) fn sync_visuals(
     for piece in &editor.pieces {
         match visuals.map.get(&piece.id) {
             Some(&entity) => {
-                let wanted = if piece.dynamic {
-                    RigidBody::Dynamic
-                } else {
-                    RigidBody::Fixed
-                };
+                // Path-driven pieces stay kinematic so Rapier shoves dynamics
+                // with real momentum; plain statics stay `Fixed`.
+                let wanted = movers::piece_body(piece, &movers);
                 if let Ok((body, sleeping, velocity)) = bodies.get_mut(entity)
                     && *body != wanted
                 {
@@ -223,7 +227,7 @@ pub(super) fn sync_visuals(
                 }
             }
             None => {
-                let entity = spawn_piece(&mut commands, &kit, piece, false);
+                let entity = spawn_piece(&mut commands, &kit, piece, false, &movers);
                 visuals.map.insert(piece.id, entity);
             }
         }
@@ -263,7 +267,7 @@ pub(super) fn sync_visuals(
                 }
             }
             None => {
-                let entity = spawn_piece(&mut commands, &kit, &piece, true);
+                let entity = spawn_piece(&mut commands, &kit, &piece, true, &movers);
                 visuals.map.insert(0, entity);
             }
         }
