@@ -33,7 +33,11 @@ fn entering_play_holsters_tools_but_keeps_the_level_and_walk() {
     let mut editor = Editor {
         tool: Some(0),
         actor_tool: Some(ActorTool::Path),
-        selected: Some(3),
+        selection: {
+            let mut selection = Selection::default();
+            selection.set(3);
+            selection
+        },
         walk: Some(Walk {
             distance: 0.4,
             stuck: 0.0,
@@ -47,7 +51,7 @@ fn entering_play_holsters_tools_but_keeps_the_level_and_walk() {
     assert_eq!(editor.mode, Mode::Play);
     assert!(editor.tool.is_none());
     assert!(editor.actor_tool.is_none());
-    assert!(editor.selected.is_none());
+    assert!(editor.selection.is_empty());
     assert!(editor.walk.is_some(), "a live walk keeps going in play");
     assert!(editor.plan.is_some(), "the plan survives a mode switch");
 }
@@ -334,7 +338,7 @@ fn a_selected_waypoints_gizmo_shafts_grab_like_the_dot() {
     {
         let mut editor = app.world_mut().resource_mut::<Editor>();
         editor.pieces.push(test_piece(7));
-        editor.selected = Some(7);
+        editor.selection.set(7);
         editor.actor_tool = Some(ActorTool::Platform);
     }
     {

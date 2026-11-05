@@ -97,7 +97,7 @@ pub(super) fn activate_add_kind(editor: &mut Editor, kind: AddKind) {
         AddKind::Shape(index) => {
             editor.tool = Some(index);
             editor.actor_tool = None;
-            editor.selected = None;
+            editor.selection.clear();
             editor.ghost = None;
             editor.ghost_rot = 0.0;
             editor.note = "click the grid to place";
@@ -105,7 +105,7 @@ pub(super) fn activate_add_kind(editor: &mut Editor, kind: AddKind) {
         AddKind::Character => {
             editor.tool = None;
             editor.actor_tool = Some(ActorTool::Place);
-            editor.selected = None;
+            editor.selection.clear();
             editor.ghost = None;
             editor.ghost_rot = 0.0;
             editor.note = "click the grid to place the character";
@@ -775,12 +775,12 @@ mod tests {
     fn arming_a_shape_holsters_the_actor_tool() {
         let mut editor = Editor::default();
         editor.actor_tool = Some(ActorTool::Place);
-        editor.selected = Some(7);
+        editor.selection.set(7);
         let wall = model::shape_index("wall").unwrap();
         activate_add_kind(&mut editor, AddKind::Shape(wall));
         assert_eq!(editor.tool, Some(wall));
         assert_eq!(editor.actor_tool, None);
-        assert_eq!(editor.selected, None);
+        assert!(editor.selection.is_empty());
     }
 
     #[test]

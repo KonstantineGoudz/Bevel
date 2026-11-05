@@ -168,7 +168,7 @@ pub(super) fn gizmo_takes_pointer(editor: &Editor, touch_tap: bool) -> bool {
 pub(super) fn gizmo_grab_allowed(editor: &Editor, gesture_dragging: bool) -> bool {
     object_editing_allowed(editor.mode)
         && editor.actor_tool.is_none()
-        && editor.selected.is_some()
+        && !editor.selection.is_empty()
         && !gesture_dragging
         && editor.gizmo_drag.is_none()
 }
@@ -184,7 +184,7 @@ pub(super) fn gizmo_hit(
     ray: Ray3d,
     touch: bool,
 ) -> Option<GizmoHandle> {
-    let id = editor.selected?;
+    let id = editor.selection.primary()?;
     let piece = editor.pieces.iter().find(|p| p.id == id)?;
     let shape = shapes().get(piece.shape)?;
     let origin = gizmo_origin(piece, shape);
@@ -269,11 +269,44 @@ pub(super) fn gizmo_grab(
 ) -> Option<(GizmoHandle, Piece, Vec3)> {
     let handle = gizmo_hit(editor, camera, camera_transform, screen, ray, touch)?;
     let start = editor
-        .selected
+        .selection
+        .primary()
         .and_then(|id| editor.pieces.iter().find(|p| p.id == id).copied())?;
     let shape = shapes().get(start.shape)?;
     let grab = gizmo_drag_point(ray, handle, gizmo_origin(&start, shape))?;
     Some((handle, start, grab))
+}
+
+/// The drag state for a grab that has just started: the grabbed piece plus
+/// the rest of the selection, which follows it. Both pointer paths (desktop
+/// mouse and touch) build the drag here so they can never disagree about who
+/// moves.
+pub(super) fn dragged_group(editor: &Editor, id: u32) -> Vec<Piece> {
+    editor
+        .selection
+        .ids()
+        .iter()
+        .filter(|selected| **selected != id)
+        .filter_map(|selected| {
+            editor
+                .pieces
+                .iter()
+                .find(|piece| piece.id == *selected)
+                .copied()
+        })
+        .collect()
+}
+
+/// The pieces a drag may snap against: everything except the pieces travelling
+/// with it. A group must not snap onto itself, or one member would land on
+/// another's top and then be dragged off the surface it snapped to.
+pub(super) fn snap_against(editor: &Editor, moving: &[u32]) -> Vec<Piece> {
+    editor
+        .pieces
+        .iter()
+        .filter(|piece| !moving.contains(&piece.id))
+        .copied()
+        .collect()
 }
 
 /// Finish the gizmo drag owned by `pointer`, if any. Mirrors the mouse
@@ -288,6 +321,7 @@ pub(super) fn release_gizmo_drag(
 ) {
     if editor
         .gizmo_drag
+        .as_ref()
         .is_some_and(|drag| drag.pointer == pointer)
     {
         editor.hard_dirty = true;
@@ -462,10 +496,13 @@ pub(super) fn apply_gizmo_drag(editor: &mut Editor, drag: GizmoDrag, ray: Option
         GizmoHandle::Y | GizmoHandle::Xy | GizmoHandle::Zy
     ) {
         if (raw - drag.last_raw).abs() > 1e-6 {
+            let mut moving: Vec<u32> = drag.others.iter().map(|other| other.id).collect();
+            moving.push(drag.id);
+            let candidates = snap_against(editor, &moving);
             piece.elevation = snap_elevation(
                 piece,
                 shape,
-                &editor.pieces,
+                &candidates,
                 raw,
                 raw - drag.last_raw,
                 editor.snap,
@@ -477,6 +514,23 @@ pub(super) fn apply_gizmo_drag(editor: &mut Editor, drag: GizmoDrag, ray: Option
             piece.elevation = drag.last;
         }
     }
+    // The rest of the selection takes the same delta as the grabbed piece.
+    // One formula covers translate, lift and rotate: a translate handle leaves
+    // the quaternion delta at identity, and a rotation handle leaves the
+    // position delta at zero.
+    let delta_pos = piece.pos - drag.start.pos;
+    let delta_elevation = piece.elevation - drag.start.elevation;
+    let delta_rot = model::piece_quat(&piece) * model::piece_quat(&drag.start).inverse();
+    for other in &drag.others {
+        let mut moved = *other;
+        moved.pos += delta_pos;
+        moved.elevation += delta_elevation;
+        model::set_piece_quat(&mut moved, delta_rot * model::piece_quat(other));
+        if let Some(target) = editor.pieces.iter_mut().find(|target| target.id == other.id) {
+            *target = moved;
+        }
+    }
+
     editor.pieces[index] = piece;
     editor.gizmo_drag = Some(GizmoDrag {
         last_raw: raw,

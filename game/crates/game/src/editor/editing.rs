@@ -3,10 +3,15 @@
 use super::*;
 
 pub(super) fn rotate_piece(editor: &mut Editor, step: f32) {
-    if let Some(id) = editor.selected {
-        if editor.pieces.iter().any(|p| p.id == id) {
-            editor.commit();
-            if let Some(piece) = editor.pieces.iter_mut().find(|p| p.id == id) {
+    if !editor.selection.is_empty() {
+        let ids = editor.selection.ids().to_vec();
+        if !editor.pieces.iter().any(|piece| ids.contains(&piece.id)) {
+            editor.selection.clear();
+            return;
+        }
+        editor.commit();
+        for piece in editor.pieces.iter_mut() {
+            if ids.contains(&piece.id) {
                 piece.rot = model::normalize_angle(piece.rot + step);
             }
         }
@@ -16,44 +21,60 @@ pub(super) fn rotate_piece(editor: &mut Editor, step: f32) {
 }
 
 pub(super) fn delete_piece(editor: &mut Editor) {
-    if let Some(id) = editor.selected {
-        editor.commit();
-        editor.pieces.retain(|p| p.id != id);
-        editor.selected = None;
+    if editor.selection.is_empty() {
+        return;
     }
+    // Only the pieces actually present take the delete: a stale id in the
+    // selection must not cost an undo step.
+    let ids = editor.selection.ids().to_vec();
+    if !editor.pieces.iter().any(|piece| ids.contains(&piece.id)) {
+        editor.selection.clear();
+        return;
+    }
+    editor.commit();
+    editor.pieces.retain(|piece| !ids.contains(&piece.id));
+    editor.selection.clear();
 }
 
-/// Copy the selected piece, keeping its shape, rotation and height.
+/// Copy every selected piece, keeping shapes, rotation, height and the layout
+/// between them.
 pub(super) fn copy_piece(editor: &mut Editor) {
-    let Some(piece) = editor
-        .selected
-        .and_then(|id| editor.pieces.iter().find(|piece| piece.id == id).copied())
-    else {
+    let copied: Vec<Piece> = editor
+        .selection
+        .ids()
+        .iter()
+        .filter_map(|id| editor.pieces.iter().find(|piece| piece.id == *id).copied())
+        .collect();
+    if copied.is_empty() {
         editor.note = "nothing to copy";
         return;
-    };
-    editor.clipboard = Some(piece);
+    }
     editor.note = "copied";
+    editor.clipboard = copied;
 }
 
-/// Paste the clipboard as a new piece at `at`, or one hex beside the source
-/// when the pointer is not over the world. Rotation and height are preserved.
+/// Paste the clipboard as new pieces at `at`, or one hex beside the source
+/// when the pointer is not over the world. The copied layout is kept: the
+/// clipboard's primary piece lands on the cursor and everything else keeps its
+/// offset from it. Rotation and height are preserved throughout.
 pub(super) fn paste_piece(editor: &mut Editor, at: Option<Vec2>) {
-    let Some(source) = editor.clipboard else {
+    if editor.clipboard.is_empty() {
         editor.note = "nothing to paste";
         return;
-    };
-    let Some(shape) = shapes().get(source.shape) else {
+    }
+    let sources = editor.clipboard.clone();
+    let anchor = sources[0];
+    let Some(shape) = shapes().get(anchor.shape) else {
         return;
     };
     let origin = at.unwrap_or_else(|| {
-        let (q, r) = model::pixel_to_hex(source.pos);
+        let (q, r) = model::pixel_to_hex(anchor.pos);
         model::hex_center(q + 1, r)
     });
     let raw = Piece {
         id: editor.next_id,
         pos: origin,
-        ..source
+        ..anchor
     };
     let snap = model::snap_piece(
         &raw,
@@ -63,17 +84,38 @@ pub(super) fn paste_piece(editor: &mut Editor, at: Option<Vec2>) {
         editor.snap,
         SNAP_THRESHOLD,
     );
+    // Move the whole clipboard by the one delta that puts the anchor on the
+    // snapped spot, so relative offsets survive the snap.
+    let delta = snap.pos - anchor.pos;
+
+    let mut pasted_pieces = Vec::with_capacity(sources.len());
+    let mut pasted = Vec::with_capacity(sources.len());
+    for (index, source) in sources.iter().enumerate() {
+        if shapes().get(source.shape).is_none() {
+            continue;
+        }
+        let id = editor.next_id + pasted_pieces.len() as u32;
+        pasted_pieces.push(Piece {
+            id,
+            pos: if index == 0 {
+                snap.pos
+            } else {
+                source.pos + delta
+            },
+            rot: if index == 0 { snap.rot } else { source.rot },
+            ..*source
+        });
+        pasted.push(id);
+    }
+    if pasted_pieces.is_empty() {
+        editor.note = "nothing to paste";
+        return;
+    }
 
     editor.commit();
-    let id = editor.next_id;
-    editor.next_id += 1;
-    editor.pieces.push(Piece {
-        id,
-        pos: snap.pos,
-        rot: snap.rot,
-        ..raw
-    });
-    editor.selected = Some(id);
+    editor.next_id += pasted_pieces.len() as u32;
+    editor.pieces.extend(pasted_pieces);
+    editor.selection.set_all(pasted);
     editor.tool = None;
     editor.drag = None;
     editor.ghost = None;

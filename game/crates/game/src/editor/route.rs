@@ -279,7 +279,7 @@ pub(super) fn mover_handle_at(
     if editor.actor_tool != Some(ActorTool::Platform) {
         return None;
     }
-    let id = editor.selected?;
+    let id = editor.selection.primary()?;
     let mover = movers.map.get(&id)?;
     if mover.waypoints.len() < 2 {
         return None;
@@ -371,7 +371,7 @@ pub(super) fn select_mover_handle(
         PathHandle::Waypoint(id) => id as usize,
         PathHandle::Tangent { waypoint, .. } => waypoint as usize,
     };
-    let Some(id) = editor.selected else {
+    let Some(id) = editor.selection.primary() else {
         return false;
     };
     if let Some(mover) = movers.map.get_mut(&id) {

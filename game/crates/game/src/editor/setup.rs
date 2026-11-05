@@ -406,7 +406,7 @@ pub(super) fn setup(
     let hint_text = commands
         .spawn((
             Text::new(
-                "LMB place / select / drag  |  Y lifts, plane squares slide  |  rings pitch / yaw / roll  |  Ctrl+C / Ctrl+V copy & paste  |  Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo  |  Path: click route, Shift append  |  Enter walk  |  drag waypoints / curve handles  |  RMB orbit (selection in Build)  |  MMB pan  |  wheel zoom  |  V view  |  Tab mouse  |  P play / build  |  C character  |  F3 add menu (not first person)  |  G move / R rotate  |  X Y Z lock axis  |  Enter / LMB confirm  |  Esc / RMB cancel  |  Shift+R 30 deg  |  S save  |  Shift+S copy JSON",
+                "LMB place (Shift keeps stamping) / select / drag the selection  |  Shift+click add / remove from selection  |  Y lifts, plane squares slide  |  rings pitch / yaw / roll  |  Ctrl+C / Ctrl+V copy & paste the selection  |  Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo  |  Path: click route, Shift append  |  Enter walk  |  drag waypoints / curve handles  |  RMB orbit (selection in Build)  |  MMB pan  |  wheel zoom  |  V view  |  Tab mouse  |  P play / build  |  C character  |  F3 add menu (not first person)  |  G move / R rotate  |  X Y Z lock axis  |  Enter / LMB confirm  |  Esc / RMB cancel  |  Shift+R 30 deg  |  S save  |  Shift+S copy JSON",
             ),
             TextFont { font_size: FontSize::Px(11.0), ..default() },
             TextColor(Color::srgb_u8(0x6b, 0x7d, 0x93)),

@@ -59,7 +59,7 @@ pub(super) fn touch_input(
         // camera gesture or a grid tap.
         if !control
             && editor.mode == Mode::Build
-            && editor.selected.is_some()
+            && !editor.selection.is_empty()
             && over_properties_panel(pos, size, true, panel_state.collapsed, &state)
         {
             control = true;
@@ -274,7 +274,7 @@ pub(super) fn touch_gizmo_fallback(
             || over_controls(pos, size, s)
             || over_pad_cluster(pos, size, s)
             || (editor.mode == Mode::Play && minimap_hit(pos, size, s))
-            || (editor.selected.is_some()
+            || (!editor.selection.is_empty()
                 && over_properties_panel(pos, size, true, panel_state.collapsed, &touch))
             || (editor.mode == Mode::Build
                 && over_outliner_panel(pos, size, outliner.collapsed, &touch))
@@ -294,6 +294,7 @@ pub(super) fn touch_gizmo_fallback(
                 handle,
                 grab,
                 start,
+                others: dragged_group(&editor, start.id),
                 last_raw: start.elevation,
                 last: start.elevation,
                 pointer: PointerId::Touch(id),
@@ -596,7 +597,7 @@ pub(super) fn run_touch_action(
             } else {
                 Some(ActorTool::Path)
             };
-            editor.selected = None;
+            editor.selection.clear();
             editor.drag = None;
         }
         TouchAction::Plan => {
@@ -607,7 +608,7 @@ pub(super) fn run_touch_action(
                 None
             };
             editor.tool = None;
-            editor.selected = None;
+            editor.selection.clear();
             editor.drag = None;
             editor.ghost = None;
             if entering {
@@ -625,7 +626,7 @@ pub(super) fn run_touch_action(
             } else {
                 Some(ActorTool::Grass)
             };
-            editor.selected = None;
+            editor.selection.clear();
             editor.drag = None;
             editor.ghost = None;
             if editor.actor_tool == Some(ActorTool::Grass) {
@@ -659,7 +660,7 @@ pub(super) fn run_touch_action(
                 Some(editor.mobile_shape)
             };
             editor.actor_tool = None;
-            editor.selected = None;
+            editor.selection.clear();
             editor.drag = None;
         }
         TouchAction::PrevShape | TouchAction::NextShape => {
@@ -765,7 +766,7 @@ pub(super) fn on_path_press(
         touch.multi = true;
     }
     let pos = event.pointer.position;
-    if editor.selected.is_some()
+    if !editor.selection.is_empty()
         && over_properties_panel(pos, window.size(), true, panel_state.collapsed, &touch)
     {
         return;
@@ -808,6 +809,7 @@ pub(super) fn on_path_press(
             handle,
             grab,
             start,
+            others: dragged_group(&editor, start.id),
             last_raw: start.elevation,
             last: start.elevation,
             pointer: event.pointer.id,
@@ -840,7 +842,7 @@ pub(super) fn on_path_press(
                 PathHandle::Waypoint(id) => id as usize,
                 PathHandle::Tangent { waypoint, .. } => waypoint as usize,
             };
-            if let Some(id) = editor.selected {
+            if let Some(id) = editor.selection.primary() {
                 if let Some(mover) = movers.map.get_mut(&id) {
                     mover.selected = Some(index);
                 }
@@ -992,7 +994,7 @@ pub(super) fn path_drag(
     // Touch gizmo drags are driven from pointer events: a finger has no
     // cursor, so `cursor.ray` is stale while it is down. The desktop mouse
     // path keeps living in `interact`.
-    if let Some(drag) = editor.gizmo_drag
+    if let Some(drag) = editor.gizmo_drag.clone()
         && drag.pointer != PointerId::Mouse
     {
         let (camera, transform) = *camera;

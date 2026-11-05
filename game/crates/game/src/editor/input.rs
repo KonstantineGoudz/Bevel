@@ -169,7 +169,7 @@ pub(super) fn on_palette_activate(
     // must not drop it mid-path. Every other palette action changes tools,
     // modes or levels, so the clear below still applies to those.
     if editor.actor_tool != Some(ActorTool::Platform) || !matches!(button.0, PaletteAction::View) {
-        editor.selected = None;
+        editor.selection.clear();
     }
     editor.ghost = None;
     editor.ghost_rot = 0.0;
@@ -250,7 +250,7 @@ pub(super) fn set_mode(editor: &mut Editor, mode: Mode) {
         Mode::Play => {
             editor.tool = None;
             editor.actor_tool = None;
-            editor.selected = None;
+            editor.selection.clear();
             editor.ghost = None;
             editor.drag = None;
             editor.gizmo_drag = None;
@@ -396,7 +396,7 @@ pub(super) fn interact(
     if !playing && input.just_pressed(Action::Back) {
         editor.tool = None;
         editor.actor_tool = None;
-        editor.selected = None;
+        editor.selection.clear();
         editor.ghost = None;
         editor.drag = None;
         editor.plan = None;
@@ -472,7 +472,7 @@ pub(super) fn interact(
         && over_properties_panel(
             screen,
             cursor.screen_size,
-            editor.selected.is_some(),
+            !editor.selection.is_empty(),
             panel_state.collapsed,
             &touch,
         )
@@ -508,6 +508,7 @@ pub(super) fn interact(
             handle,
             grab,
             start,
+            others: dragged_group(&editor, start.id),
             last_raw: start.elevation,
             last: start.elevation,
             pointer: PointerId::Mouse,
@@ -516,7 +517,7 @@ pub(super) fn interact(
         editor.ghost = None;
     }
 
-    if let Some(drag) = editor.gizmo_drag {
+    if let Some(drag) = editor.gizmo_drag.clone() {
         if input.pressed(Action::PrimaryClick) {
             apply_gizmo_drag(&mut editor, drag, cursor.ray);
         }
@@ -591,12 +592,27 @@ pub(super) fn interact(
                 trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
                 interact: crate::model::InteractAction::None,
             });
-            editor.selected = Some(id);
+            editor.selection.set(id);
             editor.note = match snap.kind {
                 SnapKind::Anchor => "placed: anchor snap",
                 SnapKind::Grid => "placed: grid snap",
                 SnapKind::Free => "placed: free",
             };
+            // One drop per palette click. Holding Shift (or the sticky touch
+            // Add) keeps the stamp armed, so a row of blocks is a Shift-click
+            // each, while a plain click hands the pointer back to selection so
+            // the piece can be moved straight away.
+            let shift =
+                input.keys.pressed(KeyCode::ShiftLeft) || input.keys.pressed(KeyCode::ShiftRight);
+            if !keeps_stamping(shift, touch.append) {
+                editor.tool = None;
+                editor.ghost = None;
+                editor.note = match snap.kind {
+                    SnapKind::Anchor => "placed: anchor snap (Shift keeps stamping)",
+                    SnapKind::Grid => "placed: grid snap (Shift keeps stamping)",
+                    SnapKind::Free => "placed: free (Shift keeps stamping)",
+                };
+            }
         }
         return;
     }
@@ -644,7 +660,7 @@ pub(super) fn interact(
             );
             // A tap here is a waypoint, never a selection: drop any stale
             // highlight left over from placing the block.
-            editor.selected = None;
+            editor.selection.clear();
             editor.drag = None;
         }
         return;
@@ -675,7 +691,7 @@ pub(super) fn interact(
                 &rapier_ctx,
                 surface_filter,
             );
-            editor.selected = None;
+            editor.selection.clear();
             editor.drag = None;
         }
         return;
@@ -735,7 +751,7 @@ pub(super) fn interact(
             ) {
                 return;
             }
-            let id = match editor.selected {
+            let id = match editor.selection.primary() {
                 Some(id) if editor.pieces.iter().any(|p| p.id == id) => id,
                 _ => {
                     // No valid selection: a click on a piece selects it so
@@ -744,7 +760,7 @@ pub(super) fn interact(
                         .ray
                         .and_then(|ray| pick_unlocked(&editor.pieces, ray, &editor.outline.locked))
                     {
-                        editor.selected = Some(hit);
+                        editor.selection.set(hit);
                         editor.note = "motion: piece selected, click to add path points";
                     } else {
                         editor.note = "select a piece first, then add motion";
@@ -783,49 +799,66 @@ pub(super) fn interact(
                 &rapier_ctx,
                 surface_filter,
             );
-            editor.selected = None;
+            editor.selection.clear();
             editor.drag = None;
         } else if playing {
             // Play routes the capsule; it never selects or drags objects.
         } else if let Some(hit) = hit {
-            editor.selected = Some(hit);
-            if let Some(piece) = editor.pieces.iter().find(|p| p.id == hit) {
-                // Grab in the piece's own horizontal plane, not on the
-                // ground: clicking the face of a tall or elevated piece
-                // projects far behind its base on y = 0, which made the
-                // piece feel offset from the cursor as soon as it moved.
-                let plane = piece.elevation;
-                let grab = cursor
-                    .ray
-                    .and_then(|ray| drag_plane_point(ray, plane))
-                    .unwrap_or(world);
-                editor.drag = Some(Drag {
-                    id: hit,
-                    offset: piece.pos - grab,
-                    plane,
-                    moved: false,
-                });
+            // Shift (or the sticky touch Add) grows the selection instead of
+            // replacing it. A plain click on a piece that is already part of a
+            // multi-selection keeps the group, so the whole set can be
+            // dragged from any of its pieces.
+            let shift =
+                input.keys.pressed(KeyCode::ShiftLeft) || input.keys.pressed(KeyCode::ShiftRight);
+            let append = append_for(shift, touch.append);
+            if click_selection(&mut editor, hit, append) {
+                if let Some(piece) = editor.pieces.iter().find(|p| p.id == hit) {
+                    // Grab in the piece's own horizontal plane, not on the
+                    // ground: clicking the face of a tall or elevated piece
+                    // projects far behind its base on y = 0, which made the
+                    // piece feel offset from the cursor as soon as it moved.
+                    let plane = piece.elevation;
+                    let grab = cursor
+                        .ray
+                        .and_then(|ray| drag_plane_point(ray, plane))
+                        .unwrap_or(world);
+                    editor.drag = Some(Drag {
+                        id: hit,
+                        offset: piece.pos - grab,
+                        plane,
+                        moved: false,
+                        group: group_offsets(&editor, hit, piece.pos),
+                    });
+                }
+                editor.commit();
+            } else {
+                editor.drag = None;
+                editor.note = if editor.selection.is_empty() {
+                    "nothing selected"
+                } else {
+                    "selection"
+                };
             }
-            editor.commit();
         } else {
-            editor.selected = None;
+            editor.selection.clear();
             editor.drag = None;
         }
     }
 
-    if !playing && input.pressed(Action::PrimaryClick) {
-        if let Some(drag) = editor.drag {
-            let base = cursor
-                .ray
-                .and_then(|ray| drag_plane_point(ray, drag.plane))
-                .unwrap_or(world);
-            apply_body_drag(&mut editor, drag, base);
-        }
+    if !playing
+        && input.pressed(Action::PrimaryClick)
+        && let Some(drag) = editor.drag.clone()
+    {
+        let base = cursor
+            .ray
+            .and_then(|ray| drag_plane_point(ray, drag.plane))
+            .unwrap_or(world);
+        apply_body_drag(&mut editor, drag, base);
     }
 
     if !playing
         && input.just_released(Action::PrimaryClick)
-        && let Some(drag) = editor.drag
+        && let Some(drag) = editor.drag.clone()
     {
         if drag.moved {
             // Same as a gizmo drag: the commit happened on press, so mark
@@ -836,6 +869,48 @@ pub(super) fn interact(
         }
         editor.drag = None;
     }
+}
+
+/// Whether a placement keeps the stamp armed: holding Shift (or the sticky
+/// touch Add) asks for another block, while a plain click hands the pointer
+/// back to selection so the piece can be moved straight away.
+pub(super) fn keeps_stamping(shift: bool, touch_add: bool) -> bool {
+    append_for(shift, touch_add)
+}
+
+/// Apply a click on `hit` to the selection. Shift-clicking (or the sticky
+/// touch Add) toggles membership; a plain click on a piece outside the
+/// selection replaces it, and a plain click on a piece that is already
+/// selected keeps the group so the whole set can be dragged from any member.
+///
+/// Returns whether the click should start a body drag from `hit`.
+pub(super) fn click_selection(editor: &mut Editor, hit: u32, append: bool) -> bool {
+    if append {
+        editor.selection.toggle(hit);
+        return false;
+    }
+    if !editor.selection.contains(hit) {
+        editor.selection.set(hit);
+    }
+    true
+}
+
+/// The other selected pieces as `(id, offset)` measured from the grabbed
+/// piece, so one drag carries the whole selection rigidly.
+pub(super) fn group_offsets(editor: &Editor, anchor: u32, anchor_pos: Vec2) -> Vec<(u32, Vec2)> {
+    editor
+        .selection
+        .ids()
+        .iter()
+        .filter(|id| **id != anchor)
+        .filter_map(|id| {
+            editor
+                .pieces
+                .iter()
+                .find(|piece| piece.id == *id)
+                .map(|piece| (*id, piece.pos - anchor_pos))
+        })
+        .collect()
 }
 
 /// Advance a body drag to the pointer's current ground-plane projection.
@@ -866,19 +941,33 @@ pub(super) fn apply_body_drag(editor: &mut Editor, drag: Drag, base: Vec2) {
         pos: raw_pos,
         ..piece
     };
+    let mut moving: Vec<u32> = drag.group.iter().map(|(id, _)| *id).collect();
+    moving.push(drag.id);
+    let candidates = snap_against(editor, &moving);
     let snap = model::snap_piece(
         &raw,
         shape,
-        &editor.pieces,
+        &candidates,
         editor.snap,
         false,
         SNAP_THRESHOLD,
     );
-    let target = &mut editor.pieces[index];
-    let changed =
-        (target.pos - snap.pos).length_squared() > 1e-10 || (target.rot - snap.rot).abs() > 1e-6;
-    target.pos = snap.pos;
-    target.rot = snap.rot;
+    let changed = {
+        let target = &mut editor.pieces[index];
+        let changed = (target.pos - snap.pos).length_squared() > 1e-10
+            || (target.rot - snap.rot).abs() > 1e-6;
+        target.pos = snap.pos;
+        target.rot = snap.rot;
+        changed
+    };
+    // The rest of the selection follows the grabbed piece rigidly, keeping
+    // the layout captured at grab time. They do not snap: the anchor's snap
+    // is what places the group.
+    for (id, offset) in &drag.group {
+        if let Some(other) = editor.pieces.iter_mut().find(|p| p.id == *id) {
+            other.pos = snap.pos + *offset;
+        }
+    }
     if changed {
         if let Some(d) = editor.drag.as_mut() {
             d.moved = true;

@@ -834,7 +834,7 @@ pub(super) fn on_physics_toggle(
 }
 
 pub(super) fn toggle_selected_physics(editor: &mut Editor) {
-    let Some(id) = editor.selected else {
+    let Some(id) = editor.selection.primary() else {
         return;
     };
     let Some(index) = editor.pieces.iter().position(|piece| piece.id == id) else {
@@ -863,7 +863,7 @@ pub(super) fn on_interact_toggle(
 /// Cycle the selected piece's interaction: off -> pause motion -> off.
 /// New actions slot into this cycle as new enum variants.
 pub(super) fn toggle_selected_interact(editor: &mut Editor) {
-    let Some(id) = editor.selected else {
+    let Some(id) = editor.selection.primary() else {
         return;
     };
     let Some(index) = editor.pieces.iter().position(|piece| piece.id == id) else {
@@ -890,7 +890,7 @@ pub(super) fn on_trigger_shape(
     if buttons.get(event.entity).is_err() {
         return;
     }
-    let Some(id) = editor.selected else {
+    let Some(id) = editor.selection.primary() else {
         return;
     };
     let Some(index) = editor.pieces.iter().position(|p| p.id == id) else {
@@ -942,7 +942,7 @@ pub(super) fn on_trigger_color(
     let Ok(btn) = buttons.get(event.entity) else {
         return;
     };
-    let Some(id) = editor.selected else {
+    let Some(id) = editor.selection.primary() else {
         return;
     };
     let Some(index) = editor.pieces.iter().position(|p| p.id == id) else {
@@ -969,7 +969,7 @@ pub(super) fn on_trigger_visible(
     if buttons.get(event.entity).is_err() {
         return;
     }
-    let Some(id) = editor.selected else {
+    let Some(id) = editor.selection.primary() else {
         return;
     };
     let Some(index) = editor.pieces.iter().position(|p| p.id == id) else {
@@ -993,7 +993,7 @@ pub(super) fn on_trigger_visible(
 }
 
 fn selected_mover_id(editor: &Editor) -> Option<u32> {
-    let id = editor.selected?;
+    let id = editor.selection.primary()?;
     editor.pieces.iter().any(|p| p.id == id).then_some(id)
 }
 
@@ -1089,7 +1089,7 @@ pub(super) fn on_platform_edit(
     if buttons.get(event.entity).is_err() {
         return;
     }
-    if editor.selected.is_none() {
+    if editor.selection.is_empty() {
         editor.note = "select a piece first, then edit motion";
         return;
     }
@@ -1148,7 +1148,7 @@ pub(super) fn apply_property_edits(
     >,
     mut commands: Commands,
 ) {
-    if state.selected != editor.selected {
+    if state.selected != editor.selection.primary() {
         // Let `sync_properties_panel` update the selection, clear focus and
         // refresh all fields before accepting an edit for the new piece.
         state.committed = false;
@@ -1177,7 +1177,7 @@ pub(super) fn apply_property_edits(
     let Some(value) = field.parse(&current_text) else {
         return;
     };
-    let Some(id) = editor.selected else {
+    let Some(id) = editor.selection.primary() else {
         return;
     };
     let Some(index) = editor.pieces.iter().position(|piece| piece.id == id) else {
@@ -1325,7 +1325,8 @@ pub(super) fn sync_properties_panel(
     mut trigger_shape_label: Single<&mut Text, (With<TriggerShapeLabel>,)>,
 ) {
     let selected = editor
-        .selected
+        .selection
+        .primary()
         .and_then(|id| editor.pieces.iter().find(|piece| piece.id == id).copied());
     let visible = editor.mode == Mode::Build && selected.is_some();
     panel.display = if visible {
@@ -1387,7 +1388,7 @@ pub(super) fn sync_properties_panel(
     } else {
         format!("Interact: {}", piece.interact.label())
     };
-    if let Some(mover) = editor.selected.and_then(|id| movers.map.get(&id)) {
+    if let Some(mover) = editor.selection.primary().and_then(|id| movers.map.get(&id)) {
         mode_label.0 = format!(
             "Mode: {} ({} wp)",
             mover.mode.label(),
@@ -1475,7 +1476,7 @@ pub(super) fn sync_transparency_slider(
     mut fill_query: Query<&mut Node, With<TransparencySliderFill>>,
     mut label_query: Query<&mut Text, With<TransparencyValueLabel>>,
 ) {
-    let Some(id) = editor.selected else {
+    let Some(id) = editor.selection.primary() else {
         return;
     };
     let Some(piece) = editor.pieces.iter().find(|p| p.id == id) else {
@@ -1518,7 +1519,7 @@ pub(super) fn handle_transparency_slider(
         *committed = false;
         return;
     };
-    let Some(id) = editor.selected else {
+    let Some(id) = editor.selection.primary() else {
         return;
     };
     let Some(index) = editor.pieces.iter().position(|p| p.id == id) else {
@@ -1541,12 +1542,14 @@ pub(super) fn sync_trigger_color_buttons(
     mut buttons: Query<(&TriggerColorButton, &mut BorderColor)>,
 ) {
     let selected_color = editor
-        .selected
+        .selection
+        .primary()
         .and_then(|id| editor.pieces.iter().find(|p| p.id == id))
         .map(|p| p.trigger_color)
         .unwrap_or(crate::model::TRIGGER_DEFAULT_COLOR);
     let is_trigger = editor
-        .selected
+        .selection
+        .primary()
         .and_then(|id| editor.pieces.iter().find(|p| p.id == id))
         .and_then(|p| shapes().get(p.shape))
         .is_some_and(|s| s.is_trigger);
@@ -1562,7 +1565,8 @@ pub(super) fn sync_trigger_visible_label(
     mut labels: Query<&mut Text, With<TriggerVisibleLabel>>,
 ) {
     let visible = editor
-        .selected
+        .selection
+        .primary()
         .and_then(|id| editor.pieces.iter().find(|p| p.id == id))
         .map(|p| p.trigger_visible)
         .unwrap_or(true);

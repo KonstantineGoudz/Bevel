@@ -39,7 +39,7 @@ pub(super) fn keyboard_transform(
         keys,
         mouse,
     };
-    let Some(mut transform) = editor.keyboard_transform else {
+    let Some(mut transform) = editor.keyboard_transform.clone() else {
         return start_transform(editor, input, cursor, allow_start);
     };
 
@@ -110,11 +110,11 @@ fn start_transform(
     };
 
     // Keep the existing 30-degree step for an armed shape with no selection.
-    if mode == TransformMode::Rotate && editor.selected.is_none() && editor.tool.is_some() {
+    if mode == TransformMode::Rotate && editor.selection.is_empty() && editor.tool.is_some() {
         return false;
     }
 
-    let Some(id) = editor.selected else {
+    let Some(id) = editor.selection.primary() else {
         editor.note = match mode {
             TransformMode::Move => "select a piece to move",
             TransformMode::Rotate => "select a piece to rotate",
@@ -125,6 +125,17 @@ fn start_transform(
         editor.note = "select a piece first";
         return true;
     };
+    // The whole selection rides along; the primary is the axis of reference.
+    let originals: Vec<Piece> = editor
+        .selection
+        .ids()
+        .iter()
+        .filter_map(|id| editor.pieces.iter().find(|piece| piece.id == *id).copied())
+        .collect();
+    if originals.is_empty() || originals[0].id != id {
+        editor.note = "select a piece first";
+        return true;
+    }
     if editor.drag.is_some() || editor.gizmo_drag.is_some() {
         return false;
     }
@@ -143,7 +154,7 @@ fn start_transform(
         id,
         mode,
         axis,
-        original: piece,
+        originals,
         base: piece,
         grab,
         committed: false,
@@ -172,10 +183,12 @@ fn update_transform(editor: &mut Editor, transform: &mut KeyboardTransform, ray:
         let raw = piece.elevation;
         let direction = raw - transform.base.elevation;
         let shape = &shapes()[piece.shape];
+        let moving: Vec<u32> = transform.originals.iter().map(|piece| piece.id).collect();
+        let candidates = snap_against(editor, &moving);
         piece.elevation = snap_elevation(
             piece,
             shape,
-            &editor.pieces,
+            &candidates,
             raw,
             direction,
             editor.snap,
@@ -183,27 +196,58 @@ fn update_transform(editor: &mut Editor, transform: &mut KeyboardTransform, ray:
         );
     }
 
-    if piece != transform.original && !transform.committed {
+    let moved = group_pieces(&transform.originals, piece);
+    if moved != transform.originals && !transform.committed {
         // Push the pre-transform state before writing the first change, so an
         // Escape can restore it without leaving an empty undo step.
         editor.commit();
         transform.committed = true;
     }
-    if let Some(target) = editor
-        .pieces
-        .iter_mut()
-        .find(|piece| piece.id == transform.id)
-    {
-        *target = piece;
+    for piece in moved {
+        if let Some(target) = editor
+            .pieces
+            .iter_mut()
+            .find(|target| target.id == piece.id)
+        {
+            *target = piece;
+        }
     }
 }
 
+/// Every selected piece after the primary piece has been moved to `piece`:
+/// the primary lands on it and the rest take the same delta, measured from
+/// the transform's start, so the group keeps its shape.
+///
+/// One formula covers both modes. A move changes only the primary's position,
+/// so the quaternion delta is the identity; a rotation changes only the
+/// quaternion and leaves positions alone.
+fn group_pieces(originals: &[Piece], piece: Piece) -> Vec<Piece> {
+    let Some(original) = originals.first() else {
+        return Vec::new();
+    };
+    let delta_pos = piece.pos - original.pos;
+    let delta_elevation = piece.elevation - original.elevation;
+    let delta_rot = model::piece_quat(&piece) * model::piece_quat(original).inverse();
+    let mut moved = Vec::with_capacity(originals.len());
+    moved.push(piece);
+    for other in &originals[1..] {
+        let mut piece = *other;
+        piece.pos += delta_pos;
+        piece.elevation += delta_elevation;
+        model::set_piece_quat(&mut piece, delta_rot * model::piece_quat(other));
+        moved.push(piece);
+    }
+    moved
+}
+
 fn confirm_transform(editor: &mut Editor, transform: KeyboardTransform) {
-    let unchanged = editor
-        .pieces
-        .iter()
-        .find(|piece| piece.id == transform.id)
-        .is_none_or(|piece| *piece == transform.original);
+    let unchanged = transform.originals.iter().all(|original| {
+        editor
+            .pieces
+            .iter()
+            .find(|piece| piece.id == original.id)
+            .is_none_or(|piece| piece == original)
+    });
     editor.keyboard_transform = None;
     if transform.committed {
         if unchanged {
@@ -224,12 +268,14 @@ fn confirm_transform(editor: &mut Editor, transform: KeyboardTransform) {
 }
 
 fn cancel_transform(editor: &mut Editor, transform: KeyboardTransform) {
-    if let Some(piece) = editor
-        .pieces
-        .iter_mut()
-        .find(|piece| piece.id == transform.id)
-    {
-        *piece = transform.original;
+    for original in &transform.originals {
+        if let Some(piece) = editor
+            .pieces
+            .iter_mut()
+            .find(|piece| piece.id == original.id)
+        {
+            *piece = *original;
+        }
     }
     if transform.committed {
         editor.undo.pop();

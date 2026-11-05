@@ -175,7 +175,7 @@ pub(super) fn flush_platform_requests(mut editor: ResMut<Editor>, mut movers: Re
 /// Delete the selected waypoint of the selected piece's path, if any.
 /// Returns true when something was removed.
 pub(super) fn delete_selected_mover_waypoint(editor: &mut Editor, movers: &mut Movers) -> bool {
-    let Some(id) = editor.selected else {
+    let Some(id) = editor.selection.primary() else {
         return false;
     };
     let Some(mover) = movers.map.get_mut(&id) else {
@@ -207,7 +207,7 @@ pub(super) fn apply_mover_drag(
     camera: &Camera,
     camera_transform: &GlobalTransform,
 ) -> bool {
-    let Some(id) = editor.selected else {
+    let Some(id) = editor.selection.primary() else {
         return false;
     };
     let Some(mover) = movers.map.get_mut(&id) else {

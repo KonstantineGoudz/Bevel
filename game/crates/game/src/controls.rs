@@ -842,17 +842,19 @@ impl Controls {
         mouse: &ButtonInput<MouseButton>,
         pads: &[&Gamepad],
         insensitive: bool,
+        shift_blind: bool,
     ) -> bool {
         match binding {
             Binding::Key(chord) => Self::chord_down(chord, keys, insensitive),
             Binding::Mouse(chord) => {
                 mouse.pressed(chord.button)
-                    && (!chord.shift
-                        || keys.pressed(KeyCode::ShiftLeft)
-                        || keys.pressed(KeyCode::ShiftRight))
-                    && (chord.shift
-                        || (!keys.pressed(KeyCode::ShiftLeft)
-                            && !keys.pressed(KeyCode::ShiftRight)))
+                    && (shift_blind
+                        || ((!chord.shift
+                            || keys.pressed(KeyCode::ShiftLeft)
+                            || keys.pressed(KeyCode::ShiftRight))
+                            && (chord.shift
+                                || (!keys.pressed(KeyCode::ShiftLeft)
+                                    && !keys.pressed(KeyCode::ShiftRight)))))
             }
             Binding::Pad(button) => pads.iter().any(|pad| pad.pressed(*button)),
         }
@@ -864,17 +866,19 @@ impl Controls {
         mouse: &ButtonInput<MouseButton>,
         pads: &[&Gamepad],
         insensitive: bool,
+        shift_blind: bool,
     ) -> bool {
         match binding {
             Binding::Key(chord) => Self::chord_just_pressed(chord, keys, insensitive),
             Binding::Mouse(chord) => {
                 mouse.just_pressed(chord.button)
-                    && (!chord.shift
-                        || keys.pressed(KeyCode::ShiftLeft)
-                        || keys.pressed(KeyCode::ShiftRight))
-                    && (chord.shift
-                        || (!keys.pressed(KeyCode::ShiftLeft)
-                            && !keys.pressed(KeyCode::ShiftRight)))
+                    && (shift_blind
+                        || ((!chord.shift
+                            || keys.pressed(KeyCode::ShiftLeft)
+                            || keys.pressed(KeyCode::ShiftRight))
+                            && (chord.shift
+                                || (!keys.pressed(KeyCode::ShiftLeft)
+                                    && !keys.pressed(KeyCode::ShiftRight)))))
             }
             Binding::Pad(button) => pads.iter().any(|pad| pad.just_pressed(*button)),
         }
@@ -905,9 +909,10 @@ impl Controls {
         pads: &[&Gamepad],
     ) -> bool {
         let insensitive = action.mod_insensitive();
+        let shift_blind = Self::mouse_ignores_shift(self.binding(action));
         self.binding(action)
             .iter()
-            .any(|binding| Self::binding_down(binding, keys, mouse, pads, insensitive))
+            .any(|binding| Self::binding_down(binding, keys, mouse, pads, insensitive, shift_blind))
     }
 
     /// Begun this frame.
@@ -919,9 +924,25 @@ impl Controls {
         pads: &[&Gamepad],
     ) -> bool {
         let insensitive = action.mod_insensitive();
+        let shift_blind = Self::mouse_ignores_shift(self.binding(action));
         self.binding(action)
             .iter()
-            .any(|binding| Self::binding_just_pressed(binding, keys, mouse, pads, insensitive))
+            .any(|binding| {
+                Self::binding_just_pressed(binding, keys, mouse, pads, insensitive, shift_blind)
+            })
+    }
+
+    /// Whether this action's mouse bindings should ignore the Shift key.
+    ///
+    /// The editor uses Shift as a modifier on the click itself (add to the
+    /// selection, keep the stamp armed, append a route point), not as a
+    /// different chord. An action that never binds a shift-click therefore
+    /// still fires while Shift is held. Actions that do bind both keep the
+    /// exact-modifier rule.
+    fn mouse_ignores_shift(bindings: &[Binding]) -> bool {
+        !bindings
+            .iter()
+            .any(|binding| matches!(binding, Binding::Mouse(chord) if chord.shift))
     }
 
     /// Released this frame.
@@ -1300,6 +1321,23 @@ mod tests {
 
     fn mouse() -> ButtonInput<MouseButton> {
         ButtonInput::<MouseButton>::default()
+    }
+
+    #[test]
+    fn a_shift_click_still_reads_as_a_primary_click() {
+        let controls = Controls::with_defaults();
+        let pads: [&Gamepad; 0] = [];
+        let mut left = mouse();
+        left.press(MouseButton::Left);
+        let shift = pressed_keys(&[KeyCode::ShiftLeft]);
+
+        // Shift+click selects into a group and keeps the stamp armed: the
+        // plain PrimaryClick action must not be hidden by the modifier.
+        assert!(controls.just_pressed(Action::PrimaryClick, &shift, &left, &pads));
+        assert!(controls.pressed(Action::PrimaryClick, &shift, &left, &pads));
+        // And a plain click is unchanged.
+        assert!(controls.just_pressed(Action::PrimaryClick, &released_keys(), &left, &pads));
+        assert!(!controls.just_pressed(Action::PrimaryClick, &released_keys(), &mouse(), &pads));
     }
 
     #[test]

@@ -199,7 +199,7 @@ fn touch_starts_with_the_properties_panel_collapsed() {
 fn the_physics_toggle_is_undoable_and_flips_both_ways() {
     let mut editor = Editor::default();
     editor.pieces.push(test_piece(1));
-    editor.selected = Some(1);
+    editor.selection.set(1);
 
     toggle_selected_physics(&mut editor);
     assert!(editor.pieces[0].dynamic);
@@ -216,7 +216,7 @@ fn the_physics_toggle_is_undoable_and_flips_both_ways() {
 fn the_interact_toggle_cycles_pause_and_is_undoable() {
     let mut editor = Editor::default();
     editor.pieces.push(test_piece(1));
-    editor.selected = Some(1);
+    editor.selection.set(1);
     assert!(editor.pieces[0].interact.is_none());
 
     toggle_selected_interact(&mut editor);
@@ -568,7 +568,7 @@ fn a_press_on_row_text_resolves_to_the_owning_row() {
         app.world().resource::<OutlinerState>().selection,
         GraphNode::Piece(1)
     );
-    assert_eq!(app.world().resource::<Editor>().selected, Some(1));
+    assert_eq!(app.world().resource::<Editor>().selection.primary(), Some(1));
 }
 
 #[test]
@@ -672,7 +672,7 @@ fn clicking_a_lock_badge_toggles_lock_without_selecting() {
     });
 
     assert!(app.world().resource::<Editor>().outline.is_locked(1));
-    assert_eq!(app.world().resource::<Editor>().selected, None);
+    assert_eq!(app.world().resource::<Editor>().selection.primary(), None);
     assert_eq!(
         app.world().resource::<OutlinerState>().selection,
         GraphNode::Root
@@ -706,7 +706,7 @@ fn motion_editing_pins_the_paths_piece_in_the_outliner() {
         editor.pieces.push(test_piece(1));
         editor.pieces.push(test_piece(2));
         // Editing piece 1's motion path: the Motion tool is armed.
-        editor.selected = Some(1);
+        editor.selection.set(1);
         editor.actor_tool = Some(ActorTool::Platform);
     }
 
@@ -741,7 +741,7 @@ fn motion_editing_pins_the_paths_piece_in_the_outliner() {
     // A click on another object's row must not steal the path's piece.
     app.world_mut().trigger(press());
     assert_eq!(
-        app.world().resource::<Editor>().selected,
+        app.world().resource::<Editor>().selection.primary(),
         Some(1),
         "the motion path keeps its piece"
     );
@@ -758,7 +758,7 @@ fn motion_editing_pins_the_paths_piece_in_the_outliner() {
     // Without the Motion tool the same click selects normally.
     app.world_mut().resource_mut::<Editor>().actor_tool = None;
     app.world_mut().trigger(press());
-    assert_eq!(app.world().resource::<Editor>().selected, Some(2));
+    assert_eq!(app.world().resource::<Editor>().selection.primary(), Some(2));
     assert_eq!(
         app.world().resource::<OutlinerState>().selection,
         GraphNode::Piece(2)

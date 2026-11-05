@@ -218,7 +218,7 @@ fn a_finger_can_grab_and_drag_a_gizmo_handle() {
     {
         let mut editor = app.world_mut().resource_mut::<Editor>();
         editor.pieces.push(test_piece(1));
-        editor.selected = Some(1);
+        editor.selection.set(1);
     }
     // A headless camera with explicit viewport math (no renderer needed):
     // projection and viewport are consistent, which is all the hit test
@@ -290,6 +290,7 @@ fn a_finger_can_grab_and_drag_a_gizmo_handle() {
         .world()
         .resource::<Editor>()
         .gizmo_drag
+        .clone()
         .expect("finger grabs the handle");
     assert_eq!(drag.pointer, finger);
     assert_eq!(drag.handle, GizmoHandle::Y);
@@ -354,7 +355,7 @@ fn a_finger_can_grab_the_negative_end_of_an_axis() {
     {
         let mut editor = app.world_mut().resource_mut::<Editor>();
         editor.pieces.push(test_piece(1));
-        editor.selected = Some(1);
+        editor.selection.set(1);
     }
     let eye = Vec3::new(6.0, 7.0, 6.0);
     let cam_transform = Transform::from_translation(eye).looking_at(Vec3::ZERO, Vec3::Y);
@@ -419,6 +420,7 @@ fn a_finger_can_grab_the_negative_end_of_an_axis() {
         .world()
         .resource::<Editor>()
         .gizmo_drag
+        .clone()
         .expect("finger grabs the negative handle");
     assert_eq!(drag.pointer, finger);
     assert_eq!(drag.handle, GizmoHandle::X);
@@ -481,7 +483,7 @@ fn raw_touch_grabs_a_gizmo_without_pointer_events() {
     {
         let mut editor = app.world_mut().resource_mut::<Editor>();
         editor.pieces.push(test_piece(1));
-        editor.selected = Some(1);
+        editor.selection.set(1);
     }
     let eye = Vec3::new(6.0, 7.0, 6.0);
     let cam_transform = Transform::from_translation(eye).looking_at(Vec3::ZERO, Vec3::Y);
@@ -521,7 +523,7 @@ fn raw_touch_grabs_a_gizmo_without_pointer_events() {
     send_touch(&mut app, window, TouchPhase::Started, press_pos);
 
     let editor = app.world().resource::<Editor>();
-    let drag = editor.gizmo_drag.expect("raw touch grabs the handle");
+    let drag = editor.gizmo_drag.clone().expect("raw touch grabs the handle");
     assert_eq!(drag.handle, GizmoHandle::X);
     assert_eq!(drag.pointer, PointerId::Touch(1));
     let touch = app.world().resource::<TouchState>();
@@ -538,6 +540,7 @@ fn raw_touch_grabs_a_gizmo_without_pointer_events() {
         .world()
         .resource::<Editor>()
         .gizmo_drag
+        .clone()
         .expect("drag continues")
         .screen;
     assert!(

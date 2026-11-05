@@ -118,8 +118,14 @@ pub(super) fn update_status(
         })
         .unwrap_or_default();
 
-    let selection = if let Some(id) = editor.selected {
-        editor.node_label(GraphNode::Piece(id))
+    let selection = if let Some(id) = editor.selection.primary() {
+        let label = editor.node_label(GraphNode::Piece(id));
+        let extra = editor.selection.len().saturating_sub(1);
+        if extra > 0 {
+            format!("{label} +{extra}")
+        } else {
+            label
+        }
     } else {
         match outliner.selection {
             GraphNode::Group(_) => editor.node_label(outliner.selection),

@@ -75,15 +75,20 @@ pub(super) fn draw(
     }
 
     if object_editing_allowed(editor.mode) {
-        if let Some(id) = editor.selected {
-            if let Some(piece) = editor.pieces.iter().find(|p| p.id == id) {
-                if let Some(shape) = shapes().get(piece.shape) {
-                    selection_box(&mut gizmos, piece, shape);
-                    anchors(&mut gizmos, piece, shape);
-                    if orbit.mode != ViewMode::First {
-                        transform_gizmo(&mut gizmos, piece, shape);
-                    }
-                }
+        // Every selected piece gets a selection box. Only the primary carries
+        // the transform gizmo, so a multi-selection stays readable and a
+        // handle can never be ambiguous about which piece it moves.
+        for id in editor.selection.ids() {
+            let Some(piece) = editor.pieces.iter().find(|p| p.id == *id) else {
+                continue;
+            };
+            let Some(shape) = shapes().get(piece.shape) else {
+                continue;
+            };
+            selection_box(&mut gizmos, piece, shape);
+            anchors(&mut gizmos, piece, shape);
+            if orbit.mode != ViewMode::First && editor.selection.is_primary(*id) {
+                transform_gizmo(&mut gizmos, piece, shape);
             }
         }
     }
@@ -175,7 +180,7 @@ pub(super) fn draw(
         if mover.waypoints.len() < 2 && mover.track.is_none() {
             continue;
         }
-        let colour = if editor.selected == Some(piece.id) {
+        let colour = if editor.selection.is_primary(piece.id) {
             AMBER
         } else {
             MUTED
@@ -194,7 +199,7 @@ pub(super) fn draw(
         for (index, waypoint) in mover.waypoints.iter().enumerate() {
             let at = Vec3::new(waypoint.pos.x, y, waypoint.pos.y);
             let selected_waypoint =
-                editor.selected == Some(piece.id) && mover.selected == Some(index);
+                editor.selection.is_primary(piece.id) && mover.selected == Some(index);
             let waypoint_colour = if selected_waypoint { AMBER } else { colour };
             gizmos.circle(
                 Isometry3d::new(at, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
@@ -209,7 +214,7 @@ pub(super) fn draw(
                 mover_waypoint_gizmo(&mut gizmos, at);
             }
             // Tangent handles for the selected piece's path, like the plan.
-            if editor.selected == Some(piece.id) {
+            if editor.selection.is_primary(piece.id) {
                 for control in [waypoint.incoming, waypoint.outgoing].into_iter().flatten() {
                     let handle = Vec3::new(control.x, y, control.y);
                     gizmos.line(at, handle, waypoint_colour);

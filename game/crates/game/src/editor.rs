@@ -34,6 +34,8 @@ use crate::path_edit::{self, PathDrag, PathHandle, Plan, TangentSide};
 use crate::session;
 use crate::statuses::Health;
 
+use selection::Selection;
+
 const PANEL_BG: Color = Color::srgb_u8(0x10, 0x16, 0x1e);
 const BUTTON_BG: Color = Color::srgb_u8(0x14, 0x1c, 0x26);
 const BUTTON_ON: Color = Color::srgb_u8(0x33, 0x27, 0x12);
@@ -242,9 +244,11 @@ struct Editor {
     plan: Option<Plan>,
     route: Option<Route>,
     walk: Option<Walk>,
-    selected: Option<u32>,
-    /// The last copied piece, ready to paste as a new object.
-    clipboard: Option<Piece>,
+    /// Everything selected. The primary (first) piece drives the single-object
+    /// tools; the whole set moves, rotates, copies and deletes together.
+    selection: Selection,
+    /// The last copied pieces in their original layout, ready to paste.
+    clipboard: Vec<Piece>,
     next_id: u32,
     snap: bool,
     ghost_rot: f32,
@@ -324,8 +328,8 @@ impl Default for Editor {
             plan: None,
             route: None,
             walk: None,
-            selected: None,
-            clipboard: None,
+            selection: Selection::default(),
+            clipboard: Vec::new(),
             next_id: 1,
             snap: true,
             ghost_rot: 0.0,
@@ -450,7 +454,7 @@ struct Ghost {
     kind: SnapKind,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Drag {
     id: u32,
     offset: Vec2,
@@ -459,6 +463,10 @@ struct Drag {
     /// ground-plane projection when the piece is elevated.
     plane: f32,
     moved: bool,
+    /// The rest of the selection, as `(id, offset)` where the offset is the
+    /// piece's position relative to the grabbed piece at grab time. The whole
+    /// group keeps its layout while the grabbed piece follows the pointer.
+    group: Vec<(u32, Vec2)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -480,15 +488,18 @@ enum GizmoHandle {
     Xz,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct GizmoDrag {
     id: u32,
     handle: GizmoHandle,
     /// World point grabbed when the drag started, so the piece moves by the
     /// pointer's travel rather than jumping to the pointer.
     grab: Vec3,
-    /// The selected piece at the moment of the grab.
+    /// The grabbed piece at the moment of the grab.
     start: Piece,
+    /// The rest of the selection at the moment of the grab. They take the same
+    /// delta as the grabbed piece, so one handle moves or rotates them all.
+    others: Vec<Piece>,
     /// Raw elevation at the previous frame, so a snap can tell which way the
     /// piece is travelling.
     last_raw: f32,
@@ -517,15 +528,17 @@ enum TransformAxis {
     Z,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct KeyboardTransform {
     id: u32,
     mode: TransformMode,
     /// `None` is the free plane for moves and yaw for rotations.
     axis: Option<TransformAxis>,
-    /// The piece before the modal began, restored by Escape or right click.
-    original: Piece,
-    /// The piece at the last axis change; the pointer moves relative to this.
+    /// Every selected piece before the modal began, primary first. Escape or a
+    /// right click restores all of them.
+    originals: Vec<Piece>,
+    /// The primary piece at the last axis change; the pointer moves relative
+    /// to this.
     base: Piece,
     /// Pointer-derived point where the current axis constraint was grabbed.
     grab: Vec3,
@@ -809,7 +822,7 @@ impl Editor {
         }
         movers::apply_saved(movers, &self.pieces, &loaded.platforms);
 
-        self.selected = None;
+        self.selection.clear();
         self.ghost = None;
         self.drag = None;
         self.gizmo_drag = None;
@@ -838,7 +851,7 @@ impl Editor {
         self.outline = SceneOutline::default();
         self.outline.bump();
         self.character = Some(character);
-        self.selected = None;
+        self.selection.clear();
         self.ghost = None;
         self.drag = None;
         self.gizmo_drag = None;
@@ -886,7 +899,7 @@ impl Editor {
             self.grass_rev = self.grass_rev.wrapping_add(1);
             // Keep the UI's rebuild counter monotonic across history moves.
             self.outline.revision = revision.wrapping_add(1);
-            self.selected = None;
+            self.selection.clear();
             self.hard_dirty = true;
         }
     }
@@ -903,7 +916,7 @@ impl Editor {
             self.grass = next.grass;
             self.grass_rev = self.grass_rev.wrapping_add(1);
             self.outline.revision = revision.wrapping_add(1);
-            self.selected = None;
+            self.selection.clear();
             self.hard_dirty = true;
         }
     }
@@ -1075,6 +1088,7 @@ mod picking;
 mod properties;
 mod route;
 mod save;
+mod selection;
 mod setup;
 mod shooting;
 mod touch;

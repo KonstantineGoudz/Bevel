@@ -4,7 +4,7 @@ use super::*;
 fn gizmo_grab_allowed_needs_build_select_and_no_tool() {
     let mut editor = Editor::default();
     editor.pieces.push(test_piece(1));
-    editor.selected = Some(1);
+    editor.selection.set(1);
     assert!(gizmo_grab_allowed(&editor, false));
     editor.actor_tool = Some(ActorTool::Place);
     assert!(!gizmo_grab_allowed(&editor, false));
@@ -13,9 +13,9 @@ fn gizmo_grab_allowed_needs_build_select_and_no_tool() {
         !gizmo_grab_allowed(&editor, true),
         "an in-flight handle drag owns the pointer"
     );
-    editor.selected = None;
+    editor.selection.clear();
     assert!(!gizmo_grab_allowed(&editor, false));
-    editor.selected = Some(1);
+    editor.selection.set(1);
     editor.mode = Mode::Play;
     assert!(!gizmo_grab_allowed(&editor, false));
 }
@@ -34,6 +34,7 @@ fn release_gizmo_drag_clears_and_suppresses_the_tap() {
         handle: GizmoHandle::Y,
         grab: Vec3::ZERO,
         start,
+        others: Vec::new(),
         last_raw: 0.0,
         last: 0.0,
         pointer: PointerId::Touch(3),
@@ -346,6 +347,7 @@ fn grabbing_the_vertical_handle_without_dragging_keeps_the_height() {
         handle: GizmoHandle::Y,
         grab: origin,
         start,
+        others: Vec::new(),
         last_raw: start.elevation,
         last: start.elevation,
         pointer: PointerId::Mouse,
@@ -361,7 +363,7 @@ fn grabbing_the_vertical_handle_without_dragging_keeps_the_height() {
     );
 
     // Dragging down onto the ground does snap.
-    let drag = editor.gizmo_drag.expect("drag");
+    let drag = editor.gizmo_drag.clone().expect("drag");
     apply_gizmo_drag(&mut editor, drag, Some(grab(origin - Vec3::Y * 0.1)));
     assert!(editor.pieces[0].elevation.abs() < 1e-5);
 }
@@ -751,14 +753,14 @@ fn the_build_orbit_target_is_the_selected_piece_centre() {
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         interact: crate::model::InteractAction::None,
     });
-    editor.selected = Some(7);
+    editor.selection.set(7);
     let target = selection_center(&editor).expect("selected centre");
     let shape = &shapes()[block];
     assert!((target.x - 2.0).abs() < 1e-5);
     assert!((target.z - 3.0).abs() < 1e-5);
     assert!((target.y - (1.0 + (shape.base + shape.top()) * 0.5)).abs() < 1e-5);
 
-    editor.selected = None;
+    editor.selection.clear();
     assert_eq!(selection_center(&editor), None);
 }
 
@@ -790,4 +792,52 @@ fn actor_arrow_runs_outward_from_the_ring_on_the_ground() {
     assert!(((head[0] - head[2]).length() - 2.0 * ACTOR_ARROW_HEAD_SIDE).abs() < 1e-5);
     let across = (head[0] - back).normalize_or_zero();
     assert!(across.dot(dir).abs() < 1e-5, "head spans across the shaft");
+}
+
+#[test]
+fn a_gizmo_drag_carries_the_rest_of_the_selection() {
+    let block = model::shape_index("block").unwrap();
+    let mut editor = Editor::default();
+    editor.pieces.push(test_piece(1));
+    editor.pieces.push(Piece {
+        pos: Vec2::new(1.0, 0.0),
+        ..test_piece(2)
+    });
+    editor.selection.set_all([1, 2]);
+
+    let piece = editor.pieces[0];
+    let origin = gizmo_origin(&piece, &shapes()[block]);
+    let aim = |target: Vec3| {
+        let eye = target + Vec3::new(3.0, 4.0, 0.0);
+        Ray3d::new(eye, Dir3::new(target - eye).unwrap())
+    };
+    let grab = gizmo_drag_point(aim(origin), GizmoHandle::X, origin).unwrap();
+    let drag = GizmoDrag {
+        id: 1,
+        handle: GizmoHandle::X,
+        grab,
+        start: piece,
+        others: dragged_group(&editor, 1),
+        last_raw: piece.elevation,
+        last: piece.elevation,
+        pointer: PointerId::Mouse,
+        screen: Vec2::ZERO,
+    };
+
+    let target = origin + Vec3::X * 0.75;
+    apply_gizmo_drag(&mut editor, drag, Some(aim(target)));
+
+    let primary = editor.pieces[0];
+    let other = editor.pieces[1];
+    assert!(
+        (primary.pos.x - 0.75).abs() < 1e-3,
+        "the grabbed piece followed the handle: x = {}",
+        primary.pos.x
+    );
+    assert!(
+        (other.pos.x - 1.75).abs() < 1e-3,
+        "the other selected piece took the same delta: x = {}",
+        other.pos.x
+    );
+    assert!(other.elevation.abs() < 1e-6, "a ground drag does not lift");
 }

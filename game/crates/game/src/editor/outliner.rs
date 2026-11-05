@@ -471,7 +471,7 @@ pub(super) fn sync_outliner_selection(editor: Res<Editor>, mut state: ResMut<Out
 
     // The viewport owns piece selection. A group or the character can stay
     // highlighted only while no piece is selected.
-    if let Some(id) = editor.selected {
+    if let Some(id) = editor.selection.primary() {
         selection = GraphNode::Piece(id);
     } else if matches!(selection, GraphNode::Piece(_)) {
         selection = GraphNode::Root;
@@ -971,7 +971,7 @@ pub(super) fn on_outliner_press(
                 return;
             }
             state.selection = GraphNode::Root;
-            editor.selected = None;
+            editor.selection.clear();
             if focus.get().is_some() {
                 focus.clear();
             }
@@ -983,7 +983,7 @@ pub(super) fn on_outliner_press(
             // Same pin as Empty: while a motion path is being edited only
             // its own piece stays selected; other rows cannot steal it.
             if editor.actor_tool == Some(ActorTool::Platform)
-                && !matches!(node, GraphNode::Piece(id) if editor.selected == Some(id))
+                && !matches!(node, GraphNode::Piece(id) if editor.selection.is_primary(id))
             {
                 return;
             }
@@ -995,17 +995,17 @@ pub(super) fn on_outliner_press(
             editor.ghost = None;
             match node {
                 GraphNode::Piece(id) => {
-                    editor.selected = Some(id);
+                    editor.selection.set(id);
                 }
                 GraphNode::Group(_) => {
-                    editor.selected = None;
+                    editor.selection.clear();
                 }
                 GraphNode::Character => {
-                    editor.selected = None;
+                    editor.selection.clear();
                     focus_character(&mut orbit, editor.character);
                 }
                 GraphNode::Root => {
-                    editor.selected = None;
+                    editor.selection.clear();
                 }
             }
             if node.is_object() {
@@ -1070,10 +1070,10 @@ pub(super) fn on_outliner_release(
             GraphNode::Group(_) => target,
             _ => drag,
         };
-        editor.selected = match state.selection {
-            GraphNode::Piece(id) => Some(id),
-            _ => None,
-        };
+        match state.selection {
+            GraphNode::Piece(id) => editor.selection.set(id),
+            _ => editor.selection.clear(),
+        }
     }
 }
 
@@ -1101,12 +1101,12 @@ pub(super) fn on_outliner_action(
         OutlinerAction::NewGroup => {
             let id = editor.new_group();
             state.selection = GraphNode::Group(id);
-            editor.selected = None;
+            editor.selection.clear();
         }
         OutlinerAction::Group => {
             if let Some(id) = editor.group_node(state.selection) {
                 state.selection = GraphNode::Group(id);
-                editor.selected = None;
+                editor.selection.clear();
             } else {
                 editor.note = "select a piece or group first";
             }
@@ -1114,7 +1114,7 @@ pub(super) fn on_outliner_action(
         OutlinerAction::Ungroup => {
             if let Some(next) = editor.ungroup_node(state.selection) {
                 state.selection = next;
-                editor.selected = None;
+                editor.selection.clear();
             } else {
                 editor.note = "select a group to ungroup";
             }
@@ -1142,14 +1142,14 @@ pub(super) fn outliner_shortcuts(
     if input.just_pressed(Action::UngroupNodes) {
         if let Some(next) = editor.ungroup_node(state.selection) {
             state.selection = next;
-            editor.selected = None;
+            editor.selection.clear();
         }
         return;
     }
     if input.just_pressed(Action::NewGroup) {
         if let Some(id) = editor.group_node(state.selection) {
             state.selection = GraphNode::Group(id);
-            editor.selected = None;
+            editor.selection.clear();
         }
         return;
     }

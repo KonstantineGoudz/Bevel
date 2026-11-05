@@ -8,6 +8,7 @@ mod panel;
 mod physics;
 mod route;
 mod save;
+mod selection;
 mod shooting;
 mod boot;
 mod state;

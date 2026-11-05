@@ -839,7 +839,7 @@ mod tests {
         let group = editor.group_node(GraphNode::Piece(1)).unwrap();
         editor.commit();
         editor.rename_node(GraphNode::Piece(1), "North wall");
-        editor.selected = Some(1);
+        editor.selection.set(1);
 
         delete_piece(&mut editor);
         assert!(editor.pieces.is_empty());
@@ -870,7 +870,7 @@ mod tests {
         editor.redo();
         assert!(editor.outline.is_locked(1));
 
-        editor.selected = Some(1);
+        editor.selection.set(1);
         delete_piece(&mut editor);
         assert!(editor.outline.prune(&editor.pieces));
         assert!(!editor.outline.is_locked(1));

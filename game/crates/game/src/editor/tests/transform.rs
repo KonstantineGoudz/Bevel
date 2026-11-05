@@ -64,11 +64,12 @@ fn selecting_a_piece_without_moving_keeps_its_position() {
         offset: Vec2::ZERO,
         plane: 0.0,
         moved: false,
+        group: Vec::new(),
     };
-    editor.drag = Some(drag);
+    editor.drag = Some(drag.clone());
 
     // No pointer travel: base + offset is the piece's current position.
-    apply_body_drag(&mut editor, drag, start_pos);
+    apply_body_drag(&mut editor, drag.clone(), start_pos);
     let kept = editor.pieces.iter().find(|p| p.id == 2).unwrap();
     assert!(
         (kept.pos - start_pos).length_squared() < 1e-10,
@@ -76,19 +77,19 @@ fn selecting_a_piece_without_moving_keeps_its_position() {
         kept.pos
     );
     assert!(
-        !editor.drag.expect("drag").moved,
+        !editor.drag.clone().expect("drag").moved,
         "a pure selection must not count as a move"
     );
 
     // Actually dragging does move (and snap) the piece.
-    apply_body_drag(&mut editor, drag, start_pos + Vec2::new(0.05, 0.0));
+    apply_body_drag(&mut editor, drag.clone(), start_pos + Vec2::new(0.05, 0.0));
     let moved_piece = editor.pieces.iter().find(|p| p.id == 2).unwrap();
     assert!(
         (moved_piece.pos - start_pos).length_squared() > 1e-10,
         "a real drag should move the piece"
     );
     assert!(
-        editor.drag.expect("drag").moved,
+        editor.drag.clone().expect("drag").moved,
         "a real drag should flag the move"
     );
 }
@@ -97,7 +98,7 @@ fn selecting_a_piece_without_moving_keeps_its_position() {
 fn g_then_x_locks_to_world_x_and_enter_confirms() {
     let mut editor = Editor::default();
     editor.pieces.push(test_piece(1));
-    editor.selected = Some(1);
+    editor.selection.set(1);
     let mouse = ButtonInput::default();
     let mut cursor = cursor_looking_at(Vec3::new(1.0, 5.0, 0.0), Vec3::new(1.0, 0.0, 0.0));
 
@@ -124,7 +125,7 @@ fn g_then_x_locks_to_world_x_and_enter_confirms() {
     ));
     assert_eq!(editor.note, "move X");
     assert_eq!(
-        editor.keyboard_transform.unwrap().axis,
+        editor.keyboard_transform.clone().unwrap().axis,
         Some(TransformAxis::X)
     );
 
@@ -161,7 +162,7 @@ fn g_then_x_locks_to_world_x_and_enter_confirms() {
 fn escape_restores_the_piece_and_removes_the_undo_step() {
     let mut editor = Editor::default();
     editor.pieces.push(test_piece(1));
-    editor.selected = Some(1);
+    editor.selection.set(1);
     let mouse = ButtonInput::default();
     let start = cursor_looking_at(Vec3::new(1.0, 5.0, 0.0), Vec3::new(1.0, 0.0, 0.0));
 
@@ -204,7 +205,7 @@ fn escape_restores_the_piece_and_removes_the_undo_step() {
 fn r_opens_rotate_and_axis_keys_toggle_locks() {
     let mut editor = Editor::default();
     editor.pieces.push(test_piece(1));
-    editor.selected = Some(1);
+    editor.selection.set(1);
     let mouse = ButtonInput::default();
     let cursor = cursor_looking_at(Vec3::new(1.0, 5.0, 1.0), Vec3::ZERO);
 
@@ -230,7 +231,7 @@ fn r_opens_rotate_and_axis_keys_toggle_locks() {
     ));
     assert_eq!(editor.note, "rotate X");
     assert_eq!(
-        editor.keyboard_transform.unwrap().axis,
+        editor.keyboard_transform.clone().unwrap().axis,
         Some(TransformAxis::X)
     );
 
@@ -257,7 +258,7 @@ fn r_opens_rotate_and_axis_keys_toggle_locks() {
         false
     ));
     assert_eq!(editor.note, "rotate Y");
-    assert_eq!(editor.keyboard_transform.unwrap().axis, None);
+    assert_eq!(editor.keyboard_transform.clone().unwrap().axis, None);
 }
 
 #[test]
@@ -299,4 +300,127 @@ fn keyboard_moves_and_rotations_respect_the_locked_axis() {
     assert!(model::piece_quat(&rotated).dot(expected).abs() > 0.99999);
     assert_eq!(rotated.pos, base.pos);
     assert_eq!(rotated.elevation, base.elevation);
+}
+
+#[test]
+fn a_keyboard_move_carries_the_whole_selection() {
+    let mut editor = Editor::default();
+    editor.pieces.push(test_piece(1));
+    editor.pieces.push(Piece {
+        pos: Vec2::new(2.0, 0.0),
+        ..test_piece(2)
+    });
+    editor.selection.set_all([1, 2]);
+    let mouse = ButtonInput::default();
+
+    let start = cursor_looking_at(Vec3::new(1.0, 5.0, 0.0), Vec3::new(1.0, 0.0, 0.0));
+    assert!(keyboard_transform(
+        &mut editor,
+        &Controls::with_defaults(),
+        &keys_with(KeyCode::KeyG),
+        &mouse,
+        &start,
+        true,
+        false
+    ));
+
+    let moved = cursor_looking_at(Vec3::new(2.5, 5.0, 0.0), Vec3::new(2.5, 0.0, 0.0));
+    assert!(keyboard_transform(
+        &mut editor,
+        &Controls::with_defaults(),
+        &ButtonInput::default(),
+        &mouse,
+        &moved,
+        true,
+        false
+    ));
+
+    let primary = editor.pieces[0];
+    let other = editor.pieces[1];
+    assert!((primary.pos.x - 1.5).abs() < 1e-4, "x = {}", primary.pos.x);
+    assert!(
+        (other.pos.x - 3.5).abs() < 1e-4,
+        "the group keeps its offset: x = {}",
+        other.pos.x
+    );
+    assert!((other.pos.y - primary.pos.y).abs() < 1e-5);
+}
+
+#[test]
+fn a_keyboard_rotate_turns_the_whole_selection() {
+    let mut editor = Editor::default();
+    editor.pieces.push(test_piece(1));
+    editor.pieces.push(Piece {
+        pos: Vec2::new(2.0, 0.0),
+        ..test_piece(2)
+    });
+    editor.selection.set_all([1, 2]);
+    let mouse = ButtonInput::default();
+
+    let start = cursor_looking_at(Vec3::new(1.0, 5.0, 0.0), Vec3::new(1.0, 0.0, 0.0));
+    assert!(keyboard_transform(
+        &mut editor,
+        &Controls::with_defaults(),
+        &keys_with(KeyCode::KeyR),
+        &mouse,
+        &start,
+        true,
+        false
+    ));
+
+    let turned = cursor_looking_at(Vec3::new(0.0, 5.0, 1.0), Vec3::new(0.0, 0.0, 1.0));
+    assert!(keyboard_transform(
+        &mut editor,
+        &Controls::with_defaults(),
+        &ButtonInput::default(),
+        &mouse,
+        &turned,
+        true,
+        false
+    ));
+
+    let primary = editor.pieces[0];
+    let other = editor.pieces[1];
+    assert!(primary.rot.abs() > 1e-3, "the primary turned");
+    assert!(
+        (primary.rot - other.rot).abs() < 1e-4,
+        "both turned by the same angle: {} vs {}",
+        primary.rot,
+        other.rot
+    );
+    assert!(
+        (other.pos - Vec2::new(2.0, 0.0)).length() < 1e-5,
+        "a rotation about each piece's own origin leaves positions alone"
+    );
+}
+
+#[test]
+fn a_body_drag_carries_the_whole_group() {
+    let mut editor = Editor::default();
+    editor.snap = false;
+    editor.pieces.push(test_piece(1));
+    editor.pieces.push(Piece {
+        pos: Vec2::new(2.0, 0.0),
+        ..test_piece(2)
+    });
+    editor.selection.set_all([1, 2]);
+    let drag = Drag {
+        id: 1,
+        offset: Vec2::ZERO,
+        plane: 0.0,
+        moved: false,
+        group: vec![(2, Vec2::new(2.0, 0.0))],
+    };
+    editor.drag = Some(drag.clone());
+
+    apply_body_drag(&mut editor, drag, Vec2::new(0.5, 0.0));
+
+    let primary = editor.pieces[0];
+    let other = editor.pieces[1];
+    assert!((primary.pos - Vec2::new(0.5, 0.0)).length() < 1e-4);
+    assert!(
+        (other.pos - Vec2::new(2.5, 0.0)).length() < 1e-4,
+        "the group member followed: {:?}",
+        other.pos
+    );
 }

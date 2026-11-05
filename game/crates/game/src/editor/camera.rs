@@ -124,12 +124,12 @@ pub(super) fn camera_control(
     // The modal transform, a focused property field, or a pointer over the
     // property panel owns the mouse. Drain the deltas so the camera does not
     // jump when editing ends.
-    let over_properties = editor.selected.is_some()
+    let over_properties = !editor.selection.is_empty()
         && window.cursor_position().is_some_and(|p| {
             over_properties_panel(
                 p,
                 window.size(),
-                editor.selected.is_some(),
+                !editor.selection.is_empty(),
                 panel_state.collapsed,
                 &touch,
             )
@@ -156,6 +156,7 @@ pub(super) fn camera_control(
     // the orbit must not swing while a finger reshapes the selection.
     let gizmo_held = editor
         .gizmo_drag
+        .as_ref()
         .is_some_and(|drag| drag.pointer != PointerId::Mouse);
     let touching = touch.enabled
         && (touch.stick_pointer.is_some()
@@ -335,21 +336,29 @@ pub(super) fn camera_control(
     camera.look_at(orbit.target, Vec3::Y);
 }
 
-/// The centre of the selected piece, for orbiting in Build.
+/// The centre of the selection, for orbiting in Build. With several pieces
+/// selected this is their centroid, so the camera frames the whole group.
 pub(super) fn selection_center(editor: &Editor) -> Option<Vec3> {
-    let piece = editor
-        .pieces
-        .iter()
-        .find(|piece| Some(piece.id) == editor.selected)?;
-    let shape = shapes().get(piece.shape)?;
-    let (low, high) = outline_bounds(&model::shape_points(shape));
-    let local = Vec3::new(
-        (low.x + high.x) * 0.5,
-        (shape.base + shape.top()) * 0.5,
-        (low.y + high.y) * 0.5,
-    );
-    let root = Vec3::new(piece.pos.x, piece.elevation, piece.pos.y);
-    Some(root + model::piece_quat(piece) * local)
+    let mut sum = Vec3::ZERO;
+    let mut count = 0.0;
+    for id in editor.selection.ids() {
+        let Some(piece) = editor.pieces.iter().find(|piece| piece.id == *id) else {
+            continue;
+        };
+        let Some(shape) = shapes().get(piece.shape) else {
+            continue;
+        };
+        let (low, high) = outline_bounds(&model::shape_points(shape));
+        let local = Vec3::new(
+            (low.x + high.x) * 0.5,
+            (shape.base + shape.top()) * 0.5,
+            (low.y + high.y) * 0.5,
+        );
+        let root = Vec3::new(piece.pos.x, piece.elevation, piece.pos.y);
+        sum += root + model::piece_quat(piece) * local;
+        count += 1.0;
+    }
+    (count > 0.0).then(|| sum / count)
 }
 
 /// Put the orbit centre back on the selection, or on the character's feet when

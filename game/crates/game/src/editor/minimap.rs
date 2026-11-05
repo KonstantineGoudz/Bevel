@@ -528,7 +528,7 @@ fn finish_minimap_press(
     add_waypoint(
         editor, target, cell, height, append, true, nav, rapier, filter,
     );
-    editor.selected = None;
+    editor.selection.clear();
     editor.drag = None;
 }
 

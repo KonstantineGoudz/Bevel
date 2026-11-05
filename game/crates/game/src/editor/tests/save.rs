@@ -189,11 +189,11 @@ fn copying_keeps_the_selected_piece() {
     };
     let mut editor = Editor::default();
     editor.pieces.push(piece);
-    editor.selected = Some(7);
+    editor.selection.set(7);
 
     copy_piece(&mut editor);
 
-    assert_eq!(editor.clipboard, Some(piece));
+    assert_eq!(editor.clipboard, vec![piece]);
 }
 
 #[test]
@@ -220,7 +220,7 @@ fn pasting_makes_a_new_selected_copy_at_the_cursor() {
     editor.snap = false;
     editor.next_id = 4;
     editor.pieces.push(source);
-    editor.selected = Some(3);
+    editor.selection.set(3);
     copy_piece(&mut editor);
 
     paste_piece(&mut editor, Some(Vec2::new(5.0, 6.0)));
@@ -228,7 +228,7 @@ fn pasting_makes_a_new_selected_copy_at_the_cursor() {
     assert_eq!(editor.pieces.len(), 2);
     let pasted = *editor.pieces.last().unwrap();
     assert_eq!(pasted.id, 4);
-    assert_eq!(editor.selected, Some(4));
+    assert_eq!(editor.selection.primary(), Some(4));
     assert_eq!(pasted.shape, block);
     assert!((pasted.pos - Vec2::new(5.0, 6.0)).length() < 1e-5);
     assert!((pasted.rot - 0.4).abs() < 1e-5);
@@ -258,7 +258,7 @@ fn pasting_without_a_cursor_lands_beside_the_source() {
         trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
         interact: crate::model::InteractAction::None,
     });
-    editor.selected = Some(1);
+    editor.selection.set(1);
     copy_piece(&mut editor);
 
     paste_piece(&mut editor, None);
@@ -276,10 +276,10 @@ fn pasting_without_a_cursor_lands_beside_the_source() {
 fn copying_and_pasting_nothing_are_harmless() {
     let mut editor = Editor::default();
     copy_piece(&mut editor);
-    assert!(editor.clipboard.is_none());
+    assert!(editor.clipboard.is_empty());
     paste_piece(&mut editor, Some(Vec2::ZERO));
     assert!(editor.pieces.is_empty());
-    assert_eq!(editor.selected, None);
+    assert_eq!(editor.selection.primary(), None);
 }
 
 #[test]

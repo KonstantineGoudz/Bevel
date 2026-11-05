@@ -1,0 +1,183 @@
+    Checking party-dungeon v0.1.0 (C:\home\Bevel\game\crates\game)
+warning: use of deprecated type alias `bevy::bevy_ui::Interaction`: Use picking::hover::Hovered and ui::Pressed.
+    --> crates\game\src\editor\properties.rs:1497:52
+     |
+1497 |     slider_query: Query<(&RelativeCursorPosition, &Interaction), With<TransparencySlider>>,
+     |                                                    ^^^^^^^^^^^
+     |
+     = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated type alias `bevy::bevy_ui::Interaction`: Use picking::hover::Hovered and ui::Pressed.
+    --> crates\game\src\editor\properties.rs:1511:28
+     |
+1511 |         if *interaction == Interaction::Pressed {
+     |                            ^^^^^^^^^^^
+
+warning: unused import: `bevy::camera::NormalizedRenderTarget`
+   --> crates\game\src\editor\tests\touch.rs:471:9
+    |
+471 |     use bevy::camera::NormalizedRenderTarget;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `show`
+   --> crates\game\src\editor\add_menu.rs:638:9
+    |
+638 |     let show = touch.enabled && active.is_some();
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_show`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates\game\src\editor\touch.rs:242:5
+    |
+242 |     mut gesture: ResMut<PathGesture>,
+    |     ----^^^^^^^
+    |     |
+    |     help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `nx`
+    --> crates\game\src\model.rs:1171:17
+     |
+1171 |             let nx = local.x / rx;
+     |                 ^^ help: if this is intentional, prefix it with an underscore: `_nx`
+
+warning: unused variable: `nz`
+    --> crates\game\src\model.rs:1172:17
+     |
+1172 |             let nz = local.y / rz;
+     |                 ^^ help: if this is intentional, prefix it with an underscore: `_nz`
+
+warning: function `pick` is never used
+ --> crates\game\src\editor\picking.rs:7:15
+  |
+7 | pub(super) fn pick(pieces: &[Piece], ray: Ray3d) -> Option<u32> {
+  |               ^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `is_trigger` is never used
+   --> crates\game\src\model.rs:456:12
+    |
+451 | impl Shape {
+    | ---------- method in this implementation
+...
+456 |     pub fn is_trigger(self: &Shape) -> bool {
+    |            ^^^^^^^^^^
+
+warning: function `default_piece_trigger_size` is never used
+    --> crates\game\src\model.rs:1063:8
+     |
+1063 | pub fn default_piece_trigger_size() -> Vec3 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `trigger_contains` is never used
+    --> crates\game\src\model.rs:1076:8
+     |
+1076 | pub fn trigger_contains(piece: &Piece, shape: &Shape, pos: Vec2, feet: f32) -> bool {
+     |        ^^^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+   --> crates\game\src\viewer.rs:167:16
+    |
+167 | struct TreeRow(Entity);
+    |        ------- ^^^^^^
+    |        |
+    |        field in this struct
+    |
+    = help: consider removing this field
+
+warning: field `0` is never read
+   --> crates\game\src\viewer.rs:170:19
+    |
+170 | struct TreeToggle(Entity);
+    |        ---------- ^^^^^^
+    |        |
+    |        field in this struct
+    |
+    = help: consider removing this field
+
+warning: function `flatten_tree` is never used
+   --> crates\game\src\viewer.rs:856:4
+    |
+856 | fn flatten_tree(
+    |    ^^^^^^^^^^^^
+
+warning: `party-dungeon` (lib) generated 13 warnings (run `cargo fix --lib -p party-dungeon` to apply 4 suggestions)
+warning: use of deprecated associated function `bevy::bevy_math::Mat4::perspective_rh`: use the `glam::camera::rh::proj::directx::perspective` function instead
+   --> crates\game\src\editor\tests\route.rs:282:15
+    |
+282 |         Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, 800.0 / 600.0, 0.1, 100.0);
+    |               ^^^^^^^^^^^^^^
+
+warning: use of deprecated associated function `bevy::bevy_math::Mat4::perspective_rh`: use the `glam::camera::rh::proj::directx::perspective` function instead
+   --> crates\game\src\editor\tests\touch.rs:235:15
+    |
+235 |         Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, 800.0 / 600.0, 0.1, 100.0);
+    |               ^^^^^^^^^^^^^^
+
+warning: use of deprecated associated function `bevy::bevy_math::Mat4::perspective_rh`: use the `glam::camera::rh::proj::directx::perspective` function instead
+   --> crates\game\src\editor\tests\touch.rs:369:15
+    |
+369 |         Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, 800.0 / 600.0, 0.1, 100.0);
+    |               ^^^^^^^^^^^^^^
+
+warning: use of deprecated associated function `bevy::bevy_math::Mat4::perspective_rh`: use the `glam::camera::rh::proj::directx::perspective` function instead
+   --> crates\game\src\editor\tests\touch.rs:497:15
+    |
+497 |         Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, 800.0 / 600.0, 0.1, 100.0);
+    |               ^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> crates\game\src\editor\tests\panel.rs:165:9
+    |
+165 |     let mut panels: Vec<_> = world
+    |         ----^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates\game\src\editor\tests\panel.rs:171:9
+    |
+171 |     let mut bodies: Vec<_> = world
+    |         ----^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `editor`
+    --> crates\game\src\editor\tests\physics.rs:1572:9
+     |
+1572 |     let editor = app.world().resource::<Editor>();
+     |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_editor`
+
+warning: method `is_trigger` is never used
+   --> crates\game\src\model.rs:456:12
+    |
+451 | impl Shape {
+    | ---------- method in this implementation
+...
+456 |     pub fn is_trigger(self: &Shape) -> bool {
+    |            ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: calls to `std::mem::drop` with a reference instead of an owned value does nothing
+   --> crates\game\src\editor\tests\route.rs:380:5
+    |
+380 |     drop(world);
+    |     ^^^^^-----^
+    |          |
+    |          argument has type `&mut bevy::bevy_ecs::world::World`
+    |
+    = note: `#[warn(dropping_references)]` on by default
+help: use `let _ = ...` to ignore the expression or result
+    |
+380 -     drop(world);
+380 +     let _ = world;
+    |
+
+warning: `party-dungeon` (lib test) generated 20 warnings (10 duplicates) (run `cargo fix --lib -p party-dungeon --tests` to apply 4 suggestions)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 1.75s
