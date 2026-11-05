@@ -55,6 +55,25 @@ pub(super) fn draw(
         }
     }
 
+    if editor.actor_tool == Some(ActorTool::Grass) {
+        // Brush footprint preview: the dabbed hex plus its neighbours, amber
+        // while erasing.
+        if let Some(p) = cursor.last_world {
+            let colour = if editor.grass_erase {
+                AMBER
+            } else {
+                Color::srgb_u8(0x3f, 0xa0, 0x4d)
+            };
+            for hex in brush_cells(model::pixel_to_hex(p)) {
+                let points: Vec<Vec3> = model::hex_corners(model::hex_center(hex.0, hex.1))
+                    .iter()
+                    .map(|q| Vec3::new(q.x, GRID_Y + 0.003, q.y))
+                    .collect();
+                closed(&mut gizmos, &points, colour);
+            }
+        }
+    }
+
     if object_editing_allowed(editor.mode) {
         if let Some(id) = editor.selected {
             if let Some(piece) = editor.pieces.iter().find(|p| p.id == id) {

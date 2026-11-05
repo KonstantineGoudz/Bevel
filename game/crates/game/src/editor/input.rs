@@ -92,6 +92,53 @@ pub(super) fn on_palette_activate(
                 focus_character(&mut orbit, editor.character);
             }
         }
+        PaletteAction::Grass => {
+            editor.actor_tool = if editor.actor_tool == Some(ActorTool::Grass) {
+                None
+            } else {
+                Some(ActorTool::Grass)
+            };
+            editor.tool = None;
+            if editor.actor_tool == Some(ActorTool::Grass) {
+                editor.note = if editor.grass_erase {
+                    "grass brush: drag to erase, Erase toggles back to paint"
+                } else {
+                    "grass brush: drag to paint, Shift is not needed"
+                };
+            }
+        }
+        // Brush option toggles: flip the flag without disturbing the
+        // selection or the armed tool.
+        PaletteAction::GrassErase => {
+            editor.grass_erase = !editor.grass_erase;
+            editor.note = if editor.grass_erase {
+                "grass eraser on"
+            } else {
+                "grass brush on"
+            };
+            return;
+        }
+        PaletteAction::GrassSlow => {
+            editor.grass_slows = !editor.grass_slows;
+            editor.note = if editor.grass_slows {
+                "grass slows movement and routes"
+            } else {
+                "grass is decoration only"
+            };
+            // Route costs changed: rebuild the live route at once.
+            if editor.plan.is_some() {
+                let filter = player
+                    .iter()
+                    .next()
+                    .map(|entity| QueryFilter::default().exclude_rigid_body(entity))
+                    .unwrap_or_default();
+                if let Ok(rapier_ctx) = rapier.single() {
+                    let live = editor.walk.is_some();
+                    rebuild_route(&mut editor, &nav, &rapier_ctx, filter, live);
+                }
+            }
+            return;
+        }
         PaletteAction::Walk => {
             if editor.actor_tool == Some(ActorTool::Plan)
                 && let Ok(rapier_ctx) = rapier.single()
@@ -243,7 +290,6 @@ pub(super) fn touch_is_authoring(action: TouchAction) -> bool {
             | TouchAction::CopyJson
     )
 }
-
 /// Ctrl on Windows/Linux, Command on macOS.
 pub(super) fn command_down(keys: &ButtonInput<KeyCode>) -> bool {
     keys.pressed(KeyCode::ControlLeft)
@@ -275,7 +321,7 @@ pub(super) fn interact(
     menu: Res<AddMenu>,
     outliner: Res<OutlinerState>,
     panel_state: Res<PropertiesPanelState>,
-    camera: Single<(&Camera, &Transform)>,
+    camera: Single<(&Camera, &Transform), Without<MinimapCamera>>,
     rapier: ReadRapierContext,
     player: Query<Entity, With<CharacterVisual>>,
     input: PlayerInput,
@@ -484,6 +530,12 @@ pub(super) fn interact(
         return;
     }
 
+    // The Play minimap owns its corner: clicks there pan or route through the
+    // minimap observers, never through the main canvas.
+    if editor.mode == Mode::Play && minimap_hit(screen, cursor.screen_size, minimap_scale(&touch)) {
+        return;
+    }
+
     if let Some(tool) = editor.tool {
         let shape = &shapes()[tool];
         let default_trigger = crate::model::Trigger::damaging(shape.damage);
@@ -625,6 +677,44 @@ pub(super) fn interact(
             );
             editor.selected = None;
             editor.drag = None;
+        }
+        return;
+    }
+
+    if editor.actor_tool == Some(ActorTool::Grass) {
+        // Click or hold-drag paints one stroke; the stroke commits once on
+        // press and pops the undo entry on release when nothing changed.
+        let held = input.pressed(Action::PrimaryClick);
+        if clicked || held {
+            if !editor.grass_stroke {
+                editor.commit();
+                editor.grass_stroke = true;
+                editor.grass_stroke_dirty = false;
+                editor.grass_dab = None;
+            }
+            let hex = model::pixel_to_hex(world);
+            if editor.grass_dab != Some(hex) {
+                editor.grass_dab = Some(hex);
+                let erase = editor.grass_erase;
+                if apply_dab(&mut editor.grass, hex, erase) {
+                    editor.grass_stroke_dirty = true;
+                    editor.grass_rev = editor.grass_rev.wrapping_add(1);
+                    editor.hard_dirty = true;
+                    editor.note = if editor.grass_erase {
+                        "erased grass"
+                    } else {
+                        "painted grass"
+                    };
+                }
+            }
+            // A tap is a one-dab stroke: finish at once so separate taps
+            // undo separately. A held button keeps stroking through the drag.
+            if !held {
+                finish_grass_stroke(&mut editor, &nav, &rapier_ctx, surface_filter);
+            }
+        }
+        if input.just_released(Action::PrimaryClick) && editor.grass_stroke {
+            finish_grass_stroke(&mut editor, &nav, &rapier_ctx, surface_filter);
         }
         return;
     }

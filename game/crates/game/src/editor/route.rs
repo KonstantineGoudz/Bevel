@@ -718,8 +718,18 @@ pub(super) fn rebuild_route(
     );
     let height = character.feet;
     let start_cell = resolve_cell(&editor.pieces, start, height);
-    let Some(route_plan) = path::plan_route(start, start_cell, &waypoints, &nav.edges, &nav.hexes)
-    else {
+    // Grass bends routes only when the level opts in; otherwise every hex
+    // costs 1 exactly like the unweighted search.
+    let slows = editor.grass_slows;
+    let grass = &editor.grass;
+    let Some(route_plan) = path::plan_route_cost(
+        start,
+        start_cell,
+        &waypoints,
+        &nav.edges,
+        &nav.hexes,
+        |hex| grass_step_cost(slows, grass, hex),
+    ) else {
         editor.note = "no route to that point";
         return false;
     };

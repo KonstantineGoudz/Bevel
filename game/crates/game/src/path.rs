@@ -268,11 +268,25 @@ fn heuristic(a: Hex, b: Hex) -> u32 {
 
 /// Shortest route from `start` to `goal`, inclusive. `None` means the goal is
 /// walled off (or the two are on the same spot).
+#[allow(dead_code)] // unweighted shorthand over find_path_cost; live code routes through the weighted variants
 pub fn find_path(
     start: Hex,
     goal: Hex,
     edges: &HashSet<Edge>,
     hexes: &HashSet<Hex>,
+) -> Option<Vec<Hex>> {
+    find_path_cost(start, goal, edges, hexes, |_| 1)
+}
+
+/// Shortest route with a per-hex entry toll (1 for open ground, more for
+/// slow terrain like grass). The toll must stay >= 1 so the hex-distance
+/// heuristic stays admissible and the route stays optimal.
+pub fn find_path_cost(
+    start: Hex,
+    goal: Hex,
+    edges: &HashSet<Edge>,
+    hexes: &HashSet<Hex>,
+    step_cost: impl Fn(Hex) -> u32,
 ) -> Option<Vec<Hex>> {
     if start == goal {
         return Some(vec![start]);
@@ -317,7 +331,7 @@ pub fn find_path(
             if hexes.contains(&next) || edges.contains(&(at, next)) {
                 continue;
             }
-            let step = here + 1;
+            let step = here + step_cost(next).max(1);
             if cost.get(&next).is_none_or(|&known| step < known) {
                 cost.insert(next, step);
                 came.insert(next, at);
@@ -626,12 +640,26 @@ pub fn sample(curves: &[Cubic], per_segment: usize) -> Vec<Vec2> {
 ///
 /// Each leg is an independent A* query; the legs are joined into one polyline
 /// and smoothed as a single curve. `None` means at least one leg is walled off.
+#[allow(dead_code)] // unweighted shorthand over plan_route_cost; live code routes through the weighted variant
 pub fn plan_route(
     start: Vec2,
     start_cell: Hex,
     targets: &[Waypoint],
     edges: &HashSet<Edge>,
     blocked: &HashSet<Hex>,
+) -> Option<RoutePlan> {
+    plan_route_cost(start, start_cell, targets, edges, blocked, |_| 1)
+}
+
+/// Like [`plan_route`] but each leg pays the per-hex entry toll, so routes
+/// bend around slow terrain instead of through it.
+pub fn plan_route_cost(
+    start: Vec2,
+    start_cell: Hex,
+    targets: &[Waypoint],
+    edges: &HashSet<Edge>,
+    blocked: &HashSet<Hex>,
+    step_cost: impl Fn(Hex) -> u32 + Copy,
 ) -> Option<RoutePlan> {
     if targets.is_empty() {
         return None;
@@ -644,7 +672,7 @@ pub fn plan_route(
     let mut hexes = 0;
 
     for waypoint in targets {
-        let leg = find_path(from_cell, waypoint.cell, edges, blocked)?;
+        let leg = find_path_cost(from_cell, waypoint.cell, edges, blocked, step_cost)?;
         hexes += leg.len();
         let leg_points = waypoints(from, waypoint.pos, &leg);
         if points.is_empty() {
@@ -748,6 +776,32 @@ mod tests {
         assert_eq!(route.first(), Some(&(0, 0)));
         assert_eq!(route.last(), Some(&(3, 0)));
         assert_eq!(route.len(), 4, "three steps, four nodes");
+    }
+
+    #[test]
+    fn a_costly_hex_bends_the_route_around_it() {
+        // The straight three-step lane costs 1 + 10 + 1; going around costs
+        // five cheap steps, so the toll must divert the route.
+        let toll = |hex: Hex| {
+            if hex == (1, 0) || hex == (2, 0) {
+                10
+            } else {
+                1
+            }
+        };
+        let route =
+            find_path_cost((0, 0), (3, 0), &HashSet::new(), &HashSet::new(), toll).expect("route");
+        assert_eq!(route.first(), Some(&(0, 0)));
+        assert_eq!(route.last(), Some(&(3, 0)));
+        assert!(
+            !route.contains(&(1, 0)) && !route.contains(&(2, 0)),
+            "the toll should divert the route: {route:?}"
+        );
+        // Uniform tolls behave exactly like the unweighted search.
+        let plain = find_path((0, 0), (3, 0), &HashSet::new(), &HashSet::new()).expect("route");
+        let weighted =
+            find_path_cost((0, 0), (3, 0), &HashSet::new(), &HashSet::new(), |_| 1).expect("route");
+        assert_eq!(plain, weighted);
     }
 
     #[test]

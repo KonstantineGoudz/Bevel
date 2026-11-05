@@ -291,6 +291,8 @@ fn visuals_system_has_disjoint_queries() {
         pill_mat: Handle::default(),
         cone: Handle::default(),
         cone_mat: Handle::default(),
+        grass: Handle::default(),
+        grass_mats: [Handle::default(), Handle::default()],
         character_collider: Collider::cuboid(0.5, 0.5, 0.5),
     });
     app.add_systems(Update, sync_visuals);

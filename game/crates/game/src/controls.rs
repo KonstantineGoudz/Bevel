@@ -54,23 +54,27 @@ pub enum ActionContext {
     Global,
 }
 
-/// On-screen touch buttons (the A/B/X/Y cluster). What each button does is
-/// itself remappable (see [`Controls::touch_action`]); only Jump, Sprint,
+/// On-screen touch buttons (the A/B/C/X/Y/Z cluster). What each button does
+/// is itself remappable (see [`Controls::touch_action`]); only Jump, Sprint,
 /// Slide ("run"/"crouch" on touch) and Interact are valid targets.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ClusterButton {
     A,
     B,
+    C,
     X,
     Y,
+    Z,
 }
 
 impl ClusterButton {
     pub const ALL: &'static [ClusterButton] = &[
         ClusterButton::A,
         ClusterButton::B,
+        ClusterButton::C,
         ClusterButton::X,
         ClusterButton::Y,
+        ClusterButton::Z,
     ];
 
     /// Stable id shared with the home-screen settings page.
@@ -78,8 +82,10 @@ impl ClusterButton {
         match self {
             Self::A => "A",
             Self::B => "B",
+            Self::C => "C",
             Self::X => "X",
             Self::Y => "Y",
+            Self::Z => "Z",
         }
     }
 
@@ -87,21 +93,26 @@ impl ClusterButton {
         match id {
             "A" => Some(Self::A),
             "B" => Some(Self::B),
+            "C" => Some(Self::C),
             "X" => Some(Self::X),
             "Y" => Some(Self::Y),
+            "Z" => Some(Self::Z),
             _ => None,
         }
     }
 
-    /// Factory default action. A jumps, B slides (the future crouch), X
-    /// fires a cone, Y runs (sprints). Interact keeps its Play-toolbar "Use"
-    /// button, so remapping X costs no functionality.
-    pub fn default_action(self) -> Action {
+    /// Factory default action. A jumps, B slides (the future crouch), C
+    /// interacts, X fires a cone, Y runs (sprints) and Z starts disabled so
+    /// there is a spare remappable button. Interact also keeps its
+    /// Play-toolbar "Use" button, so remapping C costs no functionality.
+    pub fn default_action(self) -> Option<Action> {
         match self {
-            Self::A => Action::Jump,
-            Self::B => Action::Slide,
-            Self::X => Action::Shoot,
-            Self::Y => Action::Sprint,
+            Self::A => Some(Action::Jump),
+            Self::B => Some(Action::Slide),
+            Self::C => Some(Action::Interact),
+            Self::X => Some(Action::Shoot),
+            Self::Y => Some(Action::Sprint),
+            Self::Z => None,
         }
     }
 }
@@ -752,7 +763,7 @@ impl Controls {
                 .collect(),
             touch: ClusterButton::ALL
                 .iter()
-                .map(|button| (*button, Some(button.default_action())))
+                .map(|button| (*button, button.default_action()))
                 .collect(),
         }
     }
@@ -763,7 +774,7 @@ impl Controls {
         self.touch
             .get(&button)
             .copied()
-            .unwrap_or_else(|| Some(button.default_action()))
+            .unwrap_or_else(|| button.default_action())
     }
 
     #[cfg(test)]
@@ -1368,6 +1379,11 @@ mod tests {
         assert_eq!(controls.touch_action(ClusterButton::A), Some(Action::Jump));
         assert_eq!(controls.touch_action(ClusterButton::B), Some(Action::Slide));
         assert_eq!(
+            controls.touch_action(ClusterButton::C),
+            Some(Action::Interact),
+            "the C pad button interacts on phones"
+        );
+        assert_eq!(
             controls.touch_action(ClusterButton::X),
             Some(Action::Shoot),
             "the X pad button fires a cone on phones"
@@ -1376,7 +1392,14 @@ mod tests {
             controls.touch_action(ClusterButton::Y),
             Some(Action::Sprint)
         );
+        assert_eq!(
+            controls.touch_action(ClusterButton::Z),
+            None,
+            "Z starts disabled as the spare remappable button"
+        );
         assert_eq!(ClusterButton::parse("A"), Some(ClusterButton::A));
+        assert_eq!(ClusterButton::parse("C"), Some(ClusterButton::C));
+        assert_eq!(ClusterButton::parse("Z"), Some(ClusterButton::Z));
         assert_eq!(ClusterButton::parse("nope"), None);
     }
 
@@ -1395,7 +1418,7 @@ mod tests {
         // Unknown buttons are ignored; non-game actions and bad ids fall
         // back to the default instead of disabling the button.
         let loaded = Controls::from_json(
-            r#"{"version":1,"bindings":{},"touch":{"A":"saveLevel","B":"bogus","Z":"jump","X":null}}"#,
+            r#"{"version":1,"bindings":{},"touch":{"A":"saveLevel","B":"bogus","Q":"jump","X":null}}"#,
         )
         .expect("reloads");
         assert_eq!(loaded.touch_action(ClusterButton::A), Some(Action::Jump));

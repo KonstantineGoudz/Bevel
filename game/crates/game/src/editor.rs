@@ -29,6 +29,7 @@ use crate::model::{
     SnapKind, Style, shapes,
 };
 use crate::path;
+use crate::path::Hex;
 use crate::path_edit::{self, PathDrag, PathHandle, Plan, TangentSide};
 use crate::session;
 use crate::statuses::Health;
@@ -115,6 +116,8 @@ impl Plugin for EditorPlugin {
             .init_resource::<DamageClock>()
             .init_resource::<Movers>()
             .init_resource::<AddMenu>()
+            .init_resource::<Minimap>()
+            .init_resource::<GrassVisuals>()
             .init_resource::<OutlinerState>()
             .init_resource::<OutlinerEdit>()
             .init_resource::<PropertiesPanelState>()
@@ -169,6 +172,10 @@ impl Plugin for EditorPlugin {
                     interact,
                     apply_property_edits,
                     sync_visuals,
+                    // Own chain slot: the main Update tuple is already at
+                    // Bevy's chaining limit, and this only touches the
+                    // minimap camera/UI after the main camera has moved.
+                    sync_minimap,
                 )
                     .chain()
                     .after(refresh_route),
@@ -199,10 +206,12 @@ impl Plugin for EditorPlugin {
                     sync_trigger_visible_label,
                     update_palette,
                     sync_path_actions,
+                    sync_grass_actions,
                     update_touch_buttons,
                     update_status,
                     update_touch_status,
                     update_character_status,
+                    sync_grass,
                     draw,
                     autosave_session,
                 )
@@ -257,16 +266,34 @@ struct Editor {
     last_palette: Option<(PaletteAction, f64)>,
     /// Navigation revision the current route was planned against.
     seen_nav: u64,
+    /// Painted grass cover: hex -> density 1..=GRASS_MAX. Renders as tuft
+    /// clusters and optionally slows movement and routes.
+    grass: HashMap<Hex, u8>,
+    /// When true, grassy hexes cost extra in routes and slow the character.
+    grass_slows: bool,
+    /// The grass brush removes instead of paints while set.
+    grass_erase: bool,
+    /// Bumped on every grass change so the tuft visuals rebuild.
+    grass_rev: u64,
+    /// An open paint stroke: set while the brush is down. The stroke commits
+    /// once on press; release pops the undo entry when nothing changed.
+    grass_stroke: bool,
+    /// Whether the open stroke changed anything yet.
+    grass_stroke_dirty: bool,
+    /// Last dabbed hex this stroke, so holding still does not repaint.
+    grass_dab: Option<Hex>,
     /// One pending platform waypoint from the Motion tool, drained by movers.
     platform_request: Option<(u32, Vec2)>,
 }
 
 /// One undo step: the level geometry plus its authoring metadata, so grouping
-/// and labels undo alongside placement, transforms and deletes.
+/// and labels undo alongside placement, transforms and deletes. Grass rides
+/// along so one undo step removes one paint stroke.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct LevelState {
     pub(crate) pieces: Vec<Piece>,
     pub(crate) outline: SceneOutline,
+    pub(crate) grass: HashMap<Hex, u8>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -314,19 +341,27 @@ impl Default for Editor {
             mobile_shape: 0,
             last_palette: None,
             seen_nav: 0,
+            grass: HashMap::new(),
+            grass_slows: false,
+            grass_erase: false,
+            grass_rev: 0,
+            grass_stroke: false,
+            grass_stroke_dirty: false,
+            grass_dab: None,
             platform_request: None,
         }
     }
 }
 
 /// The palette can arm a building block, the character, or one of the path
-/// tools (character route, plan, or platform motion).
+/// tools (character route, plan, platform motion, or the grass brush).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ActorTool {
     Place,
     Path,
     Plan,
     Platform,
+    Grass,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -724,6 +759,12 @@ impl Mode {
 impl Editor {
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     fn capture(&self, orbit: &Orbit, movers: &Movers) -> session::Snapshot {
+        let mut grass: Vec<session::SavedGrass> = self
+            .grass
+            .iter()
+            .map(|(&(q, r), &density)| session::SavedGrass { q, r, density })
+            .collect();
+        grass.sort_by_key(|saved| (saved.q, saved.r));
         session::Snapshot {
             version: session::SNAPSHOT_VERSION,
             next_id: Some(self.next_id),
@@ -747,6 +788,8 @@ impl Editor {
                 .iter()
                 .map(|(id, mover)| movers::to_saved(*id, mover))
                 .collect(),
+            grass,
+            grass_slows: self.grass_slows,
         }
     }
 
@@ -758,6 +801,9 @@ impl Editor {
         self.undo = loaded.undo;
         self.redo = loaded.redo;
         self.next_id = loaded.next_id;
+        self.grass = loaded.grass;
+        self.grass_slows = loaded.grass_slows;
+        self.grass_rev = self.grass_rev.wrapping_add(1);
         if let Some(camera) = loaded.camera {
             *orbit = camera;
         }
@@ -804,6 +850,8 @@ impl Editor {
         self.plan = None;
         self.undo.clear();
         self.redo.clear();
+        self.grass.clear();
+        self.grass_rev = self.grass_rev.wrapping_add(1);
         self.hard_dirty = true;
         self.note = "course: walk straight, up the ramp, over the block, drop";
     }
@@ -812,6 +860,7 @@ impl Editor {
         LevelState {
             pieces: self.pieces.clone(),
             outline: self.outline.clone(),
+            grass: self.grass.clone(),
         }
     }
 
@@ -833,6 +882,8 @@ impl Editor {
             }
             self.pieces = prev.pieces;
             self.outline = prev.outline;
+            self.grass = prev.grass;
+            self.grass_rev = self.grass_rev.wrapping_add(1);
             // Keep the UI's rebuild counter monotonic across history moves.
             self.outline.revision = revision.wrapping_add(1);
             self.selected = None;
@@ -849,6 +900,8 @@ impl Editor {
             }
             self.pieces = next.pieces;
             self.outline = next.outline;
+            self.grass = next.grass;
+            self.grass_rev = self.grass_rev.wrapping_add(1);
             self.outline.revision = revision.wrapping_add(1);
             self.selected = None;
             self.hard_dirty = true;
@@ -874,6 +927,10 @@ struct PaletteButton(PaletteAction);
 #[derive(Component)]
 struct PathActions;
 
+/// Desktop grass row (erase + slow toggles), shown while Grass is armed.
+#[derive(Component)]
+struct GrassActions;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PaletteAction {
     Build,
@@ -885,6 +942,9 @@ enum PaletteAction {
     Plan,
     Walk,
     Smooth,
+    Grass,
+    GrassErase,
+    GrassSlow,
     Course,
     /// Copy the level JSON for debugging. This is not a level edit.
     CopyJson,
@@ -898,6 +958,10 @@ struct PieceVisual;
 
 #[derive(Component)]
 struct CharacterVisual;
+
+/// Marker for the main 3D camera (as opposed to the minimap camera).
+#[derive(Component)]
+struct MainCamera;
 
 /// Marks a UI root as belonging to the desktop or the touch layer.
 #[derive(Component)]
@@ -931,6 +995,8 @@ enum TouchAction {
     Redo,
     Path,
     Plan,
+    Grass,
+    GrassErase,
     Add,
     Walk,
     Smooth,
@@ -940,7 +1006,7 @@ enum TouchAction {
     Jump,
     /// Player interaction (E key equivalent). Live in Play, like Jump.
     Interact,
-    /// Remappable A/B/X/Y cluster button. Resolved through the Controls
+    /// Remappable A/B/C/X/Y/Z cluster button. Resolved through the Controls
     /// touch map at press time.
     Pad(ClusterButton),
     Course,
@@ -983,6 +1049,10 @@ struct Kit {
     cone: Handle<Mesh>,
     cone_mat: Handle<StandardMaterial>,
     character_collider: Collider,
+    /// Baked grass tuft cluster, shared by every grassy hex.
+    grass: Handle<Mesh>,
+    /// Two green tints, picked per hex so the sward varies.
+    grass_mats: [Handle<StandardMaterial>; 2],
 }
 
 mod add_menu;
@@ -991,10 +1061,12 @@ mod colliders;
 mod draw;
 mod editing;
 mod gizmo;
+mod grass;
 mod hazards;
 mod hud;
 mod input;
 mod interacts;
+mod minimap;
 mod movers;
 pub(crate) mod outline;
 mod outliner;
@@ -1016,10 +1088,12 @@ use colliders::*;
 use draw::*;
 use editing::*;
 use gizmo::*;
+use grass::*;
 use hazards::*;
 use hud::*;
 use input::*;
 use interacts::*;
+use minimap::*;
 use movers::*;
 use outline::*;
 use outliner::*;

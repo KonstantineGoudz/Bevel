@@ -105,13 +105,14 @@ pub(super) fn manage_capture(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn camera_control(
     mut orbit: ResMut<Orbit>,
-    mut camera: Single<&mut Transform, With<Camera3d>>,
+    mut camera: Single<&mut Transform, (With<Camera3d>, Without<MinimapCamera>)>,
     mut editor: ResMut<Editor>,
     gesture: Res<PathGesture>,
     mut touch: ResMut<TouchState>,
     input: PlayerInput,
     time: Res<Time>,
     capture: Res<PointerCapture>,
+    mut minimap: ResMut<Minimap>,
     mut motion: MessageReader<MouseMotion>,
     mut wheel: MessageReader<MouseWheel>,
     window: Single<&Window, With<PrimaryWindow>>,
@@ -221,7 +222,18 @@ pub(super) fn camera_control(
             orbit.target.y = 0.0;
         }
         if scroll != 0.0 {
-            orbit.distance = (orbit.distance * (1.0 - scroll * 0.12)).clamp(1.5, 60.0);
+            // The wheel over the Play minimap zooms the map, not the main
+            // view; everywhere else it dollies the orbit camera.
+            let over_minimap = editor.mode == Mode::Play
+                && window
+                    .cursor_position()
+                    .is_some_and(|p| minimap_hit(p, window.size(), minimap_scale(&touch)));
+            if over_minimap {
+                minimap.half_extent = (minimap.half_extent * (1.0 + scroll * 0.12))
+                    .clamp(MINIMAP_MIN_HALF, MINIMAP_MAX_HALF);
+            } else {
+                orbit.distance = (orbit.distance * (1.0 - scroll * 0.12)).clamp(1.5, 60.0);
+            }
         }
     }
 
@@ -392,7 +404,7 @@ pub(super) fn update_cursor(
     mut cursor: ResMut<Cursor>,
     touch: Res<TouchState>,
     window: Single<&Window, With<PrimaryWindow>>,
-    camera: Single<(&Camera, &Transform)>,
+    camera: Single<(&Camera, &Transform), Without<MinimapCamera>>,
     focus: Res<InputFocus>,
 ) {
     let (camera, transform) = *camera;

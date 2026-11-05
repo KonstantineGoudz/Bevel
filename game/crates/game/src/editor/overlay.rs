@@ -29,6 +29,9 @@ pub(super) fn update_palette(
                 editor.actor_tool == Some(ActorTool::Plan)
                     && editor.plan.as_ref().is_some_and(|plan| !plan.is_empty())
             }
+            PaletteAction::Grass => editor.actor_tool == Some(ActorTool::Grass),
+            PaletteAction::GrassErase => editor.grass_erase,
+            PaletteAction::GrassSlow => editor.grass_slows,
             PaletteAction::Course => false,
             PaletteAction::CopyJson => false,
         };
@@ -42,6 +45,20 @@ pub(super) fn sync_path_actions(
     mut row: Single<&mut Node, With<PathActions>>,
 ) {
     let display = if editor.actor_tool == Some(ActorTool::Plan) {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    if row.display != display {
+        row.display = display;
+    }
+}
+
+pub(super) fn sync_grass_actions(
+    editor: Res<Editor>,
+    mut row: Single<&mut Node, With<GrassActions>>,
+) {
+    let display = if editor.actor_tool == Some(ActorTool::Grass) {
         Display::Flex
     } else {
         Display::None
@@ -78,6 +95,7 @@ pub(super) fn update_status(
         Some(ActorTool::Path) => "path",
         Some(ActorTool::Plan) => "plan",
         Some(ActorTool::Platform) => "motion",
+        Some(ActorTool::Grass) => "grass",
         None => tool,
     };
 

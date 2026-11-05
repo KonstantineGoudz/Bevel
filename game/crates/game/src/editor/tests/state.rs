@@ -185,6 +185,11 @@ fn play_mode_only_allows_non_authoring_ui_actions() {
     assert!(!touch_is_authoring(TouchAction::CopyJson));
     assert!(touch_is_authoring(TouchAction::Path));
     assert!(touch_is_authoring(TouchAction::Place));
+    assert!(touch_is_authoring(TouchAction::Grass));
+    assert!(touch_is_authoring(TouchAction::GrassErase));
+    assert!(palette_is_authoring(PaletteAction::Grass));
+    assert!(palette_is_authoring(PaletteAction::GrassErase));
+    assert!(palette_is_authoring(PaletteAction::GrassSlow));
 }
 
 #[test]

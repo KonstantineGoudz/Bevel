@@ -88,7 +88,13 @@ pub(super) fn setup(
             orbit.pitch.cos() * orbit.yaw.cos(),
         ) * orbit.distance;
     commands.spawn((
+        MainCamera,
         Camera3d::default(),
+        // The minimap camera renders with a higher order, and Bevy assigns
+        // UI to the highest-order camera by default — without this marker
+        // every button and menu would render into (or vanish with) the
+        // minimap viewport instead of the main view.
+        bevy::ui::IsDefaultUiCamera,
         Projection::Perspective(PerspectiveProjection {
             fov: 60.0_f32.to_radians(),
             near: 0.05,
@@ -178,6 +184,28 @@ pub(super) fn setup(
         perceptual_roughness: 0.4,
         ..default()
     });
+    // Grass tufts: one baked blade cluster plus two green tints; per-hex
+    // yaw and scale supply the variety. Double-sided so blades read from
+    // every angle.
+    let grass = meshes.add(grass_tuft_mesh());
+    let grass_mats = [
+        materials.add(StandardMaterial {
+            base_color: Color::srgb_u8(0x3f, 0xa0, 0x4d),
+            perceptual_roughness: 0.9,
+            metallic: 0.0,
+            double_sided: true,
+            cull_mode: None,
+            ..default()
+        }),
+        materials.add(StandardMaterial {
+            base_color: Color::srgb_u8(0x5a, 0xb8, 0x3a),
+            perceptual_roughness: 0.9,
+            metallic: 0.0,
+            double_sided: true,
+            cull_mode: None,
+            ..default()
+        }),
+    ];
     commands.insert_resource(Kit {
         parts,
         mats,
@@ -189,6 +217,8 @@ pub(super) fn setup(
         cone_mat,
         // `capsule_y` takes the half height first, radius second.
         character_collider: Collider::capsule_y(PILL_CYLINDER * 0.5, PILL_RADIUS),
+        grass,
+        grass_mats,
     });
 
     let panel = commands
@@ -280,6 +310,7 @@ pub(super) fn setup(
         palette_compact_button(&mut commands, PaletteAction::Character, "Char"),
         palette_compact_button(&mut commands, PaletteAction::Path, "Path"),
         palette_compact_button(&mut commands, PaletteAction::Plan, "Plan"),
+        palette_compact_button(&mut commands, PaletteAction::Grass, "Grass"),
         palette_compact_button(&mut commands, PaletteAction::Course, "Course"),
         palette_compact_button(&mut commands, PaletteAction::CopyJson, "JSON"),
     ];
@@ -304,6 +335,26 @@ pub(super) fn setup(
     ];
     commands.entity(path_actions).add_children(&path_buttons);
     children.push(path_actions);
+
+    // Grass brush options: erase toggle plus the optional navigation toll.
+    let grass_actions = commands
+        .spawn((
+            GrassActions,
+            Node {
+                width: percent(100),
+                flex_direction: FlexDirection::Row,
+                column_gap: px(4),
+                display: Display::None,
+                ..default()
+            },
+        ))
+        .id();
+    let grass_buttons = [
+        palette_compact_button(&mut commands, PaletteAction::GrassErase, "Erase"),
+        palette_compact_button(&mut commands, PaletteAction::GrassSlow, "Slow"),
+    ];
+    commands.entity(grass_actions).add_children(&grass_buttons);
+    children.push(grass_actions);
 
     commands.entity(panel).add_children(&children);
 
@@ -391,6 +442,7 @@ pub(super) fn setup(
     commands.entity(play_bar).add_children(&play_buttons);
 
     spawn_touch_ui(&mut commands);
+    spawn_minimap(&mut commands);
     spawn_properties_panel(&mut commands);
     spawn_object_graph(&mut commands);
     spawn_character_status(&mut commands);
@@ -443,6 +495,7 @@ pub(super) fn spawn_touch_ui(commands: &mut Commands) {
         touch_button(commands, TouchAction::Redo, "Redo"),
         touch_button(commands, TouchAction::Path, "Path"),
         touch_button(commands, TouchAction::Plan, "Plan"),
+        touch_button(commands, TouchAction::Grass, "Grass"),
         touch_button(commands, TouchAction::Course, "Course"),
         touch_button(commands, TouchAction::Play, "Play"),
         // Top-right: opens the Add (entity search) menu. Lives in the
@@ -521,7 +574,8 @@ pub(super) fn spawn_touch_ui(commands: &mut Commands) {
         .entity(carousel)
         .add_children(&[prev, label, next, place]);
 
-    // Path editing row: Add in Path mode; Add/Walk/Smooth in Plan mode.
+    // Path editing row: Add in Path mode; Add/Walk/Smooth in Plan mode;
+    // Erase while the grass brush is armed.
     let path_row = commands
         .spawn((
             TouchPathRow,
@@ -542,6 +596,7 @@ pub(super) fn spawn_touch_ui(commands: &mut Commands) {
         touch_button(commands, TouchAction::Add, "Add"),
         touch_button(commands, TouchAction::Walk, "Walk"),
         touch_button(commands, TouchAction::Smooth, "Smooth"),
+        touch_button(commands, TouchAction::GrassErase, "Erase"),
     ];
     commands.entity(path_row).add_children(&path_buttons);
 
@@ -602,9 +657,12 @@ pub(super) fn spawn_touch_ui(commands: &mut Commands) {
         .id();
     commands.entity(base).add_child(knob);
 
-    // A/B/X/Y action cluster. What each button does is remappable in the
-    // home-screen Controls settings (A jumps, B slides, X interacts and Y
-    // runs by default); jump and interact fire once, run and slide toggle.
+    // A/B/C/X/Y/Z action cluster. What each button does is remappable in
+    // the home-screen Controls settings (A jumps, B slides, C interacts, X
+    // shoots, Y runs, Z starts disabled); jump, interact and shoot fire
+    // once, run and slide toggle. Bottom row reads A/B/C left-to-right, top
+    // row X/Y/Z; each row bows into a slight thumb arc (middle button
+    // dipped, outer-left lifted) so the sweep from the corner feels even.
     let pad_button = |commands: &mut Commands,
                       action: TouchAction,
                       text: &str,
@@ -644,8 +702,8 @@ pub(super) fn spawn_touch_ui(commands: &mut Commands) {
         commands,
         TouchAction::Pad(ClusterButton::A),
         "A",
-        16.0,
-        20.0,
+        188.0,
+        30.0,
         76.0,
     );
     let pad_b = pad_button(
@@ -653,7 +711,15 @@ pub(super) fn spawn_touch_ui(commands: &mut Commands) {
         TouchAction::Pad(ClusterButton::B),
         "B",
         102.0,
-        20.0,
+        16.0,
+        76.0,
+    );
+    let pad_c = pad_button(
+        commands,
+        TouchAction::Pad(ClusterButton::C),
+        "C",
+        16.0,
+        22.0,
         76.0,
     );
     let pad_y = pad_button(
@@ -661,15 +727,23 @@ pub(super) fn spawn_touch_ui(commands: &mut Commands) {
         TouchAction::Pad(ClusterButton::Y),
         "Y",
         102.0,
-        106.0,
+        102.0,
         76.0,
     );
     let pad_x = pad_button(
         commands,
         TouchAction::Pad(ClusterButton::X),
         "X",
+        188.0,
+        116.0,
+        76.0,
+    );
+    let pad_z = pad_button(
+        commands,
+        TouchAction::Pad(ClusterButton::Z),
+        "Z",
         16.0,
-        106.0,
+        108.0,
         76.0,
     );
 
@@ -712,7 +786,7 @@ pub(super) fn spawn_touch_ui(commands: &mut Commands) {
     // The canvas is top-level and always pickable: desktop mouse presses need
     // the same pointer stream as touch taps.
     commands.entity(root).add_children(&[
-        tools, carousel, path_row, status, base, pad_a, pad_b, pad_y, pad_x,
+        tools, carousel, path_row, status, base, pad_a, pad_b, pad_c, pad_y, pad_x, pad_z,
     ]);
 }
 

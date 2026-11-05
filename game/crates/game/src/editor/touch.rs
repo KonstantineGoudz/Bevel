@@ -50,6 +50,11 @@ pub(super) fn touch_input(
         // UiScale rounding cannot put the thumb just outside it.
         let stick = grabs_stick(pos, centre, STICK_REACH * s * 1.7);
         let mut control = !stick && over_controls(pos, size, s);
+        // The Play minimap owns its corner: presses there pan or route via
+        // the minimap observers, never the camera or the grid tap.
+        if !control && editor.mode == Mode::Play && minimap_hit(pos, size, s) {
+            control = true;
+        }
         // A press on the floating property panel is panel business, never a
         // camera gesture or a grid tap.
         if !control
@@ -192,20 +197,22 @@ pub(super) fn stick_offset(pos: Vec2, centre: Vec2, scale: f32) -> Vec2 {
     Vec2::new(offset.x, -offset.y).clamp_length_max(1.0)
 }
 
-/// Screen areas owned by touch controls (toolbar + carousel, stick, jump).
+/// Screen areas owned by touch controls (toolbar + carousel, stick, pads).
+/// The bottom-right zone covers the whole A/B/C/X/Y/Z cluster.
 pub(super) fn over_controls(pos: Vec2, size: Vec2, scale: f32) -> bool {
     pos.y <= 128.0 * scale
         || (pos.y >= size.y - 170.0 * scale && pos.x <= 190.0 * scale)
-        || (pos.y >= size.y - 170.0 * scale && pos.x >= size.x - 120.0 * scale)
+        || (pos.y >= size.y - 200.0 * scale && pos.x >= size.x - 272.0 * scale)
 }
 
-/// The A/B/X/Y pad cluster (bottom-right). Its buttons are real widgets, so
-/// a press on them never reaches the canvas observer — but the raw-touch
+/// The A/B/C/X/Y/Z pad cluster (bottom-right). Its buttons are real widgets,
+/// so a press on them never reaches the canvas observer — but the raw-touch
 /// fallback sees every press and must not steal those taps for gizmos.
-/// Geometry mirrors `spawn_touch_ui`: 76px pads at right/bottom 16/102 and
-/// 20/106, in the same scaled space as `over_controls`.
+/// Geometry mirrors `spawn_touch_ui`: 76px pads in right columns 16/102/188
+/// bowing into a slight thumb arc (bottoms 30/16/22, tops 116/102/108), in
+/// the same scaled space as `over_controls`.
 pub(super) fn over_pad_cluster(pos: Vec2, size: Vec2, scale: f32) -> bool {
-    pos.x >= size.x - 186.0 * scale && pos.y >= size.y - 190.0 * scale
+    pos.x >= size.x - 272.0 * scale && pos.y >= size.y - 200.0 * scale
 }
 
 /// Grab, drive and release gizmo drags straight from the raw touch stream,
@@ -229,7 +236,7 @@ pub(super) fn touch_gizmo_fallback(
     touches: Res<Touches>,
     time: Res<Time>,
     window: Single<&Window, With<PrimaryWindow>>,
-    camera: Single<(&Camera, &Transform)>,
+    camera: Single<(&Camera, &Transform), Without<MinimapCamera>>,
     capture: Res<PointerCapture>,
     mut editor: ResMut<Editor>,
     mut gesture: ResMut<PathGesture>,
@@ -266,6 +273,7 @@ pub(super) fn touch_gizmo_fallback(
         if grabs_stick(pos, centre, reach)
             || over_controls(pos, size, s)
             || over_pad_cluster(pos, size, s)
+            || (editor.mode == Mode::Play && minimap_hit(pos, size, s))
             || (editor.selected.is_some()
                 && over_properties_panel(pos, size, true, panel_state.collapsed, &touch))
             || (editor.mode == Mode::Build
@@ -356,12 +364,14 @@ pub(super) fn sync_touch_path_row(
 ) {
     let plan = editor.actor_tool == Some(ActorTool::Plan);
     let path = editor.actor_tool == Some(ActorTool::Path);
-    let show = plan || path;
+    let grass = editor.actor_tool == Some(ActorTool::Grass);
+    let show = plan || path || grass;
     row.display = if show { Display::Flex } else { Display::None };
     for (button, mut node) in &mut buttons {
         let visible = match button.0 {
-            TouchAction::Add => show,
+            TouchAction::Add => show && !grass,
             TouchAction::Walk | TouchAction::Smooth => plan,
+            TouchAction::GrassErase => grass,
             _ => continue,
         };
         node.display = if visible {
@@ -403,6 +413,8 @@ pub(super) fn update_touch_buttons(
             TouchAction::Play => false,
             TouchAction::Path => editor.actor_tool == Some(ActorTool::Path),
             TouchAction::Plan => editor.actor_tool == Some(ActorTool::Plan),
+            TouchAction::Grass => editor.actor_tool == Some(ActorTool::Grass),
+            TouchAction::GrassErase => editor.grass_erase,
             TouchAction::Add => touch.append,
             TouchAction::Search => menu.open,
             TouchAction::Walk => {
@@ -455,6 +467,7 @@ pub(super) fn update_touch_status(
         Some(ActorTool::Plan) => "plan",
         Some(ActorTool::Place) => "char",
         Some(ActorTool::Platform) => "motion",
+        Some(ActorTool::Grass) => "grass",
         None => editor
             .tool
             .map(|shape| shapes()[shape].name)
@@ -482,8 +495,8 @@ pub(super) fn update_touch_status(
 #[allow(dead_code)] // superseded by UI activation; kept for the hit-test test
 pub(super) fn touch_action_at(pos: Vec2, css: Vec2) -> Option<TouchAction> {
     if (8.0..=42.0).contains(&pos.y) {
-        let width = (css.x - 20.0) / 10.0;
-        let index = ((pos.x - 8.0) / (width + 4.0)).floor().max(0.0) as usize;
+        let width = (css.x - 20.0) / 11.0;
+        let index = ((pos.x - 8.0) / (width + 2.0)).floor().max(0.0) as usize;
         return [
             TouchAction::View,
             TouchAction::Rotate,
@@ -492,11 +505,12 @@ pub(super) fn touch_action_at(pos: Vec2, css: Vec2) -> Option<TouchAction> {
             TouchAction::Redo,
             TouchAction::Path,
             TouchAction::Plan,
+            TouchAction::Grass,
             TouchAction::Course,
             TouchAction::Play,
             TouchAction::Search,
         ]
-        .get(index.min(9))
+        .get(index.min(10))
         .copied();
     }
     if (46.0..=84.0).contains(&pos.y) {
@@ -510,11 +524,16 @@ pub(super) fn touch_action_at(pos: Vec2, css: Vec2) -> Option<TouchAction> {
         };
     }
     if (88.0..=122.0).contains(&pos.y) {
-        let third = (css.x - 20.0) / 3.0;
-        let index = ((pos.x - 8.0) / (third + 4.0)).floor().max(0.0) as usize;
-        return [TouchAction::Add, TouchAction::Walk, TouchAction::Smooth]
-            .get(index.min(2))
-            .copied();
+        let quarter = (css.x - 20.0) / 4.0;
+        let index = ((pos.x - 8.0) / (quarter + 4.0)).floor().max(0.0) as usize;
+        return [
+            TouchAction::Add,
+            TouchAction::Walk,
+            TouchAction::Smooth,
+            TouchAction::GrassErase,
+        ]
+        .get(index.min(3))
+        .copied();
     }
     let jump = Vec2::new(css.x - 62.0, css.y - 66.0);
     if pos.distance(jump) < 52.0 {
@@ -523,7 +542,7 @@ pub(super) fn touch_action_at(pos: Vec2, css: Vec2) -> Option<TouchAction> {
     None
 }
 
-/// Apply one press of a remappable A/B/X/Y cluster button. Jump and
+/// Apply one press of a remappable A/B/C/X/Y/Z cluster button. Jump,
 /// interact fire once; sprint and slide toggle until pressed again (there is
 /// no release event on the touch buttons, so holds are sticky).
 pub(super) fn apply_touch_button(touch: &mut TouchState, action: Option<Action>) {
@@ -599,6 +618,28 @@ pub(super) fn run_touch_action(
             }
         }
         TouchAction::Add => touch.append = !touch.append,
+        TouchAction::Grass => {
+            editor.tool = None;
+            editor.actor_tool = if editor.actor_tool == Some(ActorTool::Grass) {
+                None
+            } else {
+                Some(ActorTool::Grass)
+            };
+            editor.selected = None;
+            editor.drag = None;
+            editor.ghost = None;
+            if editor.actor_tool == Some(ActorTool::Grass) {
+                editor.note = "grass brush: tap to paint";
+            }
+        }
+        TouchAction::GrassErase => {
+            editor.grass_erase = !editor.grass_erase;
+            editor.note = if editor.grass_erase {
+                "grass eraser on"
+            } else {
+                "grass brush on"
+            };
+        }
         TouchAction::Walk => {
             if editor.actor_tool == Some(ActorTool::Plan) {
                 walk_from_plan(editor, nav, rapier, filter);
@@ -699,7 +740,7 @@ pub(super) fn on_path_press(
     window: Single<&Window, With<PrimaryWindow>>,
     time: Res<Time>,
     touches: Res<Touches>,
-    camera: Single<(&Camera, &Transform)>,
+    camera: Single<(&Camera, &Transform), Without<MinimapCamera>>,
     orbit: Res<Orbit>,
     capture: Res<PointerCapture>,
     mut editor: ResMut<Editor>,
@@ -732,6 +773,10 @@ pub(super) fn on_path_press(
     if editor.mode == Mode::Build
         && over_outliner_panel(pos, window.size(), outliner.collapsed, &touch)
     {
+        return;
+    }
+    // The Play minimap owns its corner; its own observers route the press.
+    if editor.mode == Mode::Play && minimap_hit(pos, window.size(), touch.ui_scale) {
         return;
     }
     if touch.enabled {
@@ -933,7 +978,7 @@ pub(super) fn path_drag(
     mut movers: ResMut<Movers>,
     gesture: Res<PathGesture>,
     capture: Res<PointerCapture>,
-    camera: Single<(&Camera, &Transform)>,
+    camera: Single<(&Camera, &Transform), Without<MinimapCamera>>,
     nav: Res<Nav>,
     rapier: ReadRapierContext,
     player: Query<Entity, With<CharacterVisual>>,

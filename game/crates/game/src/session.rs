@@ -64,6 +64,12 @@ pub struct Snapshot {
     /// Moving-platform paths, keyed by piece id. Missing on older saves.
     #[serde(default)]
     pub platforms: Vec<SavedPlatform>,
+    /// Painted grass cover. Missing on older saves, which grow none.
+    #[serde(default)]
+    pub grass: Vec<SavedGrass>,
+    /// Whether grass slows movement and routes. Missing means decoration.
+    #[serde(default)]
+    pub grass_slows: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -99,6 +105,7 @@ fn parse_saved_level(value: serde_json::Value) -> Option<SavedLevel> {
             .map(|pieces| SavedLevel {
                 pieces,
                 groups: Vec::new(),
+                grass: Vec::new(),
             })
     } else {
         serde_json::from_value::<SavedLevel>(value).ok()
@@ -178,8 +185,18 @@ pub struct SavedGroup {
     pub collapsed: bool,
 }
 
-/// One undo step. The object shape (rather than a bare array) lets groups and
-/// labels travel with the pieces they describe.
+/// One painted grass hex: axial coords plus density.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedGrass {
+    pub q: i32,
+    pub r: i32,
+    /// Paint density 1..=4; clamped on load.
+    pub density: u8,
+}
+
+/// One undo step. The object shape (rather than a bare array) lets groups,
+/// labels and grass travel with the pieces they describe.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedLevel {
@@ -187,6 +204,9 @@ pub struct SavedLevel {
     pub pieces: Vec<SavedPiece>,
     #[serde(default)]
     pub groups: Vec<SavedGroup>,
+    /// Grass at this history step. Missing on older saves, which grew none.
+    #[serde(default)]
+    pub grass: Vec<SavedGrass>,
 }
 
 impl From<&Group> for SavedGroup {
@@ -202,6 +222,12 @@ impl From<&Group> for SavedGroup {
 
 impl From<&LevelState> for SavedLevel {
     fn from(state: &LevelState) -> Self {
+        let mut grass: Vec<SavedGrass> = state
+            .grass
+            .iter()
+            .map(|(&(q, r), &density)| SavedGrass { q, r, density })
+            .collect();
+        grass.sort_by_key(|saved| (saved.q, saved.r));
         Self {
             pieces: state
                 .pieces
@@ -209,8 +235,21 @@ impl From<&LevelState> for SavedLevel {
                 .map(|piece| SavedPiece::from_piece(piece, &state.outline))
                 .collect(),
             groups: state.outline.groups.iter().map(SavedGroup::from).collect(),
+            grass,
         }
     }
+}
+
+/// Keep one painted hex per load: density clamped into range, zeroes dropped.
+fn validate_grass(saved: &[SavedGrass]) -> std::collections::HashMap<(i32, i32), u8> {
+    let mut grass = std::collections::HashMap::new();
+    for cell in saved {
+        if cell.density == 0 {
+            continue;
+        }
+        grass.insert((cell.q, cell.r), cell.density.clamp(1, 4));
+    }
+    grass
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -543,6 +582,8 @@ impl Snapshot {
             redo,
             next_id,
             platforms,
+            grass: validate_grass(&self.grass),
+            grass_slows: self.grass_slows,
         })
     }
 }
@@ -836,6 +877,8 @@ pub struct Loaded {
     pub redo: Vec<LevelState>,
     pub next_id: u32,
     pub platforms: Vec<SavedPlatform>,
+    pub grass: std::collections::HashMap<(i32, i32), u8>,
+    pub grass_slows: bool,
 }
 
 /// Accept as many saved groups as possible: duplicate/zero/conflicting ids and
@@ -909,7 +952,11 @@ fn validate_level(level: SavedLevel) -> Option<LevelState> {
         .membership
         .retain(|_, group| group_ids.contains(group));
     outline.bump();
-    Some(LevelState { pieces, outline })
+    Some(LevelState {
+        pieces,
+        outline,
+        grass: validate_grass(&level.grass),
+    })
 }
 
 fn validate_platform(saved: &SavedPlatform) -> Option<SavedPlatform> {
@@ -1135,17 +1182,31 @@ mod tests {
             redo: vec![SavedLevel {
                 pieces: vec![piece()],
                 groups: vec![],
+                grass: vec![SavedGrass {
+                    q: 1,
+                    r: 2,
+                    density: 3,
+                }],
             }],
             platforms: vec![],
+            grass: vec![SavedGrass {
+                q: 1,
+                r: 2,
+                density: 3,
+            }],
+            grass_slows: true,
         };
         let json = snapshot.to_json();
         assert!(json.contains("\"rotDeg\":30.0"), "{json}");
         assert!(json.contains("\"pitchDeg\":-15.0"), "{json}");
         assert!(json.contains("\"rollDeg\":10.0"), "{json}");
         assert!(json.contains("\"dynamic\":true"), "{json}");
+        assert!(json.contains("\"grassSlows\":true"), "{json}");
         assert_eq!(Snapshot::from_json(&json).unwrap(), snapshot);
 
         let loaded = Snapshot::from_json(&json).unwrap().validate().unwrap();
+        assert_eq!(loaded.grass.get(&(1, 2)), Some(&3));
+        assert!(loaded.grass_slows);
         let piece = loaded.pieces[0];
         assert!((piece.rot - 30.0_f32.to_radians()).abs() < 1e-5);
         assert!((piece.pitch - (-15.0_f32).to_radians()).abs() < 1e-5);
@@ -1403,15 +1464,18 @@ mod tests {
                 SavedLevel {
                     pieces: vec![saved(2, "block", 0.0, 0.0)],
                     groups: vec![],
+                    grass: vec![],
                 },
                 SavedLevel {
                     pieces: vec![bad],
                     groups: vec![],
+                    grass: vec![],
                 },
             ],
             redo: vec![SavedLevel {
                 pieces: vec![saved(3, "block", 0.0, 0.0)],
                 groups: vec![],
+                grass: vec![],
             }],
             ..Default::default()
         };
@@ -1430,10 +1494,12 @@ mod tests {
             undo: vec![SavedLevel {
                 pieces: vec![saved(7, "block", 0.0, 0.0)],
                 groups: vec![],
+                grass: vec![],
             }],
             redo: vec![SavedLevel {
                 pieces: vec![saved(9, "block", 0.0, 0.0)],
                 groups: vec![],
+                grass: vec![],
             }],
             ..Default::default()
         };
@@ -1446,6 +1512,7 @@ mod tests {
             .map(|i| SavedLevel {
                 pieces: vec![saved(i + 1, "block", 0.0, 0.0)],
                 groups: vec![],
+                grass: vec![],
             })
             .collect();
         let loaded = Snapshot {

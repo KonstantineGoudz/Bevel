@@ -9,6 +9,7 @@ mod physics;
 mod route;
 mod save;
 mod shooting;
+mod boot;
 mod state;
 mod touch;
 mod transform;
@@ -121,6 +122,8 @@ fn physics_app() -> App {
         pill_mat: Handle::default(),
         cone: Handle::default(),
         cone_mat: Handle::default(),
+        grass: Handle::default(),
+        grass_mats: [Handle::default(), Handle::default()],
         // Rapier takes half height first: capsule_y(half_height, radius).
         character_collider: Collider::capsule_y(PILL_CYLINDER * 0.5, PILL_RADIUS),
     });

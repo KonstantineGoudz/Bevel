@@ -734,11 +734,13 @@ pub(super) fn walk(
     }
     let sliding = character.sliding && slide_held && !taking_off;
     let airborne = !was_grounded && vy <= MAX_GROUNDED_RISE;
+    // Route pace drags in tall grass when the level opts in.
+    let pace = WALK_SPEED * grass_speed_factor(editor.grass_slows, &editor.grass, character.pos);
     if !airborne && !taking_off {
         // Leaving the ground with a jump keeps the run-up: a standing start
         // still needs a first step so the route does not hop in place.
         if hv.length() < 0.05 && direction != Vec2::ZERO {
-            hv = direction * WALK_SPEED.min(1.0);
+            hv = direction * pace.min(1.0);
         }
     }
     let mut motion = Motion {
@@ -757,9 +759,9 @@ pub(super) fn walk(
         rotation,
         filter,
         &mut motion,
-        direction * WALK_SPEED,
+        direction * pace,
         direction,
-        WALK_SPEED,
+        pace,
         was_grounded,
         taking_off,
         false,
@@ -874,6 +876,13 @@ pub(super) fn character_move(
     if editor.walk.is_some() {
         return;
     }
+    // Tall grass drags at the feet when the level opts in. Read before the
+    // mutable character borrow below so the two never overlap.
+    let slow = grass_speed_factor(
+        editor.grass_slows,
+        &editor.grass,
+        editor.character.map(|character| character.pos).unwrap_or(Vec2::ZERO),
+    );
     let Some(character) = editor.character.as_mut() else {
         return;
     };
@@ -908,7 +917,7 @@ pub(super) fn character_move(
     let direction = (forward * wish.y + right * wish.x).normalize_or_zero();
 
     let sprint = input.pressed(Action::Sprint) || touch.sprint;
-    let wish_speed = (if sprint { 5.5 } else { 2.8 }) * strength;
+    let wish_speed = (if sprint { 5.5 } else { 2.8 }) * strength * slow;
     let target = direction * wish_speed;
 
     // Split a long frame into short substeps. Under software rendering a frame

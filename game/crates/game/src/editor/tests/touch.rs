@@ -104,8 +104,12 @@ fn touch_buttons_include_plan_and_add() {
         Some(TouchAction::Course)
     );
     assert_eq!(
-        touch_action_at(Vec2::new(270.0, 25.0), css),
+        touch_action_at(Vec2::new(239.0, 25.0), css),
         Some(TouchAction::Plan)
+    );
+    assert_eq!(
+        touch_action_at(Vec2::new(275.0, 25.0), css),
+        Some(TouchAction::Grass)
     );
     assert_eq!(
         touch_action_at(Vec2::new(350.0, 25.0), css),
@@ -118,6 +122,10 @@ fn touch_buttons_include_plan_and_add() {
     assert_eq!(
         touch_action_at(Vec2::new(40.0, 100.0), css),
         Some(TouchAction::Add)
+    );
+    assert_eq!(
+        touch_action_at(Vec2::new(340.0, 100.0), css),
+        Some(TouchAction::GrassErase)
     );
 }
 
@@ -426,7 +434,7 @@ fn a_finger_can_grab_the_negative_end_of_an_axis() {
 
 #[test]
 fn the_pad_cluster_is_excluded_from_the_gizmo_fallback() {
-    // Bottom-right pads at right 16..178 / bottom 20..182 (layout px): the
+    // Bottom-right pads at right 16..264 / bottom 20..182 (layout px): the
     // raw-touch gizmo fallback must never steal their taps.
     let size = Vec2::new(390.0, 844.0);
     let s = 0.5;
@@ -440,6 +448,10 @@ fn the_pad_cluster_is_excluded_from_the_gizmo_fallback() {
         size,
         s
     ));
+    assert!(
+        over_pad_cluster(Vec2::new(390.0 - 130.0, 844.0 - 60.0), size, s),
+        "the C/Z column"
+    );
     assert!(!over_pad_cluster(Vec2::new(195.0, 420.0), size, s));
     assert!(!over_pad_cluster(
         Vec2::new(390.0 - 200.0, 844.0 - 200.0),

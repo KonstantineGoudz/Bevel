@@ -322,7 +322,7 @@
       <p class="control-hint">
         Click a binding, then press a key, a mouse button, or a gamepad button…
         Esc cancels. Left stick moves, right stick orbits, the wheel zooms.
-        The A/B/X/Y touch buttons are remapped in the Touch buttons section
+        The A/B/C/X/Y/Z touch buttons are remapped in the Touch buttons section
         below (tap Run/Slide to toggle them in game).
       </p>
       <p class="control-warning" id="controls-warning" role="alert" aria-live="polite"></p>
@@ -703,11 +703,14 @@
       const TOUCH_BUTTONS = [
         { id: "A", label: "Button A" },
         { id: "B", label: "Button B" },
+        { id: "C", label: "Button C" },
         { id: "X", label: "Button X" },
         { id: "Y", label: "Button Y" },
+        { id: "Z", label: "Button Z" },
       ];
-      // Touch-cluster targets. Jump and Interact fire once per tap; Run and
-      // Slide toggle until tapped again (the touch buttons have no release).
+      // Touch-cluster targets. Jump, Interact and Shoot fire once per tap;
+      // Run and Slide toggle until tapped again (the touch buttons have no
+      // release).
       const TOUCH_TARGETS = [
         { id: "jump", label: "Jump" },
         { id: "sprint", label: "Run (sprint)" },
@@ -716,7 +719,7 @@
         { id: "shoot", label: "Shoot cone" },
         { id: "none", label: "Disabled" },
       ];
-      const TOUCH_DEFAULTS = { A: "jump", B: "slide", X: "shoot", Y: "sprint" };
+      const TOUCH_DEFAULTS = { A: "jump", B: "slide", C: "interact", X: "shoot", Y: "sprint", Z: null };
       const TOUCH_TARGET_IDS = new Set(["jump", "sprint", "slide", "interact", "shoot"]);
 
       const controlsDialog = document.querySelector("#controls-dialog");
@@ -932,9 +935,12 @@
             option.textContent = target.label;
             select.append(option);
           }
-          select.value = controlTouch[button.id] ?? TOUCH_DEFAULTS[button.id];
+          const stored = (controlTouch && button.id in controlTouch)
+            ? controlTouch[button.id]
+            : TOUCH_DEFAULTS[button.id];
+          select.value = stored ?? "none";
           if (![...select.options].some((option) => option.value === select.value)) {
-            select.value = TOUCH_DEFAULTS[button.id];
+            select.value = TOUCH_DEFAULTS[button.id] ?? "none";
           }
           select.addEventListener("change", () => {
             controlTouch[button.id] = select.value === "none" ? null : select.value;
