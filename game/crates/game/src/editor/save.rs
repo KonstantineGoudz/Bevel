@@ -304,8 +304,18 @@ pub(super) fn autosave_session(
     mut last: ResMut<LastSaved>,
     mut clock: ResMut<SaveClock>,
     mut focus: MessageReader<WindowFocused>,
+    home: Option<Res<HomeMenu>>,
 ) {
+    // The home screen owns saving while open; autosave resumes in the editor.
+    if home_modal_open(home) {
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
     if editor.session.is_none() {
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if editor.level_name.is_none() {
         return;
     }
 
@@ -363,8 +373,13 @@ pub(super) fn persist(
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = (editor, orbit, movers);
-        Ok(())
+        let Some(name) = editor.level_name.as_deref() else {
+            return Err(session::StorageError::Unavailable);
+        };
+        let snapshot = editor.capture(orbit, movers);
+        crate::session::save_native_level(name, &snapshot)
+            .map(|_| ())
+            .map_err(|_| session::StorageError::Unavailable)
     }
 }
 
@@ -381,10 +396,11 @@ pub(super) fn save_shortcut(
     time: Res<Time>,
     focus: Res<InputFocus>,
     menu: Res<AddMenu>,
+    home: Option<Res<HomeMenu>>,
 ) {
-    // A focused text field (properties, Add-menu search) owns the keyboard:
-    // typing "s" there must not write level.json.
-    if focus.get().is_some() || menu.open {
+    // A focused text field (properties, Add-menu search, home name field)
+    // owns the keyboard: typing "s" there must not save.
+    if focus.get().is_some() || menu.open || home_modal_open(home) {
         return;
     }
     if input.just_pressed(Action::CopyJson) {
@@ -413,15 +429,18 @@ pub(super) fn save(
 ) {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let json = level_json(editor, orbit, movers);
-        let path = std::path::Path::new("level.json");
-        match std::fs::write(path, &json) {
-            Ok(()) => {
-                info!("saved {} pieces to level.json", editor.pieces.len());
+        let Some(name) = editor.level_name.clone() else {
+            editor.note = "no map open — open Maps to name it";
+            return;
+        };
+        let snapshot = editor.capture(orbit, movers);
+        match crate::session::save_native_level(&name, &snapshot) {
+            Ok(path) => {
+                info!("saved {} pieces to {}", editor.pieces.len(), path.display());
                 record_save_success(editor, orbit, last, clock, now);
-                editor.note = "saved level.json";
+                editor.note = "saved";
             }
-            Err(err) => warn!("could not save level.json: {err}"),
+            Err(error) => warn!("could not save level: {error}"),
         }
     }
 

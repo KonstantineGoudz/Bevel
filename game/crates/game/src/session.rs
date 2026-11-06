@@ -614,6 +614,353 @@ pub(crate) fn session_key(id: &str) -> String {
     format!("{SESSION_PREFIX}{id}.v1")
 }
 
+/// Directory holding native level files. Mirrors the MCP server: explicit
+/// `PARTY_DUNGEON_LEVELS_DIR`, else `game/levels` / `levels` under the cwd,
+/// else `game/levels` (created on save).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn levels_dir() -> std::path::PathBuf {
+    if let Ok(value) = std::env::var("PARTY_DUNGEON_LEVELS_DIR") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return std::path::PathBuf::from(trimmed);
+        }
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    for candidate in ["game/levels", "levels"] {
+        if cwd.join(candidate).is_dir() {
+            return cwd.join(candidate);
+        }
+    }
+    cwd.join("game/levels")
+}
+
+/// Where native control bindings live. Explicit `PARTY_DUNGEON_CONTROLS wins;
+/// otherwise a `controls.json` next to the levels dir (so a `game/levels`
+/// layout yields `game/controls.json`), falling back to the cwd.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn native_controls_path() -> std::path::PathBuf {
+    if let Ok(value) = std::env::var("PARTY_DUNGEON_CONTROLS") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return std::path::PathBuf::from(trimmed);
+        }
+    }
+    let dir = levels_dir();
+    if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+        parent.join("controls.json")
+    } else {
+        std::path::PathBuf::from("controls.json")
+    }
+}
+
+/// A level name is a safe file stem: letters, digits, `-`, `_`, `.`.
+pub fn sanitize_level_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return None;
+    }
+    if trimmed == "." || trimmed == ".." || trimmed.contains("..") {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
+/// Resolve a level name to its snapshot file. `None` means the default level.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn level_path_for(name: Option<&str>) -> Result<std::path::PathBuf, String> {
+    let default_name = std::env::var("PARTY_DUNGEON_LEVEL")
+        .ok()
+        .filter(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty()
+                && !trimmed.ends_with(".json")
+                && !trimmed.contains('/')
+                && !trimmed.contains('\\')
+        })
+        .unwrap_or_else(|| "level".to_owned());
+    let name = name
+        .map(sanitize_level_name)
+        .unwrap_or_else(|| sanitize_level_name(&default_name).or(Some("level".into())))
+        .ok_or_else(|| "invalid level name (use a-z, 0-9, '-', '_')".to_owned())?;
+    let mut file = name;
+    if !file.ends_with(".json") {
+        file.push_str(".json");
+    }
+    Ok(levels_dir().join(file))
+}
+
+/// One row for the native home screen / maps dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(not(target_arch = "wasm32"))]
+pub struct NativeLevel {
+    pub name: String,
+    pub pieces: usize,
+    pub has_character: bool,
+    pub unreadable: bool,
+}
+
+/// List snapshot files in the levels dir, sorted by name. Missing dir reads
+/// as empty; `.bak` files are skipped.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn list_native_levels() -> Vec<NativeLevel> {
+    let dir = levels_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("");
+        if stem.is_empty() || stem.ends_with(".bak") {
+            continue;
+        }
+        let name = stem.to_owned();
+        match std::fs::read_to_string(&path).ok().and_then(|text| {
+            parse_any_snapshot_text(&text)
+                .and_then(Snapshot::validate)
+                .ok()
+        }) {
+            Some(loaded) => out.push(NativeLevel {
+                name,
+                pieces: loaded.pieces.len(),
+                has_character: loaded.character.is_some(),
+                unreadable: false,
+            }),
+            None => out.push(NativeLevel {
+                name,
+                pieces: 0,
+                has_character: false,
+                unreadable: true,
+            }),
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Read one native level by name (or an explicit file path).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_native_level(name: &str) -> Result<Loaded, String> {
+    let path = if name.contains('/') || name.contains('\\') || name.ends_with(".json") {
+        std::path::PathBuf::from(name)
+    } else {
+        level_path_for(Some(name))?
+    };
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("could not read level: {error}"))?;
+    let display = path.display().to_string();
+    parse_any_snapshot_text(&text)
+        .and_then(|snapshot| snapshot.validate())
+        .map_err(|error| format!("{display}: {error:?}"))
+}
+
+/// Write a snapshot to the level file for `name`, creating the levels dir and
+/// keeping a `.bak` copy of the previous file.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_native_level(name: &str, snapshot: &Snapshot) -> Result<std::path::PathBuf, String> {
+    let path = level_path_for(Some(name))?;
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create levels dir: {error}"))?;
+    }
+    snapshot
+        .clone()
+        .validate()
+        .map_err(|error| format!("level failed validation: {error:?}"))?;
+    if path.exists() {
+        let backup = path.with_extension("json.bak");
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let _ = std::fs::write(&backup, text);
+        }
+    }
+    let pretty = serde_json::to_string_pretty(snapshot)
+        .map_err(|error| format!("could not serialize level: {error}"))?;
+    std::fs::write(&path, pretty).map_err(|error| format!("could not write level: {error}"))?;
+    Ok(path)
+}
+
+/// Delete a native level file by name.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn delete_native_level(name: &str) -> Result<(), String> {
+    let path = level_path_for(Some(name))?;
+    std::fs::remove_file(&path).map_err(|error| format!("could not delete level: {error}"))
+}
+
+/// Parse either a session Snapshot (v1) or the debug `level.json`
+/// (format `party-dungeon-level` v2) the game writes with `S` / CopyJson.
+pub fn parse_any_snapshot_text(text: &str) -> Result<Snapshot, LoadError> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+        if value.get("format").and_then(|v| v.as_str()) == Some("party-dungeon-level") {
+            return snapshot_from_level_json(&value)
+                .map_err(LoadError::Parse);
+        }
+    }
+    Snapshot::from_json(text)
+}
+
+/// Convert the debug `level.json` document into a session Snapshot.
+pub fn snapshot_from_level_json(doc: &serde_json::Value) -> Result<Snapshot, String> {
+    let get = |key: &str| doc.get(key);
+    let pieces = get("pieces")
+        .and_then(|v| v.as_array())
+        .ok_or("level.json: missing pieces array")?
+        .iter()
+        .map(saved_piece_from_level_json)
+        .collect::<Result<Vec<_>, _>>()?;
+    let groups = get("groups")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(|g| serde_json::from_value::<SavedGroup>(g.clone()))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("level.json: bad groups: {error}"))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let platforms = get("platforms")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(|p| serde_json::from_value::<SavedPlatform>(p.clone()))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("level.json: bad platforms: {error}"))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let character = get("character")
+        .map(|c| {
+            Ok::<_, String>(SavedCharacter {
+                x: c.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                z: c.get("z").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                feet: c.get("feet").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                yaw_deg: c.get("yawDeg").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                hp: c.get("hp").and_then(|v| v.as_f64()).map(|v| v as f32),
+                max_hp: c.get("maxHp").and_then(|v| v.as_f64()).map(|v| v as f32),
+            })
+        })
+        .transpose()?;
+    let camera = get("camera")
+        .map(|c| {
+            Ok::<_, String>(SavedCamera {
+                target_x: c.get("targetX").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                target_y: c.get("targetY").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                target_z: c.get("targetZ").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                yaw: c.get("yawDeg").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                pitch: c.get("pitchDeg").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                distance: c.get("distance").and_then(|v| v.as_f64()).unwrap_or(7.5) as f32,
+                mode: c
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("third")
+                    .to_owned(),
+            })
+        })
+        .transpose()?;
+    let next_id = get("nextId").and_then(|v| v.as_u64()).map(|v| v as u32);
+    Ok(Snapshot {
+        version: SNAPSHOT_VERSION,
+        next_id,
+        pieces,
+        character,
+        camera,
+        groups,
+        undo: Vec::new(),
+        redo: Vec::new(),
+        platforms,
+        grass: Vec::new(),
+        grass_slows: false,
+    })
+}
+
+fn saved_piece_from_level_json(item: &serde_json::Value) -> Result<SavedPiece, String> {
+    let f64_field = |key: &str, default: f64| item.get(key).and_then(|v| v.as_f64()).unwrap_or(default) as f32;
+    let shape = item
+        .get("shape")
+        .and_then(|v| v.as_str())
+        .ok_or("level.json piece: missing shape")?
+        .to_owned();
+    let id = item
+        .get("id")
+        .and_then(|v| v.as_u64())
+        .ok_or("level.json piece: missing id")? as u32;
+    Ok(SavedPiece {
+        id,
+        shape,
+        x: f64_field("x", 0.0),
+        z: f64_field("z", 0.0),
+        elevation: f64_field("y", 0.0),
+        rot_deg: f64_field("rotDeg", 0.0),
+        pitch_deg: f64_field("pitchDeg", 0.0),
+        roll_deg: f64_field("rollDeg", 0.0),
+        dynamic: item.get("dynamic").and_then(|v| v.as_bool()).unwrap_or(false),
+        damage: item.get("damage").and_then(|v| v.as_f64()).map(|v| v as f32),
+        interact: item
+            .get("interact")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_owned()),
+        trigger_width: item.get("triggerWidth").and_then(|v| v.as_f64()).map(|v| v as f32),
+        trigger_length: item.get("triggerLength").and_then(|v| v.as_f64()).map(|v| v as f32),
+        trigger_height: item.get("triggerHeight").and_then(|v| v.as_f64()).map(|v| v as f32),
+        trigger_shape: item
+            .get("triggerShape")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_owned()),
+        trigger_alpha: item.get("triggerAlpha").and_then(|v| v.as_f64()).map(|v| v as f32),
+        trigger_color: item
+            .get("triggerColor")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_owned()),
+        trigger_visible: item.get("triggerVisible").and_then(|v| v.as_bool()),
+        name: item.get("name").and_then(|v| v.as_str()).map(|s| s.to_owned()),
+        group: item.get("group").and_then(|v| v.as_u64()).map(|v| v as u32),
+        locked: item.get("locked").and_then(|v| v.as_bool()).unwrap_or(false),
+    })
+}
+
+/// Level file for native runs and the MCP bridge: `PARTY_DUNGEON_LEVEL` when
+/// it looks like a path, otherwise `--level <path>` / `--level=<path>`.
+pub fn level_file_from_env_or_args() -> Option<std::path::PathBuf> {
+    if let Ok(value) = std::env::var("PARTY_DUNGEON_LEVEL") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty()
+            && (trimmed.ends_with(".json") || trimmed.contains('/') || trimmed.contains('\\'))
+        {
+            return Some(std::path::PathBuf::from(trimmed));
+        }
+    }
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--level" {
+            if let Some(path) = args.next() {
+                return Some(std::path::PathBuf::from(path));
+            }
+        } else if let Some(rest) = arg.strip_prefix("--level=") {
+            return Some(std::path::PathBuf::from(rest));
+        }
+    }
+    None
+}
+
+/// Convert one saved piece into the game type (same rules as map loading).
+/// The bridge uses this for live `add_piece` / `update_piece`.
+pub(crate) fn piece_from_saved(saved: &SavedPiece) -> Result<Piece, LoadError> {
+    validate_piece(saved.clone())
+}
+
 pub fn parse_session_id(query: &str) -> Option<String> {
     query
         .strip_prefix('?')
@@ -631,6 +978,10 @@ pub struct Boot {
     /// True when the app should open the Rust/Bevy glTF viewer instead of the
     /// level editor (`viewer-bevy.html?viewer`, or `--viewer` on native).
     pub viewer: bool,
+    /// Native level name (file stem in the levels dir) and the file it was
+    /// loaded from. Wasm leaves both `None` and uses `id` instead.
+    pub level_name: Option<String>,
+    pub level_path: Option<std::path::PathBuf>,
 }
 
 /// The viewer is a separate Bevy path: `viewer-bevy.html?viewer` (or any query
@@ -681,8 +1032,43 @@ pub fn boot() -> Result<Boot, String> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn boot() -> Result<Boot, String> {
     let viewer = std::env::args().any(|arg| arg == "--viewer" || arg == "--view");
+    if viewer {
+        return Ok(Boot {
+            viewer: true,
+            ..Default::default()
+        });
+    }
+    // Native runs (and the MCP bridge) can open a snapshot file directly:
+    // `--level <path>` or `PARTY_DUNGEON_LEVEL=<path>`. Both the session
+    // Snapshot (v1) and the debug `level.json` (v2) load, so an `S`-saved
+    // file reopens.
+    if let Some(path) = level_file_from_env_or_args() {
+        match std::fs::read_to_string(&path) {
+            Ok(text) => match parse_any_snapshot_text(&text).and_then(Snapshot::validate) {
+                Ok(loaded) => {
+                    let name = path
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .map(str::to_owned);
+                    return Ok(Boot {
+                        id: None,
+                        loaded: Some(loaded),
+                        viewer: false,
+                        level_name: name,
+                        level_path: Some(path),
+                    });
+                }
+                Err(error) => {
+                    eprintln!("party-dungeon: ignoring {}: {error:?}", path.display());
+                }
+            },
+            Err(error) => {
+                eprintln!("party-dungeon: could not read {}: {error}", path.display());
+            }
+        }
+    }
     Ok(Boot {
-        viewer,
+        viewer: false,
         ..Default::default()
     })
 }

@@ -70,6 +70,15 @@ fn setup_spawns_the_palette_and_toolbars() {
     assert!(palette.contains(&PaletteAction::GrassErase));
     assert!(palette.contains(&PaletteAction::GrassSlow));
     assert!(palette.contains(&PaletteAction::Path));
+    assert!(
+        palette.contains(&PaletteAction::Home),
+        "palette has a Maps button for the native home screen"
+    );
+    assert_eq!(
+        world.query_filtered::<&HomeRoot, ()>().iter(world).count(),
+        1,
+        "native home overlay is spawned"
+    );
     // Exactly one grass options row and one path row.
     assert_eq!(
         world.query_filtered::<&GrassActions, ()>().iter(world).count(),
@@ -227,5 +236,64 @@ fn play_mode_with_grass_runs_without_panicking() {
     assert!(
         world.query::<&GrassTuft>().iter(world).count() > 0,
         "tufts render for painted hexes"
+    );
+}
+
+#[test]
+fn full_schedule_advances_a_bridge_style_walk() {
+    let mut app = boot_app();
+    app.update();
+    let start = Vec2::new(6.0, 0.0);
+    let end = Vec2::new(-3.0, 0.0);
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: start,
+            feet: 0.0,
+            yaw: 0.0,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            sliding: false,
+            health: crate::statuses::Health::default(),
+        });
+        let mut plan = Plan::default();
+        plan.append(end, model::pixel_to_hex(end), 0.0);
+        editor.plan = Some(plan);
+        editor.route = Some(Route {
+            track: path::Track::new(vec![start, end]),
+            trail: Vec::new(),
+            line: Vec::new(),
+            distances: vec![start.distance(end)],
+            controls: vec![path::AnchorControls {
+                incoming: None,
+                outgoing: None,
+            }],
+            valid: true,
+            hexes: 9,
+        });
+        editor.walk = Some(Walk {
+            distance: 0.0,
+            stuck: 0.0,
+        });
+    }
+    for _ in 0..60 {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(16));
+        app.update();
+    }
+    let editor = app.world().resource::<Editor>();
+    let pos = editor.character.expect("character").pos;
+    // Headless frames advance almost no real time, so each step is tiny —
+    // but the schedule must still move the walker forward monotonically.
+    assert!(
+        pos.distance(start) > 0.02,
+        "the full schedule should walk the character, pos={pos:?}"
+    );
+    assert!(
+        editor.walk.is_some(),
+        "a 9 m route is still in progress after a few centimetres"
     );
 }

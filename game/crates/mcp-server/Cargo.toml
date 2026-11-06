@@ -1,0 +1,23 @@
+[package]
+name = "party-dungeon-mcp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "MCP server for Party Dungeon: query level data, edit pieces, plan paths, control the player."
+default-run = "party-dungeon-mcp"
+
+[[bin]]
+name = "party-dungeon-mcp"
+path = "src/main.rs"
+
+[dependencies]
+party-dungeon = { path = "../game" }
+rmcp = { version = "3", features = ["server", "transport-io", "schemars"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "io-std", "net", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+anyhow = "1"
+# Same math types the game uses (bevy re-exports this exact crate), without
+# pulling the whole engine into the MCP server.
+bevy_math = "=0.20.0"

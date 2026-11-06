@@ -11,12 +11,12 @@ mod controls_codes;
 mod editor;
 pub mod locomotion;
 mod mesh;
-mod model;
-mod path;
+pub mod model;
+pub mod path;
 mod path_edit;
-mod platforms;
+pub mod platforms;
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-mod session;
+pub mod session;
 pub mod statuses;
 mod viewer;
 

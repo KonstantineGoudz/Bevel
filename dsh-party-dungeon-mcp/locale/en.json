@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Party Dungeon MCP",
+    "description": "Connects the Party Dungeon level-editor MCP server (stdio) so the agent can query levels, edit pieces, plan routes, and control the player."
+  }
+}

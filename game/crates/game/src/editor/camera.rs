@@ -117,10 +117,16 @@ pub(super) fn camera_control(
     mut wheel: MessageReader<MouseWheel>,
     window: Single<&Window, With<PrimaryWindow>>,
     input_focus: Res<InputFocus>,
-    menu: Res<AddMenu>,
+    gates: MenuHome,
     outliner: Res<OutlinerState>,
     panel_state: Res<PropertiesPanelState>,
 ) {
+    // The native home screen owns the camera while open.
+    if home_modal_open(gates.home) {
+        motion.read().for_each(drop);
+        wheel.read().for_each(drop);
+        return;
+    }
     // The modal transform, a focused property field, or a pointer over the
     // property panel owns the mouse. Drain the deltas so the camera does not
     // jump when editing ends.
@@ -178,7 +184,7 @@ pub(super) fn camera_control(
     // The Add menu owns single-letter shortcuts while open: typing "v" or "f"
     // in the search must not cycle the view or refocus it. (Chords are
     // modifier-exact, so remapped Ctrl-combos stay disjoint regardless.)
-    if !menu.open {
+    if !gates.menu.open {
         if input.just_pressed(Action::CycleView) {
             cycle_view(&mut orbit, &editor);
         }
@@ -282,7 +288,7 @@ pub(super) fn camera_control(
 
     // Gamepad right stick orbits (or looks, in first person). Standard fixed
     // layout; the stick itself is not remappable, only the buttons are.
-    if !menu.open && input_focus.get().is_none() {
+    if !gates.menu.open && input_focus.get().is_none() {
         let stick = input.camera_stick();
         if stick != Vec2::ZERO {
             let dt = time.delta_secs().clamp(0.0, 0.25);

@@ -20,10 +20,15 @@ pub(super) fn on_palette_activate(
     rapier: ReadRapierContext,
     player: Query<Entity, With<CharacterVisual>>,
     movers: Res<Movers>,
+    mut home: ResMut<HomeMenu>,
 ) {
     // While the pointer is captured the mouse only looks; Tab must release it
     // before a button can be used.
     if capture.grabbed || editor.keyboard_transform.is_some() {
+        return;
+    }
+    // The home overlay owns every click while open.
+    if home.open {
         return;
     }
     let Ok(button) = buttons.get(event.entity) else {
@@ -162,6 +167,16 @@ pub(super) fn on_palette_activate(
             copy_level_json(&mut editor, &orbit, &movers, &mut clipboard);
             // Copying is not an authoring action: keep the current selection
             // and tool so the debug copy does not disturb what was on screen.
+            return;
+        }
+        PaletteAction::Home => {
+            open_home(&mut home);
+            home.status = current_level_note(&editor);
+            home.dirty = home.dirty.wrapping_add(1);
+            #[cfg(target_arch = "wasm32")]
+            {
+                editor.note = "maps live on the browser home page";
+            }
             return;
         }
     }
@@ -318,7 +333,7 @@ pub(super) fn interact(
     touch: Res<TouchState>,
     gesture: Res<PathGesture>,
     nav: Res<Nav>,
-    menu: Res<AddMenu>,
+    gates: MenuHome,
     outliner: Res<OutlinerState>,
     panel_state: Res<PropertiesPanelState>,
     camera: Single<(&Camera, &Transform), Without<MinimapCamera>>,
@@ -347,7 +362,12 @@ pub(super) fn interact(
 
     // The Add menu is modal: choosing (or dismissing) it must never also
     // place, select or drag a piece on the same click.
-    if menu.open {
+    if gates.menu.open {
+        return;
+    }
+
+    // The native home screen owns the canvas while open.
+    if home_modal_open(gates.home) {
         return;
     }
 

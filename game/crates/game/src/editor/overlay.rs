@@ -34,6 +34,7 @@ pub(super) fn update_palette(
             PaletteAction::GrassSlow => editor.grass_slows,
             PaletteAction::Course => false,
             PaletteAction::CopyJson => false,
+            PaletteAction::Home => false,
         };
         bg.0 = if on { BUTTON_ON } else { BUTTON_BG };
         *border = BorderColor::all(if on { BORDER_ON } else { BORDER });

@@ -1089,7 +1089,8 @@ impl Controls {
         Some(controls)
     }
 
-    /// Load persisted bindings (browser storage on web), else defaults.
+    /// Load persisted bindings (browser storage on web, `controls.json` on
+    /// native), else defaults.
     pub fn load() -> Self {
         #[cfg(target_arch = "wasm32")]
         {
@@ -1097,8 +1098,29 @@ impl Controls {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            Self::with_defaults()
+            Self::load_from_file().unwrap_or_else(Self::with_defaults)
         }
+    }
+
+    /// Persist native bindings to `controls.json`. Wasm keeps editing
+    /// storage directly from the home-screen JS, so this is native-only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn save_native(&self) -> Result<std::path::PathBuf, String> {
+        let path = crate::session::native_controls_path();
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("could not create config dir: {error}"))?;
+        }
+        std::fs::write(&path, self.to_json())
+            .map_err(|error| format!("could not write controls: {error}"))?;
+        Ok(path)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_from_file() -> Option<Self> {
+        let path = crate::session::native_controls_path();
+        let json = std::fs::read_to_string(path).ok()?;
+        Self::from_json(&json)
     }
 
     #[cfg(target_arch = "wasm32")]

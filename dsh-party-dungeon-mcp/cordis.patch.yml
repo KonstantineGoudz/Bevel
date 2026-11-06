@@ -1,0 +1,12 @@
+- insert:
+    - id: party-dungeon-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: party-dungeon
+        transport: stdio
+        command: /home/kon/dev/bevy/game/target/release/party-dungeon-mcp
+        cwd: /home/kon/dev/bevy/game
+        env:
+          PARTY_DUNGEON_LEVELS_DIR: /home/kon/dev/bevy/game/levels
+          PARTY_DUNGEON_BRIDGE: 127.0.0.1:3559
+        failOnStartupError: true

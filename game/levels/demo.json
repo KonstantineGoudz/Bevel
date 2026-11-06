@@ -1,0 +1,196 @@
+{
+  "version": 1,
+  "nextId": 14,
+  "pieces": [
+    {
+      "id": 1,
+      "shape": "floor",
+      "x": 1.039,
+      "z": -1.8,
+      "elevation": 0.0,
+      "rotDeg": 0.0,
+      "pitchDeg": 0.0,
+      "rollDeg": 0.0,
+      "dynamic": false
+    },
+    {
+      "id": 2,
+      "shape": "floor",
+      "x": 0.0,
+      "z": 0.0,
+      "elevation": 0.0,
+      "rotDeg": 0.0,
+      "pitchDeg": 0.0,
+      "rollDeg": 0.0,
+      "dynamic": false
+    },
+    {
+      "id": 3,
+      "shape": "floor",
+      "x": 2.078,
+      "z": 0.0,
+      "elevation": 0.0,
+      "rotDeg": 0.0,
+      "pitchDeg": 0.0,
+      "rollDeg": 0.0,
+      "dynamic": false
+    },
+    {
+      "id": 4,
+      "shape": "floor",
+      "x": -1.039,
+      "z": 1.8,
+      "elevation": 0.0,
+      "rotDeg": 0.0,
+      "pitchDeg": 0.0,
+      "rollDeg": 0.0,
+      "dynamic": false
+    },
+    {
+      "id": 5,
+      "shape": "floor",
+      "x": 1.039,
+      "z": 1.8,
+      "elevation": 0.0,
+      "rotDeg": 0.0,
+      "pitchDeg": 0.0,
+      "rollDeg": 0.0,
+      "dynamic": false
+    },
+    {
+      "id": 6,
+      "shape": "ramp",
+      "x": 4.157,
+      "z": 0.0,
+      "elevation": 0.0,
+      "rotDeg": 270.0,
+      "pitchDeg": 0.0,
+      "rollDeg": 0.0,
+      "dynamic": false
+    },
+    {
+      "id": 7,
+      "shape": "brazier",
+      "x": -2.078,
+      "z": 0.0,
+      "elevation": 0.0,
+      "rotDeg": 0.0,
+      "pitchDeg": 0.0,
+      "rollDeg": 0.0,
+      "dynamic": false
+    },
+    {
+      "id": 8,
+      "shape": "floor",
+      "x": -1.039,
+      "z": -1.8,
+      "elevation": 0.0,
+      "rotDeg": 0.0,
+      "pitchDeg": 0.0,
+      "rollDeg": 0.0,
+      "dynamic": false
+    },
+    {
+      "id": 9,
+      "shape": "chest",
+      "x": 6.235,
+      "z": 0.0,
+      "elevation": 0.9,
+      "rotDeg": 0.0,
+      "pitchDeg": 0.0,
+      "rollDeg": 0.0,
+      "dynamic": false
+    },
+    {
+      "id": 10,
+      "shape": "block",
+      "x": 6.235,
+      "z": 0.0,
+      "elevation": 0.0,
+      "rotDeg": 0.0,
+      "pitchDeg": 0.0,
+      "rollDeg": 0.0,
+      "dynamic": false
+    },
+    {
+      "id": 11,
+      "shape": "wall",
+      "x": 2.1,
+      "z": 3.0,
+      "elevation": 0.0,
+      "rotDeg": 0.0,
+      "pitchDeg": 0.0,
+      "rollDeg": 0.0,
+      "dynamic": false
+    },
+    {
+      "id": 12,
+      "shape": "spikes",
+      "x": 3.118,
+      "z": 1.8,
+      "elevation": 0.0,
+      "rotDeg": 0.0,
+      "pitchDeg": 0.0,
+      "rollDeg": 0.0,
+      "dynamic": false
+    },
+    {
+      "id": 13,
+      "shape": "floor",
+      "x": -2.078,
+      "z": 0.0,
+      "elevation": 0.0,
+      "rotDeg": 0.0,
+      "pitchDeg": 0.0,
+      "rollDeg": 0.0,
+      "dynamic": false
+    }
+  ],
+  "character": {
+    "x": 0.0,
+    "z": 0.0,
+    "feet": 0.0,
+    "yawDeg": 90.0,
+    "hp": 100.0,
+    "maxHp": 100.0
+  },
+  "camera": null,
+  "groups": [],
+  "undo": [],
+  "redo": [],
+  "platforms": [
+    {
+      "piece": 10,
+      "mode": "pingpong",
+      "speed": 1.5,
+      "paused": false,
+      "waypoints": [
+        {
+          "x": 0.0,
+          "z": -4.0,
+          "incoming": null,
+          "outgoing": null
+        },
+        {
+          "x": 0.0,
+          "z": 4.0,
+          "incoming": null,
+          "outgoing": null
+        }
+      ]
+    }
+  ],
+  "grass": [
+    {
+      "q": 0,
+      "r": 1,
+      "density": 2
+    },
+    {
+      "q": 1,
+      "r": 0,
+      "density": 3
+    }
+  ],
+  "grassSlows": true
+}

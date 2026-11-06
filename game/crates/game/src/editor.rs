@@ -123,11 +123,12 @@ impl Plugin for EditorPlugin {
             .init_resource::<OutlinerState>()
             .init_resource::<OutlinerEdit>()
             .init_resource::<PropertiesPanelState>()
+            .init_resource::<HomeMenu>()
             // Remappable controls, loaded from browser storage on web.
             .insert_resource(crate::controls::Controls::load())
             .add_systems(
                 Startup,
-                (load_session, setup, setup_wasm_text_input).chain(),
+                (load_session, setup, setup_wasm_text_input, setup_bridge).chain(),
             )
             .add_systems(
                 Update,
@@ -193,6 +194,7 @@ impl Plugin for EditorPlugin {
                     sync_outliner_fields,
                     update_outliner_rows,
                     outliner_scroll,
+                    update_home_capture,
                 )
                     .chain()
                     .after(sync_visuals),
@@ -220,9 +222,26 @@ impl Plugin for EditorPlugin {
                     .chain()
                     .after(sync_visuals),
             )
+            // Native home screen (maps + controls). Its own chain so the
+            // editor chains stay under Bevy's tuple limit.
+            .add_systems(
+                Update,
+                (sync_home_menu, sync_home_name_field)
+                    .chain()
+                    .after(sync_visuals),
+            )
+            // Live MCP bridge: drain commands before the minimap/visuals read
+            // the editor, then publish the fresh snapshot.
+            .add_systems(
+                Update,
+                (bridge_drain, bridge_publish)
+                    .chain()
+                    .after(autosave_session),
+            )
             .add_observer(on_palette_activate)
             .add_observer(on_touch_button)
-            .add_observer(on_add_menu_item);
+            .add_observer(on_add_menu_item)
+            .add_observer(on_home_button);
     }
 }
 
@@ -233,6 +252,10 @@ impl Plugin for EditorPlugin {
 #[derive(Resource)]
 struct Editor {
     session: Option<String>,
+    /// Native level name (file stem in the levels dir) and the file it was
+    /// loaded from. Wasm leaves both `None` and uses `session` instead.
+    level_name: Option<String>,
+    level_path: Option<std::path::PathBuf>,
     pieces: Vec<Piece>,
     /// User labels, groups, and group membership layered over the pieces.
     outline: SceneOutline,
@@ -319,6 +342,8 @@ impl Default for Editor {
     fn default() -> Self {
         Self {
             session: None,
+            level_name: None,
+            level_path: None,
             pieces: Vec::new(),
             outline: SceneOutline::default(),
             tool: None,
@@ -961,6 +986,9 @@ enum PaletteAction {
     Course,
     /// Copy the level JSON for debugging. This is not a level edit.
     CopyJson,
+    /// Open the native home screen (maps + settings). Native-only UI; the
+    /// button is hidden on wasm, where the browser provides the home page.
+    Home,
 }
 
 #[derive(Component)]
@@ -1069,6 +1097,7 @@ struct Kit {
 }
 
 mod add_menu;
+mod bridge;
 mod camera;
 mod colliders;
 mod draw;
@@ -1076,6 +1105,7 @@ mod editing;
 mod gizmo;
 mod grass;
 mod hazards;
+mod home;
 mod hud;
 mod input;
 mod interacts;
@@ -1097,6 +1127,7 @@ mod visuals;
 mod walking;
 
 use add_menu::*;
+use bridge::*;
 use camera::*;
 use colliders::*;
 use draw::*;
@@ -1104,6 +1135,7 @@ use editing::*;
 use gizmo::*;
 use grass::*;
 use hazards::*;
+use home::*;
 use hud::*;
 use input::*;
 use interacts::*;

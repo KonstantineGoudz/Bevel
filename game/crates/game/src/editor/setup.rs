@@ -32,13 +32,18 @@ pub(super) fn load_session(
     mut editor: ResMut<Editor>,
     mut orbit: ResMut<Orbit>,
     mut movers: ResMut<Movers>,
+    mut home: ResMut<HomeMenu>,
 ) {
     let Some(boot) = boot else {
         return;
     };
-    if let (Some(id), Some(loaded)) = (&boot.id, boot.loaded.clone()) {
+    // Native `--level` boots carry a map but no browser-session id; apply
+    // whenever a map was loaded.
+    if let Some(loaded) = boot.loaded.clone() {
         let had_camera = loaded.camera.is_some();
-        editor.session = Some(id.clone());
+        editor.session = boot.id.clone();
+        editor.level_name = boot.level_name.clone();
+        editor.level_path = boot.level_path.clone();
         editor.apply_loaded(&mut orbit, &mut movers, loaded);
         // If the saved camera was missing or looks at empty space, frame the
         // level so a newly opened map doesn't start on a black void. The user
@@ -72,6 +77,23 @@ pub(super) fn load_session(
                 orbit.distance = orbit.distance.max(12.0).min(30.0);
             }
         }
+    }
+    // Native boots without `--level` land on the home screen so maps and
+    // settings are reachable. A `--level` boot goes straight into the editor.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if boot.loaded.is_none() {
+            home.open = true;
+            home.status = "pick a map, or create one".to_owned();
+            home.pending_name = String::new();
+            home.dirty = home.dirty.wrapping_add(1);
+        } else if let Some(name) = editor.level_name.clone() {
+            home.pending_name = name;
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = &mut home;
     }
 }
 
@@ -245,17 +267,20 @@ pub(super) fn setup(
         ))
         .id();
 
-    // A single Play button shares the COMPONENTS heading row so starting play
-    // costs no extra vertical space in the narrow panel.
+    // Play + Maps share the COMPONENTS heading row so starting play costs
+    // no extra vertical space. Maps opens the native home screen (levels +
+    // controls); on wasm it just notes that the browser page owns maps.
     let mode_row = commands
         .spawn(Node {
-            width: px(64),
+            width: px(132),
             flex_direction: FlexDirection::Row,
+            column_gap: px(4),
             ..default()
         })
         .id();
     let play = palette_compact_button(&mut commands, PaletteAction::Play, "Play");
-    commands.entity(mode_row).add_child(play);
+    let maps = palette_compact_button(&mut commands, PaletteAction::Home, "Maps");
+    commands.entity(mode_row).add_children(&[play, maps]);
 
     let header = commands
         .spawn(Node {
@@ -447,6 +472,7 @@ pub(super) fn setup(
     spawn_object_graph(&mut commands);
     spawn_character_status(&mut commands);
     spawn_add_menu(&mut commands);
+    spawn_home_menu(&mut commands);
 }
 
 /// The phone layout: a toolbar, a shape carousel, a thumbstick and a jump
