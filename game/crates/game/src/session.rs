@@ -1026,6 +1026,7 @@ pub fn boot() -> Result<Boot, String> {
         id: Some(id),
         loaded: Some(loaded),
         viewer: false,
+        ..Default::default()
     })
 }
 
