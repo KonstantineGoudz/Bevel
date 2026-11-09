@@ -21,4 +21,10 @@ wasm-bindgen \
   --target web \
   "target/wasm32-unknown-unknown/$PROFILE/party_dungeon.wasm"
 
-echo "Built web/pkg ($PROFILE) — run ./scripts/serve-web.sh and open http://localhost:8082/"
+# Ship the runtime assets next to the page. Bevy's default asset root is
+# `assets/`, so the browser fetches `/assets/character.glb` while native runs
+# read `game/assets/character.glb` from the crate's working directory.
+rm -rf web/assets
+cp -R assets web/assets
+
+echo "Built web/pkg ($PROFILE) and web/assets — run ./scripts/serve-web.sh and open http://localhost:8082/"

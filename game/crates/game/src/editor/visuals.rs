@@ -114,6 +114,7 @@ pub(super) fn sync_visuals(
     editor: Res<Editor>,
     orbit: Res<Orbit>,
     kit: Res<Kit>,
+    model: Option<Res<super::character::CharacterModel>>,
     movers: Res<Movers>,
     mut visuals: ResMut<Visuals>,
     mut transforms: Query<&mut Transform, Or<(With<PieceVisual>, With<CharacterVisual>)>>,
@@ -273,7 +274,9 @@ pub(super) fn sync_visuals(
         }
     }
 
-    // The character: one capsule, hidden while you are inside it.
+    // The character: the physics capsule root is invisible; the animated glTF
+    // avatar follows it as a sibling (spawned by `character::sync_character_avatar`).
+    // A collider mesh authored in the file replaces the capsule shape.
     if let Some(character) = editor.character {
         let entity = match visuals.character {
             Some(entity) => entity,
@@ -283,6 +286,10 @@ pub(super) fn sync_visuals(
                     character.feet + PILL_HALF,
                     character.pos.y,
                 );
+                let collider = model
+                    .as_ref()
+                    .and_then(|model| model.spec.collider.clone())
+                    .unwrap_or_else(|| kit.character_collider.clone());
                 let entity = commands
                     .spawn((
                         CharacterVisual,
@@ -290,9 +297,7 @@ pub(super) fn sync_visuals(
                         // the position-based variant matches the old Kinematic
                         // (which we move by hand, never by physics forces).
                         RigidBody::KinematicPositionBased,
-                        kit.character_collider.clone(),
-                        Mesh3d(kit.pill.clone()),
-                        MeshMaterial3d(kit.pill_mat.clone()),
+                        collider,
                         transform,
                     ))
                     .id();

@@ -128,7 +128,14 @@ impl Plugin for EditorPlugin {
             .insert_resource(crate::controls::Controls::load())
             .add_systems(
                 Startup,
-                (load_session, setup, setup_wasm_text_input, setup_bridge).chain(),
+                (
+                    character::load_character_model,
+                    load_session,
+                    setup,
+                    setup_wasm_text_input,
+                    setup_bridge,
+                )
+                    .chain(),
             )
             .add_systems(
                 Update,
@@ -183,6 +190,28 @@ impl Plugin for EditorPlugin {
                     .chain()
                     .after(refresh_route),
             )
+            // Character model + animation. Its own chain so the editor's
+            // tuples stay under Bevy's limit; it runs after `sync_visuals` has
+            // spawned or despawned the capsule root.
+            .add_systems(
+                Update,
+                (
+                    character::inspect_character_model,
+                    character::sync_character_avatar,
+                    character::wire_character_animation,
+                    character::mark_animation_root,
+                    character::hide_collider_meshes,
+                    character::drive_character_animation,
+                )
+                    .chain()
+                    .after(sync_visuals),
+            )
+            .add_systems(
+                PostUpdate,
+                character::pin_animation_root
+                    .after(bevy::app::AnimationSystems)
+                    .before(bevy::transform::TransformSystems::Propagate),
+            )
             .add_systems(
                 Update,
                 (
@@ -217,6 +246,7 @@ impl Plugin for EditorPlugin {
                     update_character_status,
                     sync_grass,
                     draw,
+                    draw_view_cone,
                     autosave_session,
                 )
                     .chain()
@@ -242,6 +272,8 @@ impl Plugin for EditorPlugin {
             .add_observer(on_touch_button)
             .add_observer(on_add_menu_item)
             .add_observer(on_home_button);
+
+        minimap::configure_minimap_gizmos(app);
     }
 }
 
@@ -1074,6 +1106,8 @@ struct TouchStatus;
 struct Visuals {
     map: HashMap<u32, Entity>,
     character: Option<Entity>,
+    /// The glTF avatar that follows the capsule root.
+    character_avatar: Option<Entity>,
 }
 
 /// Meshes and materials, built once at startup.
@@ -1099,6 +1133,7 @@ struct Kit {
 mod add_menu;
 mod bridge;
 mod camera;
+mod character;
 mod colliders;
 mod draw;
 mod editing;

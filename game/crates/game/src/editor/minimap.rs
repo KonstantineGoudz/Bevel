@@ -2,9 +2,12 @@
 //!
 //! Visible only in Play. Drag the map to pan, roll the wheel over it to
 //! zoom, click it to route / add a waypoint, drag a waypoint dot to move it.
-//! The main canvas ignores presses inside the minimap rect; the observers
-//! below own that corner instead.
+//! The two buttons below the map recenter it and toggle follow mode, which
+//! keeps the view centered on the character. In first person a view cone
+//! shows where the camera is looking. The main canvas ignores presses
+//! inside the minimap rect; the observers below own that corner instead.
 
+use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{OrthographicProjection, ScalingMode, Viewport};
 
 use super::*;
@@ -19,13 +22,27 @@ pub(super) const MINIMAP_MAX_HALF: f32 = 40.0;
 /// Camera altitude in metres; the projection is orthographic so this only
 /// needs to clear the tallest piece.
 const MINIMAP_HEIGHT: f32 = 60.0;
+/// Chrome shared by the buttons under the map. Follow mode swaps these for
+/// the editor's amber "on" colors in `sync_minimap`.
+const MINIMAP_BUTTON_BG: Color = Color::srgba(0.06, 0.08, 0.11, 0.75);
+const MINIMAP_BUTTON_BORDER: Color = Color::srgba(0.5, 0.7, 0.85, 0.25);
+/// Layer used by overlays that belong to the minimap only. The minimap
+/// camera renders layers 0 and this one; the main camera renders only 0.
+const MINIMAP_LAYER: usize = 1;
+/// First-person view fan: half of a 60 degree field of view, eight metres
+/// out. Drawn on the ground under the character while in first person.
+const VIEW_CONE_HALF_ANGLE: f32 = std::f32::consts::PI / 6.0;
+const VIEW_CONE_RANGE: f32 = 8.0;
+const VIEW_CONE_EDGE: Color = Color::srgba(0.42, 0.78, 1.0, 0.8);
+const VIEW_CONE_CORE: Color = Color::srgba(0.72, 0.92, 1.0, 0.95);
+const VIEW_CONE_FILL: Color = Color::srgba(0.42, 0.78, 1.0, 0.16);
 
 /// Marker for the top-down minimap camera. Main-camera queries exclude it
 /// with `Without<MinimapCamera>` so they keep working unchanged.
 #[derive(Component)]
 pub(super) struct MinimapCamera;
 
-/// Root of the minimap UI (frame + recenter). It carries no `InputLayer` so
+/// Root of the minimap UI (frame + toolbar). It carries no `InputLayer` so
 /// one instance serves desktop and touch; `sync_minimap` toggles it.
 #[derive(Component)]
 pub(super) struct MinimapUi;
@@ -40,6 +57,17 @@ pub(super) struct MinimapFrame;
 /// clicks never double as map clicks.
 #[derive(Component)]
 pub(super) struct MinimapRecenter;
+
+/// Toggle that keeps the map centered on the character. Sits in the same
+/// toolbar row as [`MinimapRecenter`], also outside the map's hit rect.
+#[derive(Component)]
+pub(super) struct MinimapFollow;
+
+/// Gizmo group for minimap-only overlays. Its render layer keeps the view
+/// cone out of the main camera.
+#[derive(Default, Reflect, GizmoConfigGroup)]
+#[reflect(Default)]
+pub(super) struct MinimapGizmos;
 
 /// One in-flight minimap press.
 #[derive(Clone, Copy)]
@@ -56,6 +84,9 @@ pub(super) struct Minimap {
     handle: Option<PathHandle>,
     moved: f32,
     ready: bool,
+    /// Keep `center` on the character every frame. Panning the map or
+    /// pressing the recenter button turns this off.
+    follow: bool,
 }
 
 impl Default for Minimap {
@@ -67,6 +98,7 @@ impl Default for Minimap {
             handle: None,
             moved: 0.0,
             ready: false,
+            follow: false,
         }
     }
 }
@@ -117,6 +149,11 @@ pub(super) fn pan_center(center: Vec2, delta: Vec2, edge: f32, half: f32) -> Vec
     center - delta * (2.0 * half / edge)
 }
 
+/// Where follow mode looks this frame, if there is a character to follow.
+pub(super) fn follow_center(editor: &Editor) -> Option<Vec2> {
+    editor.character.map(|character| character.pos)
+}
+
 /// Where the minimap looks when (re)opened: the character, else the level
 /// centroid, else the origin.
 pub(super) fn default_center(editor: &Editor) -> Vec2 {
@@ -155,6 +192,29 @@ pub(super) fn fit_half_extent(editor: &Editor) -> f32 {
     (span * 0.5 + 3.0).clamp(MINIMAP_MIN_HALF, MINIMAP_MAX_HALF)
 }
 
+/// Ground-plane fan for the first-person view: the origin, the far arc
+/// (sampled from one edge to the other) and the centreline endpoint.
+pub(super) fn view_cone(
+    pos: Vec2,
+    y: f32,
+    yaw: f32,
+    half_angle: f32,
+    range: f32,
+) -> (Vec3, Vec<Vec3>, Vec3) {
+    const STEPS: usize = 16;
+    let origin = Vec3::new(pos.x, y, pos.y);
+    let direction = |angle: f32| Vec3::new(-angle.sin(), 0.0, -angle.cos());
+    let arc = (0..=STEPS)
+        .map(|i| {
+            let t = i as f32 / STEPS as f32;
+            let angle = yaw - half_angle + 2.0 * half_angle * t;
+            origin + direction(angle) * range
+        })
+        .collect();
+    let centre = origin + direction(yaw) * range;
+    (origin, arc, centre)
+}
+
 /// Raycast the minimap ray against the level, like `surface_target` but from
 /// an explicit ray instead of the main cursor.
 fn minimap_surface(
@@ -174,10 +234,30 @@ fn minimap_surface(
 // Setup
 // ---------------------------------------------------------------------------
 
+/// Register the minimap-only gizmo group before the draw system runs, so
+/// `Gizmos<MinimapGizmos>` has its storage and render-layer config.
+pub(super) fn configure_minimap_gizmos(app: &mut App) {
+    app.insert_gizmo_config(
+        MinimapGizmos,
+        GizmoConfig {
+            render_layers: RenderLayers::layer(MINIMAP_LAYER),
+            // The cone is an overlay, not part of the level: keep it over
+            // walls and ramps instead of letting geometry hide it.
+            depth_bias: -1.0,
+            line: GizmoLineConfig {
+                width: 2.5,
+                ..default()
+            },
+            ..default()
+        },
+    );
+}
+
 pub(super) fn spawn_minimap(commands: &mut Commands) {
     commands.spawn((
         MinimapCamera,
         Camera3d::default(),
+        RenderLayers::from_layers(&[0, MINIMAP_LAYER]),
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical {
                 viewport_height: 2.0,
@@ -248,14 +328,44 @@ pub(super) fn spawn_minimap(commands: &mut Commands) {
         .observe(on_minimap_drag_end)
         .observe(on_minimap_cancel);
 
-    let recenter = commands
+    // One row under the map keeps the buttons together however wide their
+    // labels get. Both stay below the frame, so their presses are never map
+    // presses.
+    let toolbar = commands
         .spawn((
-            MinimapRecenter,
-            Button,
+            Pickable::IGNORE,
             Node {
                 position_type: PositionType::Absolute,
                 right: px(MINIMAP_RIGHT),
                 top: px(MINIMAP_TOP + MINIMAP_SIZE + 6.0),
+                height: px(24),
+                column_gap: px(6),
+                align_items: AlignItems::Center,
+                ..default()
+            },
+        ))
+        .id();
+    let follow = spawn_minimap_button(commands, "follow");
+    commands
+        .entity(follow)
+        .insert(MinimapFollow)
+        .observe(on_minimap_follow);
+    let recenter = spawn_minimap_button(commands, "⌖ center");
+    commands
+        .entity(recenter)
+        .insert(MinimapRecenter)
+        .observe(on_minimap_recenter);
+    commands.entity(toolbar).add_children(&[follow, recenter]);
+
+    commands.entity(root).add_children(&[frame, toolbar]);
+}
+
+/// A small rounded button matching the minimap chrome.
+fn spawn_minimap_button(commands: &mut Commands, label: &str) -> Entity {
+    commands
+        .spawn((
+            Button,
+            Node {
                 height: px(24),
                 padding: UiRect::horizontal(px(8)),
                 align_items: AlignItems::Center,
@@ -264,10 +374,10 @@ pub(super) fn spawn_minimap(commands: &mut Commands) {
                 border_radius: BorderRadius::all(px(6)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.06, 0.08, 0.11, 0.75)),
-            BorderColor::all(Color::srgba(0.5, 0.7, 0.85, 0.25)),
+            BackgroundColor(MINIMAP_BUTTON_BG),
+            BorderColor::all(MINIMAP_BUTTON_BORDER),
             children![(
-                Text::new("⌖ center"),
+                Text::new(label),
                 TextFont {
                     font_size: FontSize::Px(11.0),
                     ..default()
@@ -275,10 +385,43 @@ pub(super) fn spawn_minimap(commands: &mut Commands) {
                 TextColor(Color::srgb_u8(0xc3, 0xd0, 0xdf)),
             )],
         ))
-        .id();
-    commands.entity(recenter).observe(on_minimap_recenter);
+        .id()
+}
 
-    commands.entity(root).add_children(&[frame, recenter]);
+// ---------------------------------------------------------------------------
+// First-person view cone (minimap-only gizmos)
+// ---------------------------------------------------------------------------
+
+/// Draw the first-person camera's heading and field of view on the map.
+/// Rendered through the minimap gizmo group so the main view stays clean.
+pub(super) fn draw_view_cone(
+    editor: Res<Editor>,
+    orbit: Res<Orbit>,
+    mut gizmos: Gizmos<MinimapGizmos>,
+) {
+    if editor.mode != Mode::Play || orbit.mode != ViewMode::First {
+        return;
+    }
+    let Some(character) = editor.character else {
+        return;
+    };
+    let (origin, arc, centre) = view_cone(
+        character.pos,
+        character.feet + 0.06,
+        orbit.yaw,
+        VIEW_CONE_HALF_ANGLE,
+        VIEW_CONE_RANGE,
+    );
+    gizmos.line(origin, centre, VIEW_CONE_CORE);
+    if let (Some(first), Some(last)) = (arc.first(), arc.last()) {
+        gizmos.line(origin, *first, VIEW_CONE_EDGE);
+        gizmos.line(origin, *last, VIEW_CONE_EDGE);
+        gizmos.linestrip(arc.iter().copied(), VIEW_CONE_EDGE);
+        // A few interior rays read as a fan without hiding the map under it.
+        for point in arc.iter().skip(4).step_by(4).take(3) {
+            gizmos.line(origin, *point, VIEW_CONE_FILL);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +436,7 @@ pub(super) fn sync_minimap(
     mut minimap: ResMut<Minimap>,
     mut cameras: Query<(&mut Camera, &mut Transform, &mut Projection), With<MinimapCamera>>,
     mut roots: Query<&mut Node, With<MinimapUi>>,
+    mut follow_buttons: Query<(&MinimapFollow, &mut BackgroundColor, &mut BorderColor)>,
     mouse: Res<ButtonInput<MouseButton>>,
     touches: Res<Touches>,
 ) {
@@ -303,9 +447,18 @@ pub(super) fn sync_minimap(
         minimap.ready = true;
     } else if !active {
         minimap.ready = false;
+        minimap.follow = false;
         minimap.press = None;
         minimap.handle = None;
         minimap.moved = 0.0;
+    }
+    // Follow runs after `character_move` (this system chains after
+    // `refresh_route`), so the map sees this frame's position.
+    if active
+        && minimap.follow
+        && let Some(center) = follow_center(&editor)
+    {
+        minimap.center = center;
     }
     // A release that misses the frame (pointer lifted off-rect) would wedge
     // the press forever; drop presses whose pointer is already gone.
@@ -347,6 +500,18 @@ pub(super) fn sync_minimap(
     }
     for mut node in &mut roots {
         node.display = if active { Display::Flex } else { Display::None };
+    }
+    for (_, mut background, mut border) in &mut follow_buttons {
+        background.0 = if minimap.follow {
+            BUTTON_ON
+        } else {
+            MINIMAP_BUTTON_BG
+        };
+        *border = BorderColor::all(if minimap.follow {
+            BORDER_ON
+        } else {
+            MINIMAP_BUTTON_BORDER
+        });
     }
 }
 
@@ -468,6 +633,9 @@ pub(super) fn on_minimap_drag(
             filter,
         );
     } else {
+        // A manual pan wins: stop chasing the character so the view the
+        // player just dragged to stays put.
+        minimap.follow = false;
         let s = minimap_scale(&touch);
         let edge = minimap_rect(window.size(), s).1;
         if edge > 0.0 {
@@ -630,8 +798,28 @@ pub(super) fn on_minimap_recenter(
     // A UI tap is not a grid tap: drop any tap from this gesture.
     touch.suppress_until = touch.suppress_until.max(now + 0.08);
     touch.tap = None;
+    // Recenter shows the whole level, so stop following the character.
+    minimap.follow = false;
     minimap.center = default_center(&editor);
     minimap.half_extent = fit_half_extent(&editor);
+}
+
+pub(super) fn on_minimap_follow(
+    event: On<Activate>,
+    buttons: Query<&MinimapFollow>,
+    time: Res<Time>,
+    editor: Res<Editor>,
+    mut minimap: ResMut<Minimap>,
+    mut touch: ResMut<TouchState>,
+) {
+    if buttons.get(event.entity).is_err() || editor.mode != Mode::Play {
+        return;
+    }
+    let now = time.elapsed_secs_f64();
+    // A UI tap is not a grid tap: drop any tap from this gesture.
+    touch.suppress_until = touch.suppress_until.max(now + 0.08);
+    touch.tap = None;
+    minimap.follow = !minimap.follow;
 }
 
 #[cfg(test)]
@@ -704,6 +892,53 @@ mod tests {
         // Drag right-down: the center moves left-up so content follows.
         let moved = pan_center(center, Vec2::new(22.0, 11.0), 220.0, 10.0);
         assert!((moved - Vec2::new(-2.0, -1.0)).length() < 1e-4);
+    }
+
+    #[test]
+    fn follow_mode_tracks_the_character_when_there_is_one() {
+        let mut editor = editor_with_level();
+        assert_eq!(follow_center(&editor), None);
+        editor.character = Some(Character {
+            pos: Vec2::new(20.0, 20.0),
+            feet: 0.0,
+            yaw: 0.0,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            sliding: false,
+            health: crate::statuses::Health::default(),
+        });
+        assert_eq!(follow_center(&editor), Some(Vec2::new(20.0, 20.0)));
+    }
+
+    #[test]
+    fn the_view_cone_fans_out_along_the_first_person_heading() {
+        let pos = Vec2::new(2.0, -3.0);
+        let (origin, arc, centre) = view_cone(pos, 0.1, 0.0, VIEW_CONE_HALF_ANGLE, VIEW_CONE_RANGE);
+        assert_eq!(origin, Vec3::new(2.0, 0.1, -3.0));
+        // Yaw zero looks north (-Z), so the centreline runs straight up.
+        assert!((centre - Vec3::new(2.0, 0.1, -3.0 - VIEW_CONE_RANGE)).length() < 1e-4);
+        let left = arc.first().expect("arc start");
+        let right = arc.last().expect("arc end");
+        assert_eq!(arc.len(), 17);
+        // Symmetric around the centreline, both edges exactly at range.
+        assert!((left.x + right.x - 2.0 * pos.x).abs() < 1e-4);
+        assert!((left.z - right.z).abs() < 1e-4);
+        for edge in [left, right] {
+            let radius = Vec2::new(edge.x - pos.x, edge.z - pos.y).length();
+            assert!((radius - VIEW_CONE_RANGE).abs() < 1e-4);
+        }
+        // A quarter turn points the cone west (-X).
+        let (_, _, west) = view_cone(
+            Vec2::ZERO,
+            0.0,
+            std::f32::consts::FRAC_PI_2,
+            VIEW_CONE_HALF_ANGLE,
+            VIEW_CONE_RANGE,
+        );
+        assert!((west.x + VIEW_CONE_RANGE).abs() < 1e-4);
+        assert!(west.z.abs() < 1e-4);
     }
 
     #[test]

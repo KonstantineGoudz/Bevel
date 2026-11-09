@@ -22,6 +22,7 @@ game/ios/DerivedData/
 
 # Web
 game/web/pkg/
+game/web/assets/
 
 # Editors
 .idea/

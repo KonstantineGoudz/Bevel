@@ -81,12 +81,18 @@ fn setup_spawns_the_palette_and_toolbars() {
     );
     // Exactly one grass options row and one path row.
     assert_eq!(
-        world.query_filtered::<&GrassActions, ()>().iter(world).count(),
+        world
+            .query_filtered::<&GrassActions, ()>()
+            .iter(world)
+            .count(),
         1,
         "one grass actions row"
     );
     assert_eq!(
-        world.query_filtered::<&PathActions, ()>().iter(world).count(),
+        world
+            .query_filtered::<&PathActions, ()>()
+            .iter(world)
+            .count(),
         1,
         "one path actions row"
     );
@@ -144,8 +150,8 @@ fn minimap_click_sets_a_route_like_a_play_click() {
     let centre = origin + Vec2::splat(edge * 0.5);
     {
         let world = app.world_mut();
-        let mut cameras = world
-            .query_filtered::<(&mut Camera, &mut Projection), With<MinimapCamera>>();
+        let mut cameras =
+            world.query_filtered::<(&mut Camera, &mut Projection), With<MinimapCamera>>();
         let (mut camera, mut projection) = cameras.single_mut(world).expect("minimap");
         if let Projection::Orthographic(ortho) = &mut *projection {
             ortho.update(edge, edge);
@@ -192,6 +198,90 @@ fn minimap_click_sets_a_route_like_a_play_click() {
         "a minimap tap adds a waypoint"
     );
     assert!(editor.walk.is_some(), "routing starts walking");
+}
+
+#[test]
+fn follow_button_centers_the_map_on_the_character() {
+    let mut app = boot_app();
+    app.update();
+    {
+        let world = app.world_mut();
+        let mut editor = world.resource_mut::<Editor>();
+        editor.mode = Mode::Play;
+        editor.character = Some(Character {
+            pos: Vec2::new(1.0, 2.0),
+            feet: 0.0,
+            yaw: 0.0,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            sliding: false,
+            health: crate::statuses::Health::default(),
+        });
+    }
+    app.update();
+    let follow = app
+        .world_mut()
+        .query_filtered::<Entity, With<MinimapFollow>>()
+        .single(app.world_mut())
+        .expect("follow button");
+    app.world_mut().trigger(Activate { entity: follow });
+    app.update();
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character.as_mut().expect("character").pos = Vec2::new(7.0, -4.0);
+    }
+    app.update();
+    assert_eq!(
+        app.world().resource::<Minimap>().center,
+        Vec2::new(7.0, -4.0),
+        "follow mode keeps the character centered"
+    );
+}
+
+#[test]
+fn first_person_view_cone_is_minimap_only() {
+    use bevy::camera::visibility::RenderLayers;
+
+    let mut app = boot_app();
+    app.update();
+    {
+        let world = app.world_mut();
+        let mut editor = world.resource_mut::<Editor>();
+        editor.mode = Mode::Play;
+        editor.character = Some(Character {
+            pos: Vec2::new(2.0, 1.0),
+            feet: 0.0,
+            yaw: 0.4,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            sliding: false,
+            health: crate::statuses::Health::default(),
+        });
+        world.resource_mut::<Orbit>().mode = ViewMode::First;
+    }
+    app.update();
+    let world = app.world_mut();
+    // The minimap camera renders the overlay layer; the main view must not.
+    let minimap_layers = world
+        .query_filtered::<&RenderLayers, With<MinimapCamera>>()
+        .single(world)
+        .expect("minimap render layers");
+    assert!(minimap_layers.intersects(&RenderLayers::layer(1)));
+    let main_layers = world
+        .query_filtered::<Option<&RenderLayers>, (With<Camera3d>, Without<MinimapCamera>)>()
+        .single(world)
+        .expect("main camera")
+        .cloned()
+        .unwrap_or_default();
+    assert!(!main_layers.intersects(&RenderLayers::layer(1)));
+    let (config, _) = world
+        .resource::<GizmoConfigStore>()
+        .config::<MinimapGizmos>();
+    assert_eq!(config.render_layers, RenderLayers::layer(1));
 }
 
 #[test]

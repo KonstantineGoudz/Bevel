@@ -1,0 +1,6 @@
+# Generated previews and the export intermediate (the shipped copy lives in
+# ../assets/character.glb).
+*.png
+*.log
+*.blend1
+character_combined.glb
