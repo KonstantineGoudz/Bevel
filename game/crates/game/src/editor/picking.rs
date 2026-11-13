@@ -55,6 +55,19 @@ pub(super) fn ray_piece_distance(piece: &Piece, shape: &model::Shape, ray: Ray3d
         return (far >= 0.0).then(|| near.max(0.0));
     }
 
+    if shape.is_glade() {
+        let ext = crate::glade::piece_extents(piece, shape);
+        let top = crate::glade::total_height(piece, shape);
+        let hw = ext.x * 0.5;
+        let hl = ext.z * 0.5;
+        let pad = HIT_PAD;
+        let (mut near, mut far) = (f32::NEG_INFINITY, f32::INFINITY);
+        slab(origin.x, dir.x, -hw - pad, hw + pad, &mut near, &mut far)?;
+        slab(origin.z, dir.z, -hl - pad, hl + pad, &mut near, &mut far)?;
+        slab(origin.y, dir.y, -pad, top + pad, &mut near, &mut far)?;
+        return (far >= 0.0).then(|| near.max(0.0));
+    }
+
     let points = model::shape_points(shape);
     let mut low = Vec2::splat(f32::MAX);
     let mut high = Vec2::splat(f32::MIN);

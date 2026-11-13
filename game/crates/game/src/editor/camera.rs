@@ -118,8 +118,7 @@ pub(super) fn camera_control(
     window: Single<&Window, With<PrimaryWindow>>,
     input_focus: Res<InputFocus>,
     gates: MenuHome,
-    outliner: Res<OutlinerState>,
-    panel_state: Res<PropertiesPanelState>,
+    right_panel: Res<RightPanelState>,
 ) {
     // The native home screen owns the camera while open.
     if home_modal_open(gates.home) {
@@ -130,25 +129,16 @@ pub(super) fn camera_control(
     // The modal transform, a focused property field, or a pointer over the
     // property panel owns the mouse. Drain the deltas so the camera does not
     // jump when editing ends.
-    let over_properties = !editor.selection.is_empty()
-        && window.cursor_position().is_some_and(|p| {
-            over_properties_panel(
-                p,
-                window.size(),
-                !editor.selection.is_empty(),
-                panel_state.collapsed,
-                &touch,
-            )
-        });
-    let over_outliner = !capture.grabbed
-        && editor.mode == Mode::Build
+    let over_side_panel = !capture.grabbed
+        && object_editing_allowed(editor.mode)
         && window
             .cursor_position()
-            .is_some_and(|p| over_outliner_panel(p, window.size(), outliner.collapsed, &touch));
+            .is_some_and(|p| over_right_panel(p, window.size(), &right_panel, &touch));
     if editor.keyboard_transform.is_some()
         || input_focus.get().is_some()
-        || over_properties
-        || over_outliner
+        || over_side_panel
+        || right_panel.dragging_width
+        || right_panel.dragging_split
     {
         motion.read().for_each(drop);
         wheel.read().for_each(drop);
@@ -239,7 +229,7 @@ pub(super) fn camera_control(
                 minimap.half_extent = (minimap.half_extent * (1.0 + scroll * 0.12))
                     .clamp(MINIMAP_MIN_HALF, MINIMAP_MAX_HALF);
             } else {
-                orbit.distance = (orbit.distance * (1.0 - scroll * 0.12)).clamp(1.5, 60.0);
+                orbit.distance = (orbit.distance * (1.0 - scroll * 0.12)).clamp(1.5, 180.0);
             }
         }
     }
@@ -280,7 +270,7 @@ pub(super) fn camera_control(
                     orbit.target.y = 0.0;
                 }
                 if touch.zoom != 0.0 {
-                    orbit.distance = (orbit.distance * (1.0 - touch.zoom * 0.8)).clamp(1.5, 60.0);
+                    orbit.distance = (orbit.distance * (1.0 - touch.zoom * 0.8)).clamp(1.5, 180.0);
                 }
             }
         }
@@ -340,6 +330,58 @@ pub(super) fn camera_control(
     ) * orbit.distance;
     camera.translation = orbit.target + offset;
     camera.look_at(orbit.target, Vec3::Y);
+}
+
+/// When playing in third-person view, clip the camera forward along its line
+/// of sight if a wall or roof comes between the character and the camera,
+/// preventing occlusion and keeping the interior visible when entering buildings.
+pub(super) fn camera_occlusion(
+    orbit: Res<Orbit>,
+    editor: Res<Editor>,
+    rapier: Option<ReadRapierContext>,
+    visuals: Res<Visuals>,
+    mut cameras: Query<&mut Transform, (With<Camera3d>, Without<MinimapCamera>)>,
+) {
+    if orbit.mode != ViewMode::Third {
+        return;
+    }
+    let Some(character) = editor.character else {
+        return;
+    };
+    let Some(rapier) = rapier else {
+        return;
+    };
+    let Ok(ctx) = rapier.single() else {
+        return;
+    };
+    let Ok(mut camera) = cameras.single_mut() else {
+        return;
+    };
+    let head = Vec3::new(
+        character.pos.x,
+        character.feet + EYE_HEIGHT,
+        character.pos.y,
+    );
+    let cam_pos = camera.translation;
+    let to_cam = cam_pos - head;
+    let max_dist = to_cam.length();
+    if max_dist <= 0.35 {
+        return;
+    }
+    let dir = to_cam / max_dist;
+    let mut filter = QueryFilter::default();
+    if let Some(char_entity) = visuals.character {
+        filter = filter.exclude_rigid_body(char_entity);
+    }
+    if let Some((_entity, toi)) = ctx.cast_ray(head, dir, max_dist, false, filter) {
+        if toi > 0.05 {
+            let safe_dist = (toi - 0.22).max(0.35);
+            if safe_dist < max_dist {
+                camera.translation = head + dir * safe_dist;
+                camera.look_at(orbit.target, Vec3::Y);
+            }
+        }
+    }
 }
 
 /// The centre of the selection, for orbiting in Build. With several pieces

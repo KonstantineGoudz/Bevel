@@ -113,23 +113,16 @@ pub fn advance_platform(
     }
 }
 
-/// Build a smoothed Bezier track through the waypoints, honouring manual
-/// handles. Needs at least two points; fewer yields an empty track.
-///
-/// When `closed` (Loop mode) the last point connects back to the first with
-/// the same smoothing: the point list is wrapped with its neighbours so the
-/// seam gets real tangents instead of a kink, producing a true circuit the
-/// platform can travel forever.
-pub fn build_platform_track(waypoints: &[PlatformWaypoint], closed: bool) -> path::Track {
+/// Build the cubic Bezier segments through `waypoints`, honouring manual handles.
+fn build_platform_curves(waypoints: &[PlatformWaypoint], closed: bool) -> Vec<path::Cubic> {
     let points: Vec<Vec2> = waypoints.iter().map(|w| w.pos).collect();
     if points.len() < 2 {
-        return path::Track::new(points);
+        return Vec::new();
     }
     if !closed {
         let mut curves = path::smooth(&points);
         apply_handles(waypoints, &points, 0, &mut curves);
-        let sampled = path::sample(&curves, 18);
-        return path::Track::new(sampled);
+        return curves;
     }
     // Closed circuit: wrap the ends so `smooth` sees across the seam, then
     // keep exactly the n segments of the circuit.
@@ -159,8 +152,52 @@ pub fn build_platform_track(waypoints: &[PlatformWaypoint], closed: bool) -> pat
     {
         curve.p2 = clamp_handle(points[n - 1], points[0], control);
     }
+    curves
+}
+
+/// Build a smoothed Bezier track through the waypoints, honouring manual
+/// handles. Needs at least two points; fewer yields an empty track.
+///
+/// When `closed` (Loop mode) the last point connects back to the first with
+/// the same smoothing: the point list is wrapped with its neighbours so the
+/// seam gets real tangents instead of a kink, producing a true circuit the
+/// platform can travel forever.
+pub fn build_platform_track(waypoints: &[PlatformWaypoint], closed: bool) -> path::Track {
+    if waypoints.len() < 2 {
+        return path::Track::new(waypoints.iter().map(|w| w.pos).collect());
+    }
+    let curves = build_platform_curves(waypoints, closed);
     let sampled = path::sample(&curves, 18);
     path::Track::new(sampled)
+}
+
+/// Effective incoming/outgoing Bezier control handles for each waypoint,
+/// combining automatic smooth tangents with any manual handle overrides.
+pub fn platform_controls(waypoints: &[PlatformWaypoint], closed: bool) -> Vec<path::AnchorControls> {
+    if waypoints.len() < 2 {
+        return vec![
+            path::AnchorControls {
+                incoming: None,
+                outgoing: None,
+            };
+            waypoints.len()
+        ];
+    }
+    let curves = build_platform_curves(waypoints, closed);
+    let n = waypoints.len();
+    (0..n)
+        .map(|i| {
+            let incoming = if i > 0 {
+                curves.get(i - 1).map(|c| c.p2)
+            } else if closed {
+                curves.last().map(|c| c.p2)
+            } else {
+                None
+            };
+            let outgoing = curves.get(i).map(|c| c.p1);
+            path::AnchorControls { incoming, outgoing }
+        })
+        .collect()
 }
 
 /// Apply manual Bezier handles to the open-chain curves starting at `offset`.

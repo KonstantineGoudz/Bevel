@@ -1,20 +1,15 @@
 //! Selected-piece property panel and its physics toggle.
 
 use super::*;
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::input_focus::InputFocus;
 use bevy::input_focus::tab_navigation::TabIndex;
 use bevy::text::{EditableText, TextCursorStyle};
 use bevy::ui::RelativeCursorPosition;
 use bevy::ui_widgets::TextInput;
 
-pub(super) const PROPERTIES_WIDTH: f32 = 230.0;
-pub(super) const PROPERTIES_MARGIN: f32 = 12.0;
-pub(super) const PROPERTIES_HEIGHT: f32 = 910.0;
-/// Panel top on touch: below the toolbar / carousel / status rows so the
-/// floating window never covers the mobile controls.
-pub(super) const PROPERTIES_TOP_TOUCH: f32 = 140.0;
 /// Height of the title bar when the panel is collapsed to just its header.
-pub(super) const PROPERTIES_COLLAPSED_HEIGHT: f32 = 40.0;
+pub(super) const PROPERTIES_COLLAPSED_HEIGHT: f32 = 34.0;
 
 #[derive(Component)]
 pub(super) struct PlatformSection;
@@ -58,40 +53,56 @@ pub(super) struct InteractButton;
 #[derive(Component)]
 pub(super) struct InteractLabel;
 
-/// Whether a logical screen point is over the floating property panel.
-/// Geometry mirrors `sync_properties_panel`: the touch layout sits below the
-/// toolbar and renders at `ui_scale`, and a collapsed panel is just its
-/// header.
+/// Whether a logical screen point is over the docked properties section inside
+/// the right side panel.
 pub(super) fn over_properties_panel(
     screen: Vec2,
     size: Vec2,
-    selected: bool,
+    right_panel: &RightPanelState,
+    outliner_collapsed: bool,
     collapsed: bool,
     touch: &TouchState,
 ) -> bool {
+    if !right_panel.open {
+        return false;
+    }
     let s = if touch.enabled { touch.ui_scale } else { 1.0 };
-    let top = if touch.enabled {
-        PROPERTIES_TOP_TOUCH
+    let outliner_top = if touch.enabled {
+        RIGHT_PANEL_TOUCH_TOP
     } else {
-        PROPERTIES_MARGIN
-    };
-    let height = if collapsed {
-        PROPERTIES_COLLAPSED_HEIGHT
+        0.0
+    } + RIGHT_PANEL_HEADER_HEIGHT;
+    let outliner_h = if outliner_collapsed {
+        OUTLINER_COLLAPSED_HEIGHT
     } else {
-        PROPERTIES_HEIGHT
+        right_panel.outliner_height
     };
-    selected
-        && screen.x >= size.x - (PROPERTIES_WIDTH + PROPERTIES_MARGIN) * s
-        && screen.y >= top * s
-        && screen.y <= (top + height) * s
+    let splitter_h = if !outliner_collapsed && !collapsed {
+        RIGHT_PANEL_SPLITTER_HEIGHT
+    } else {
+        0.0
+    };
+    let prop_top = outliner_top + outliner_h + splitter_h;
+    let in_x = screen.x >= size.x - right_panel.width * s;
+    if collapsed {
+        in_x && screen.y >= prop_top * s && screen.y <= (prop_top + PROPERTIES_COLLAPSED_HEIGHT) * s
+    } else {
+        in_x && screen.y >= prop_top * s
+    }
 }
 
 #[derive(Component)]
 pub(super) struct PropertiesPanel;
 
-/// The collapsible half of the panel (everything below the header).
+/// The collapsible, scrollable half of the panel (everything below the header).
 #[derive(Component)]
 pub(super) struct PropertiesBody;
+
+#[derive(Component)]
+pub(super) struct PropertiesEmptyLabel;
+
+#[derive(Component)]
+pub(super) struct PropertiesControls;
 
 #[derive(Component)]
 pub(super) struct PropertiesCollapseButton;
@@ -172,9 +183,21 @@ impl PropertyField {
             Self::PosX => piece.pos.x,
             Self::PosY => piece.elevation,
             Self::PosZ => piece.pos.y,
-            Self::RotX => piece.pitch.to_degrees(),
+            Self::RotX => {
+                if shapes().get(piece.shape).is_some_and(|s| s.is_glade()) {
+                    0.0
+                } else {
+                    piece.pitch.to_degrees()
+                }
+            }
             Self::RotY => piece.rot.to_degrees(),
-            Self::RotZ => piece.roll.to_degrees(),
+            Self::RotZ => {
+                if shapes().get(piece.shape).is_some_and(|s| s.is_glade()) {
+                    0.0
+                } else {
+                    piece.roll.to_degrees()
+                }
+            }
             Self::Damage => piece.trigger.damage,
             Self::TriggerWidth => piece.trigger_size.x,
             Self::TriggerHeight => piece.trigger_size.y,
@@ -188,14 +211,29 @@ impl PropertyField {
             Self::PosX => piece.pos.x = value,
             Self::PosY => piece.elevation = value,
             Self::PosZ => piece.pos.y = value,
-            Self::RotX => piece.pitch = value.to_radians(),
+            Self::RotX => {
+                if !shapes().get(piece.shape).is_some_and(|s| s.is_glade()) {
+                    piece.pitch = value.to_radians();
+                }
+            }
             Self::RotY => piece.rot = value.to_radians(),
-            Self::RotZ => piece.roll = value.to_radians(),
+            Self::RotZ => {
+                if !shapes().get(piece.shape).is_some_and(|s| s.is_glade()) {
+                    piece.roll = value.to_radians();
+                }
+            }
             // Damage is clamped to >= 0; non-finite input never reaches here
             // (`parse` filters it).
             Self::Damage => piece.trigger.set_damage(value),
             Self::TriggerWidth => piece.trigger_size.x = value.max(crate::model::TRIGGER_MIN_SIZE),
-            Self::TriggerHeight => piece.trigger_size.y = value.max(crate::model::TRIGGER_MIN_SIZE),
+            Self::TriggerHeight => {
+                let min_h = if shapes().get(piece.shape).is_some_and(|s| s.is_glade()) {
+                    crate::glade::GLADE_MIN_HEIGHT
+                } else {
+                    crate::model::TRIGGER_MIN_SIZE
+                };
+                piece.trigger_size.y = value.max(min_h);
+            }
             Self::TriggerLength => piece.trigger_size.z = value.max(crate::model::TRIGGER_MIN_SIZE),
             Self::TriggerAlpha => {
                 piece.trigger_alpha = value.clamp(
@@ -250,24 +288,18 @@ pub(super) struct PropertyEditState {
     committed: bool,
 }
 
-pub(super) fn spawn_properties_panel(commands: &mut Commands) {
+pub(super) fn spawn_properties_panel(commands: &mut Commands) -> Entity {
     let panel = commands
         .spawn((
             PropertiesPanel,
             Node {
-                position_type: PositionType::Absolute,
-                right: px(PROPERTIES_MARGIN),
-                top: px(PROPERTIES_MARGIN),
-                width: px(PROPERTIES_WIDTH),
-                height: px(PROPERTIES_HEIGHT),
+                width: percent(100),
+                min_height: px(PROPERTIES_COLLAPSED_HEIGHT),
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::all(px(10)),
                 row_gap: px(5),
                 border: UiRect::all(px(1)),
                 border_radius: BorderRadius::all(px(6)),
-                // Tall content scrolls instead of running off small screens.
-                overflow: Overflow::scroll_y(),
-                display: Display::None,
                 ..default()
             },
             BackgroundColor(BAR_BG),
@@ -344,18 +376,53 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
         .add_children(&[collapse, title, spacer, shape]);
     commands.entity(panel).add_child(header);
 
-    // Everything below the header collapses away.
-    let body = commands
+    // Everything below the header collapses away and scrolls independently.
+    let scroll_body = commands
         .spawn((
             PropertiesBody,
+            ScrollPosition::default(),
             Node {
                 width: percent(100),
+                flex_grow: 1.0,
+                flex_shrink: 1.0,
+                min_height: px(0),
                 flex_direction: FlexDirection::Column,
                 row_gap: px(5),
+                overflow: Overflow::scroll_y(),
                 ..default()
             },
         ))
         .id();
+
+    let empty_label = commands
+        .spawn((
+            PropertiesEmptyLabel,
+            Text::new("No object selected"),
+            TextFont {
+                font_size: FontSize::Px(12.0),
+                ..default()
+            },
+            TextColor(MUTED),
+            Node {
+                margin: UiRect::top(px(4)),
+                ..default()
+            },
+        ))
+        .id();
+
+    let body = commands
+        .spawn((
+            PropertiesControls,
+            Node {
+                width: percent(100),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(5),
+                display: Display::None,
+                ..default()
+            },
+        ))
+        .id();
+    commands.entity(scroll_body).add_children(&[empty_label, body]);
 
     let position_label = section_label(commands, "POSITION");
     commands.entity(body).add_child(position_label);
@@ -696,7 +763,8 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) {
     let interact = platform_button(commands, InteractButton, InteractLabel, "Interact: off");
     commands.entity(interact).observe(on_interact_toggle);
     commands.entity(body).add_child(interact);
-    commands.entity(panel).add_child(body);
+    commands.entity(panel).add_child(scroll_body);
+    panel
 }
 
 pub(super) fn on_properties_collapse(
@@ -898,6 +966,23 @@ pub(super) fn on_trigger_shape(
     };
     let shape_opt = shapes().get(editor.pieces[index].shape);
     let is_trigger = shape_opt.is_some_and(|s| s.is_trigger);
+    let is_glade = shape_opt.is_some_and(|s| s.is_glade());
+    if is_glade {
+        editor.commit();
+        let piece = &mut editor.pieces[index];
+        piece.trigger_shape_override = match piece.trigger_shape_override {
+            crate::model::TriggerShape::Box => crate::model::TriggerShape::Sphere,
+            crate::model::TriggerShape::Sphere => crate::model::TriggerShape::Cylinder,
+            crate::model::TriggerShape::Cylinder => crate::model::TriggerShape::Box,
+        };
+        editor.hard_dirty = true;
+        editor.note = if shape_opt.is_some_and(|s| s.id == "glade_terrain") {
+            "terrain profile updated"
+        } else {
+            "roof style updated"
+        };
+        return;
+    }
     if !is_trigger {
         editor.note = "only triggers have a shape";
         return;
@@ -948,9 +1033,12 @@ pub(super) fn on_trigger_color(
     let Some(index) = editor.pieces.iter().position(|p| p.id == id) else {
         return;
     };
+    let is_glade = shapes()
+        .get(editor.pieces[index].shape)
+        .is_some_and(|s| s.is_glade());
     if !shapes()
         .get(editor.pieces[index].shape)
-        .is_some_and(|s| s.is_trigger)
+        .is_some_and(|s| s.is_parametric())
     {
         editor.note = "only triggers have a color";
         return;
@@ -958,7 +1046,11 @@ pub(super) fn on_trigger_color(
     editor.commit();
     editor.pieces[index].trigger_color = btn.0;
     editor.hard_dirty = true;
-    editor.note = "trigger color updated";
+    editor.note = if is_glade {
+        "roof color updated"
+    } else {
+        "trigger color updated"
+    };
 }
 
 pub(super) fn on_trigger_visible(
@@ -975,9 +1067,12 @@ pub(super) fn on_trigger_visible(
     let Some(index) = editor.pieces.iter().position(|p| p.id == id) else {
         return;
     };
+    let is_glade = shapes()
+        .get(editor.pieces[index].shape)
+        .is_some_and(|s| s.is_glade());
     if !shapes()
         .get(editor.pieces[index].shape)
-        .is_some_and(|s| s.is_trigger)
+        .is_some_and(|s| s.is_parametric())
     {
         editor.note = "only triggers have visibility";
         return;
@@ -985,7 +1080,13 @@ pub(super) fn on_trigger_visible(
     editor.commit();
     editor.pieces[index].trigger_visible = !editor.pieces[index].trigger_visible;
     editor.hard_dirty = true;
-    editor.note = if editor.pieces[index].trigger_visible {
+    editor.note = if is_glade {
+        if editor.pieces[index].trigger_visible {
+            "glade details: on"
+        } else {
+            "glade details: off"
+        }
+    } else if editor.pieces[index].trigger_visible {
         "trigger visible in edit"
     } else {
         "trigger hidden in edit"
@@ -1191,7 +1292,12 @@ pub(super) fn apply_property_edits(
         editor.commit();
         state.committed = true;
     }
+    let old_piece = editor.pieces[index];
     field.set(&mut editor.pieces[index], value);
+    if matches!(field, PropertyField::TriggerWidth | PropertyField::TriggerLength) {
+        let new_piece = editor.pieces[index];
+        crate::glade::pin_doors_on_glade_resize(&old_piece, &new_piece, &mut editor.pieces);
+    }
     editor.hard_dirty = true;
 
     // A dynamic body ignores the piece transform in `sync_visuals`; teleport
@@ -1223,13 +1329,14 @@ pub(super) fn apply_property_edits(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(super) fn sync_properties_panel(
     editor: Res<Editor>,
     movers: Res<Movers>,
     mut focus: ResMut<InputFocus>,
     mut state: ResMut<PropertyEditState>,
-    mut panel: Single<&mut Node, With<PropertiesPanel>>,
+    mut controls: Single<&mut Node, (With<PropertiesControls>, Without<PropertiesEmptyLabel>)>,
+    mut empty_label: Single<&mut Node, (With<PropertiesEmptyLabel>, Without<PropertiesControls>)>,
     mut fields: Query<(Entity, &PropertyField, &mut EditableText)>,
     mut shape_label: Single<
         &mut Text,
@@ -1328,14 +1435,20 @@ pub(super) fn sync_properties_panel(
         .selection
         .primary()
         .and_then(|id| editor.pieces.iter().find(|piece| piece.id == id).copied());
-    let visible = editor.mode == Mode::Build && selected.is_some();
-    panel.display = if visible {
+    let has_selection = editor.mode == Mode::Build && selected.is_some();
+    controls.display = if has_selection {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    empty_label.display = if selected.is_none() {
         Display::Flex
     } else {
         Display::None
     };
 
-    if !visible {
+    if !has_selection {
+        shape_label.0.clear();
         state.selected = None;
         state.committed = false;
         state.last_text.clear();
@@ -1405,25 +1518,34 @@ pub(super) fn sync_properties_panel(
         pause_label.0 = "Paused: no".to_string();
         speed_label.0 = format!("{:.1} m/s", super::movers::DEFAULT_PLATFORM_SPEED);
     }
-    // Trigger shape label: show current effective shape for triggers, otherwise Box.
-    if let Some(shape) = shapes().get(piece.shape)
-        && shape.is_trigger
-    {
-        let current = model::piece_trigger_shape(&piece, shape);
-        trigger_shape_label.0 = format!("Shape: {}", current.label());
+    // Trigger shape label: show current effective shape for triggers, Roof style for Glade, otherwise Box.
+    if let Some(shape) = shapes().get(piece.shape) {
+        if shape.is_trigger {
+            let current = model::piece_trigger_shape(&piece, shape);
+            trigger_shape_label.0 = format!("Shape: {}", current.label());
+        } else if shape.is_glade() {
+            if shape.id == "glade_terrain" {
+                let style = crate::glade::terrain_style(&piece);
+                trigger_shape_label.0 = format!("Terrain: {}", style.label());
+            } else {
+                let style = crate::glade::roof_style(&piece, shape);
+                trigger_shape_label.0 = format!("Roof: {}", style.label());
+            }
+        } else {
+            trigger_shape_label.0 = "Shape: Box".to_string();
+        }
     } else {
         trigger_shape_label.0 = "Shape: Box".to_string();
     }
 }
 
-/// Panel chrome: per-layer geometry, collapse height, body visibility and the
-/// header glyph. Split out of `sync_properties_panel` so that system stays
-/// under the function-system parameter limit.
+/// Panel chrome: collapse body visibility and the header glyph.
+/// Split out of `sync_properties_panel` so that system stays under the
+/// function-system parameter limit.
 pub(super) fn sync_properties_chrome(
     touch: Res<TouchState>,
     mut panel_state: ResMut<PropertiesPanelState>,
-    mut panels: Query<&mut Node, (With<PropertiesPanel>, Without<PropertiesBody>)>,
-    mut bodies: Query<&mut Node, (With<PropertiesBody>, Without<PropertiesPanel>)>,
+    mut bodies: Query<&mut Node, With<PropertiesBody>>,
     mut collapse_labels: Query<&mut Text, With<PropertiesCollapseLabel>>,
 ) {
     // A fresh touch selection opens collapsed so the panel never covers the
@@ -1431,27 +1553,6 @@ pub(super) fn sync_properties_chrome(
     if touch.enabled && !panel_state.touch_seen {
         panel_state.touch_seen = true;
         panel_state.collapsed = true;
-    }
-    // Touch docks the panel below the toolbar; both layouts render at the
-    // input layer's scale (see `over_properties_panel`).
-    let top = if touch.enabled {
-        PROPERTIES_TOP_TOUCH
-    } else {
-        PROPERTIES_MARGIN
-    };
-    let height = if panel_state.collapsed {
-        PROPERTIES_COLLAPSED_HEIGHT
-    } else {
-        PROPERTIES_HEIGHT
-    };
-    for mut panel in &mut panels {
-        if panel.top != px(top) {
-            panel.top = px(top);
-        }
-        if panel.height != px(height) {
-            panel.height = px(height);
-        }
-        // Visibility itself lives in `sync_properties_panel`.
     }
     for mut body in &mut bodies {
         let display = if panel_state.collapsed {
@@ -1469,6 +1570,47 @@ pub(super) fn sync_properties_chrome(
             label.0 = glyph.to_owned();
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn properties_scroll(
+    mut wheel: MessageReader<MouseWheel>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    mut body: Query<(&mut ScrollPosition, &ComputedNode), With<PropertiesBody>>,
+    touch: Res<TouchState>,
+    editor: Res<Editor>,
+    right_panel: Res<RightPanelState>,
+    outliner_state: Res<OutlinerState>,
+    panel_state: Res<PropertiesPanelState>,
+) {
+    let raw: f32 = wheel
+        .read()
+        .map(|wheel| match wheel.unit {
+            MouseScrollUnit::Line => wheel.y * 21.0,
+            MouseScrollUnit::Pixel => wheel.y,
+        })
+        .sum();
+    if panel_state.collapsed || editor.mode != Mode::Build || raw == 0.0 {
+        return;
+    }
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    if !over_properties_panel(
+        cursor,
+        window.size(),
+        &right_panel,
+        outliner_state.collapsed,
+        panel_state.collapsed,
+        &touch,
+    ) {
+        return;
+    }
+    let Ok((mut position, computed)) = body.single_mut() else {
+        return;
+    };
+    let max = (computed.content_size() - computed.size()).y * computed.inverse_scale_factor();
+    position.y = (position.y - raw).clamp(0.0, max.max(0.0));
 }
 
 pub(super) fn sync_transparency_slider(
@@ -1547,15 +1689,15 @@ pub(super) fn sync_trigger_color_buttons(
         .and_then(|id| editor.pieces.iter().find(|p| p.id == id))
         .map(|p| p.trigger_color)
         .unwrap_or(crate::model::TRIGGER_DEFAULT_COLOR);
-    let is_trigger = editor
+    let is_parametric = editor
         .selection
         .primary()
         .and_then(|id| editor.pieces.iter().find(|p| p.id == id))
         .and_then(|p| shapes().get(p.shape))
-        .is_some_and(|s| s.is_trigger);
+        .is_some_and(|s| s.is_parametric());
     for (btn, mut border) in &mut buttons {
-        // Highlight only when selected piece is a trigger and color matches.
-        let is_selected = is_trigger && btn.0 == selected_color;
+        // Highlight only when selected piece is parametric and color matches.
+        let is_selected = is_parametric && btn.0 == selected_color;
         *border = BorderColor::all(if is_selected { BORDER_ON } else { BORDER });
     }
 }

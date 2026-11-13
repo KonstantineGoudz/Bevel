@@ -227,6 +227,71 @@ fn a_single_selection_has_no_group_to_carry() {
 }
 
 #[test]
+fn building_attachments_auto_group_and_move_with_host_building() {
+    let mut editor = Editor::default();
+    let room_idx = crate::model::shape_index("glade_room").unwrap();
+    let door_idx = crate::model::shape_index("glade_door").unwrap();
+    let win_idx = crate::model::shape_index("glade_window").unwrap();
+    let wall_idx = crate::model::shape_index("glade_wall").unwrap();
+
+    let room = Piece {
+        id: 1,
+        shape: room_idx,
+        pos: Vec2::ZERO,
+        trigger_size: Vec3::new(3.2, 2.6, 2.4),
+        ..test_piece(1)
+    };
+    let door = Piece {
+        id: 2,
+        shape: door_idx,
+        pos: Vec2::new(0.0, 1.2),
+        trigger_size: Vec3::new(1.15, 2.1, 0.42),
+        ..test_piece(2)
+    };
+    let window = Piece {
+        id: 3,
+        shape: win_idx,
+        pos: Vec2::new(1.6, 0.0),
+        elevation: 0.9,
+        trigger_size: Vec3::new(0.72, 0.92, 0.42),
+        ..test_piece(3)
+    };
+    let wall = Piece {
+        id: 4,
+        shape: wall_idx,
+        pos: Vec2::new(-2.4, 0.0),
+        trigger_size: Vec3::new(2.0, 2.2, 0.36),
+        ..test_piece(4)
+    };
+    editor.pieces.extend([room, door, window, wall]);
+
+    for fixture in [door, window, wall] {
+        let host = crate::glade::find_host_building(&fixture, &editor.pieces)
+            .expect("fixture finds host room");
+        assert_eq!(host, 1);
+        editor.auto_group_with_host(fixture.id, host);
+    }
+
+    let room_group = editor.outline.piece_parent(1).expect("room is grouped");
+    assert_eq!(editor.outline.piece_parent(2), Some(room_group));
+    assert_eq!(editor.outline.piece_parent(3), Some(room_group));
+    assert_eq!(editor.outline.piece_parent(4), Some(room_group));
+
+    // Selecting and dragging the building carries all attached items.
+    editor.selection.set(1);
+    let offsets = group_offsets(&editor, 1, room.pos);
+    let carried: Vec<u32> = offsets.iter().map(|(id, _)| *id).collect();
+    assert_eq!(carried, vec![2, 3, 4]);
+    let gizmo_carried: Vec<u32> = dragged_group(&editor, 1).into_iter().map(|p| p.id).collect();
+    assert_eq!(gizmo_carried, vec![2, 3, 4]);
+
+    // Selecting and dragging a single door or window does not drag the building.
+    editor.selection.set(2);
+    assert!(group_offsets(&editor, 2, door.pos).is_empty());
+    assert!(dragged_group(&editor, 2).is_empty());
+}
+
+#[test]
 fn a_plain_click_drops_the_stamp_but_shift_keeps_it_armed() {
     assert!(
         !keeps_stamping(false, false),

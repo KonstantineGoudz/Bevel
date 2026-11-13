@@ -318,9 +318,9 @@ impl From<&Piece> for SavedPiece {
         } else {
             Some(piece.trigger.damage)
         };
-        let is_trigger = model::shapes()
-            .get(piece.shape)
-            .is_some_and(|s| s.is_trigger);
+        let shape_ref = model::shapes().get(piece.shape);
+        let is_parametric = shape_ref.is_some_and(|s| s.is_parametric());
+        let is_glade = shape_ref.is_some_and(|s| s.is_glade());
         let (
             trigger_width,
             trigger_length,
@@ -329,15 +329,22 @@ impl From<&Piece> for SavedPiece {
             trigger_alpha,
             trigger_color,
             trigger_visible,
-        ) = if is_trigger {
+        ) = if is_parametric {
             let size = model::sanitize_trigger_size(piece.trigger_size);
-            let alpha = model::sanitize_trigger_alpha(piece.trigger_alpha);
+            let alpha = if is_glade {
+                crate::glade::roof_pitch(piece, shape_ref.unwrap())
+            } else {
+                model::sanitize_trigger_alpha(piece.trigger_alpha)
+            };
             let color = piece.trigger_color;
             let visible = piece.trigger_visible;
-            let shape_str =
-                model::piece_trigger_shape(piece, model::shapes().get(piece.shape).unwrap())
+            let shape_str = if is_glade {
+                piece.trigger_shape_override.id().to_owned()
+            } else {
+                model::piece_trigger_shape(piece, shape_ref.unwrap())
                     .id()
-                    .to_owned();
+                    .to_owned()
+            };
             // Only persist non-default to keep JSON small; loader defaults handle missing.
             let is_default = (size - model::TRIGGER_DEFAULT_SIZE).length_squared() < 1e-6
                 && shape_str == "box"
@@ -1097,6 +1104,9 @@ pub fn show_error(message: &str) {
     let Some(document) = web_sys::window().and_then(|window| window.document()) else {
         return;
     };
+    if let Some(loading) = document.get_element_by_id("loading") {
+        let _ = loading.set_attribute("hidden", "");
+    }
     if let Some(error) = document.get_element_by_id("error") {
         error.set_text_content(Some(message));
         let _ = error.set_attribute("style", "display:block");
@@ -1422,16 +1432,27 @@ fn validate_piece(saved: SavedPiece) -> Result<Piece, LoadError> {
         .as_deref()
         .and_then(model::TriggerShape::parse)
         .unwrap_or(model::TriggerShape::Box);
+    let is_glade = model::shapes()
+        .get(shape_index)
+        .is_some_and(|s| s.is_glade());
     let trigger_alpha = saved
         .trigger_alpha
         .map(|v| {
             if !v.is_finite() {
                 return Err(LoadError::NonFinite("trigger alpha"));
             }
-            Ok(model::sanitize_trigger_alpha(v))
+            Ok(if is_glade {
+                v.clamp(0.08, 2.0)
+            } else {
+                model::sanitize_trigger_alpha(v)
+            })
         })
         .transpose()?
-        .unwrap_or(model::TRIGGER_DEFAULT_ALPHA);
+        .unwrap_or(if is_glade {
+            crate::glade::GLADE_DEFAULT_ROOF_PITCH
+        } else {
+            model::TRIGGER_DEFAULT_ALPHA
+        });
     let trigger_color = saved
         .trigger_color
         .as_deref()
@@ -1453,8 +1474,8 @@ fn validate_piece(saved: SavedPiece) -> Result<Piece, LoadError> {
         shape: shape_index,
         pos: Vec2::new(saved.x, saved.z),
         rot: saved.rot_deg.to_radians(),
-        pitch: saved.pitch_deg.to_radians(),
-        roll: saved.roll_deg.to_radians(),
+        pitch: if is_glade { 0.0 } else { saved.pitch_deg.to_radians() },
+        roll: if is_glade { 0.0 } else { saved.roll_deg.to_radians() },
         elevation: saved.elevation,
         dynamic: saved.dynamic,
         trigger: model::Trigger::damaging(damage),
@@ -1513,6 +1534,14 @@ mod tests {
         assert!(is_viewer_query("?view=models"));
         assert!(!is_viewer_query("?session=abc"));
         assert!(!is_viewer_query(""));
+    }
+
+    #[test]
+    fn demo_level_loads_successfully() {
+        let text = include_str!("../../../levels/demo.json");
+        let snapshot = parse_any_snapshot_text(text).expect("parses");
+        let loaded = snapshot.validate().expect("validates");
+        assert!(!loaded.pieces.is_empty());
     }
 
     fn piece() -> SavedPiece {

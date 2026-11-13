@@ -55,6 +55,7 @@ fn touch_app(scale_factor: f32) -> (App, Entity) {
     app.init_resource::<Editor>();
     app.init_resource::<OutlinerState>();
     app.init_resource::<PropertiesPanelState>();
+    app.init_resource::<RightPanelState>();
     app.insert_resource(TouchState {
         enabled: true,
         ui_scale: 1.0,

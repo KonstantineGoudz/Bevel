@@ -27,4 +27,26 @@ wasm-bindgen \
 rm -rf web/assets
 cp -R assets web/assets
 
+# The viewer lists packaged models from this manifest (viewer-bevy.html fetches
+# it before the wasm boots). Generate it from the copied assets so a new model
+# appears in the list after a build, with no hand-kept second catalogue.
+python3 - <<'PY'
+import json
+import os
+
+root = "assets"
+models = []
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames.sort()
+    for name in sorted(filenames):
+        if os.path.splitext(name)[1].lower() in {".glb", ".gltf"}:
+            path = os.path.relpath(os.path.join(dirpath, name), root)
+            models.append(path.replace(os.sep, "/"))
+models.sort(key=str.lower)
+with open(os.path.join("web", "assets", "models.json"), "w", encoding="utf-8") as handle:
+    json.dump({"models": models}, handle, indent=2)
+    handle.write("\n")
+print(f"Packaged models: {len(models)}")
+PY
+
 echo "Built web/pkg ($PROFILE) and web/assets — run ./scripts/serve-web.sh and open http://localhost:8082/"

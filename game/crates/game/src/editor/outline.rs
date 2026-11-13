@@ -564,6 +564,64 @@ impl Editor {
         Some(parent.map(GraphNode::Group).unwrap_or(GraphNode::Root))
     }
 
+    /// Group `fixture_id` with `host_id` in the scene outline. If `host_id`
+    /// already belongs to a group, `fixture_id` joins that group; otherwise a
+    /// new group is created containing both `host_id` and `fixture_id`.
+    pub(crate) fn auto_group_with_host(&mut self, fixture_id: u32, host_id: u32) -> Option<u32> {
+        if fixture_id == host_id
+            || self.piece(fixture_id).is_none()
+            || self.piece(host_id).is_none()
+        {
+            return None;
+        }
+        let group_id = if let Some(existing) = self.outline.piece_parent(host_id) {
+            existing
+        } else {
+            let gid = self.next_free_id();
+            self.outline.groups.push(Group {
+                id: gid,
+                name: format!("Building {gid}"),
+                parent: None,
+                collapsed: false,
+            });
+            self.outline.move_node(GraphNode::Piece(host_id), Some(gid));
+            gid
+        };
+        self.outline
+            .move_node(GraphNode::Piece(fixture_id), Some(group_id));
+        self.outline.bump();
+        self.hard_dirty = true;
+        Some(group_id)
+    }
+
+    /// Return all piece IDs that should move/rotate together with `id` when `id`
+    /// is a building (`glade_room` / `glade_tower`): members of the same outline
+    /// group plus any ungrouped fixtures attached to the building.
+    pub(crate) fn attached_building_mates(&self, id: u32) -> Vec<u32> {
+        let Some(building) = self.piece(id) else {
+            return Vec::new();
+        };
+        let Some(shape) = shapes().get(building.shape) else {
+            return Vec::new();
+        };
+        if !crate::glade::is_building_shape(shape) {
+            return Vec::new();
+        }
+        let host_group = self.outline.piece_parent(id);
+        let mut mates = Vec::new();
+        for other in &self.pieces {
+            if other.id == id {
+                continue;
+            }
+            let same_group = host_group.is_some()
+                && self.outline.piece_parent(other.id) == host_group;
+            if same_group || crate::glade::is_attached_to_building(other, building) {
+                mates.push(other.id);
+            }
+        }
+        mates
+    }
+
     /// Reparent a piece or group. Commits only when the move is valid.
     pub(crate) fn move_node(&mut self, node: GraphNode, parent: Option<u32>) -> bool {
         match node {

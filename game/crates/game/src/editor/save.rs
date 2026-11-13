@@ -40,10 +40,18 @@ pub(super) fn level_json(editor: &Editor, orbit: &Orbit, movers: &Movers) -> Str
             // Trigger volumes are parametric: without their extents the copy
             // loads a default box. Only non-default configs are written, the
             // same rule the session snapshot uses.
-            let trigger = if shape.is_trigger {
+            let trigger = if shape.is_parametric() {
                 let size = model::sanitize_trigger_size(p.trigger_size);
-                let alpha = model::sanitize_trigger_alpha(p.trigger_alpha);
-                let form = model::piece_trigger_shape(p, shape).id();
+                let alpha = if shape.is_glade() {
+                    crate::glade::roof_pitch(p, shape)
+                } else {
+                    model::sanitize_trigger_alpha(p.trigger_alpha)
+                };
+                let form = if shape.is_glade() {
+                    p.trigger_shape_override.id()
+                } else {
+                    model::piece_trigger_shape(p, shape).id()
+                };
                 let is_default = (size - model::TRIGGER_DEFAULT_SIZE).length_squared() < 1e-6
                     && form == "box"
                     && (alpha - model::TRIGGER_DEFAULT_ALPHA).abs() < 1e-6
@@ -406,7 +414,7 @@ pub(super) fn save_shortcut(
     if input.just_pressed(Action::CopyJson) {
         copy_level_json(&mut editor, &orbit, &movers, &mut clipboard);
     } else if input.just_pressed(Action::SaveLevel) {
-        if editor.mode == Mode::Build {
+        if object_editing_allowed(editor.mode) {
             save(
                 &mut editor,
                 &orbit,

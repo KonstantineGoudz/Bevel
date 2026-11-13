@@ -2,7 +2,215 @@
 
 use super::*;
 
-pub(super) fn transform_gizmo(gizmos: &mut Gizmos, piece: &Piece, shape: &model::Shape) {
+/// Gizmo group for overlays that should render X-ray (on top of buildings and
+/// terrain rather than being occluded by 3D meshes).
+#[derive(Default, Reflect, GizmoConfigGroup)]
+#[reflect(Default)]
+pub(super) struct XrayGizmos;
+
+/// Register the X-ray gizmo group before `draw` runs.
+pub(super) fn configure_xray_gizmos(app: &mut App) {
+    app.insert_gizmo_config(
+        XrayGizmos,
+        GizmoConfig {
+            depth_bias: -1.0,
+            ..default()
+        },
+    );
+}
+
+/// Draw a dashed line segment in 3D space.
+fn dashed_line<Config: GizmoConfigGroup>(
+    gizmos: &mut Gizmos<Config>,
+    a: Vec3,
+    b: Vec3,
+    colour: Color,
+) {
+    let dist = a.distance(b);
+    if dist < 1e-4 {
+        return;
+    }
+    let step = 0.22;
+    let dash = 0.11;
+    let dir = (b - a) / dist;
+    let mut t = 0.0;
+    while t < dist {
+        let end = (t + dash).min(dist);
+        gizmos.line(a + dir * t, a + dir * end, colour);
+        t += step;
+    }
+}
+
+/// Draw a filled-outline arrowhead at `tip` pointing along unit `dir`.
+fn glade_arrowhead(
+    gizmos: &mut Gizmos,
+    tip: Vec3,
+    dir: Vec3,
+    head_len: f32,
+    head_w: f32,
+    colour: Color,
+) {
+    let side = if dir.y.abs() > 0.85 {
+        Vec3::X
+    } else {
+        Vec3::new(-dir.z, 0.0, dir.x).normalize_or_zero()
+    };
+    let neck = tip - dir * head_len;
+    closed(
+        gizmos,
+        &[neck + side * head_w, tip, neck - side * head_w],
+        colour,
+    );
+}
+
+/// Draw a clean white 3D arrow from `base` to `tip` with a filled-outline head.
+fn glade_arrow(gizmos: &mut Gizmos, base: Vec3, tip: Vec3, head_len: f32, head_w: f32, colour: Color) {
+    let dir = (tip - base).normalize_or_zero();
+    if dir == Vec3::ZERO {
+        return;
+    }
+    let side = if dir.y.abs() > 0.85 {
+        Vec3::X
+    } else {
+        Vec3::new(-dir.z, 0.0, dir.x).normalize_or_zero()
+    };
+    let neck = tip - dir * head_len;
+    gizmos.line(base, neck, colour);
+    gizmos.line(base + side * 0.02, neck + side * 0.02, colour);
+    glade_arrowhead(gizmos, tip, dir, head_len, head_w, colour);
+}
+
+/// Tiny Glade–style white building controls: dashed bounding/roof wireframe,
+/// 4 outward face resize arrows, vertical height bar with end nodes, upward
+/// roof-pitch apex arrow, 4 ground-plane move arrows, and 2 corner rotation arcs.
+fn glade_transform_gizmo(
+    gizmos: &mut Gizmos,
+    xray_gizmos: &mut Gizmos<XrayGizmos>,
+    piece: &Piece,
+    shape: &model::Shape,
+    touch: bool,
+) {
+    let kind = crate::glade::GladeKind::from_shape(shape);
+    if kind == Some(crate::glade::GladeKind::Path) {
+        return;
+    }
+    let white = Color::srgba(1.0, 1.0, 1.0, 0.95);
+    let wire = Color::srgba(1.0, 1.0, 1.0, 0.65);
+    let ext = crate::glade::piece_extents(piece, shape);
+    let root = Vec3::new(piece.pos.x, piece.elevation, piece.pos.y);
+    let rot = model::piece_quat(piece);
+    let hx = ext.x * 0.5;
+    let hz = ext.z * 0.5;
+    let pt = |x: f32, y: f32, z: f32| root + rot * Vec3::new(x, y, z);
+
+    // 1. Dashed wireframe bounding box + roof ridge
+    if !matches!(kind, Some(crate::glade::GladeKind::Terrain)) {
+        let b = [
+            pt(-hx, 0.0, -hz),
+            pt(hx, 0.0, -hz),
+            pt(hx, 0.0, hz),
+            pt(-hx, 0.0, hz),
+        ];
+        let t = [
+            pt(-hx, ext.y, -hz),
+            pt(hx, ext.y, -hz),
+            pt(hx, ext.y, hz),
+            pt(-hx, ext.y, hz),
+        ];
+        for i in 0..4 {
+            let j = (i + 1) % 4;
+            dashed_line(xray_gizmos, b[i], b[j], wire);
+            dashed_line(xray_gizmos, t[i], t[j], wire);
+            dashed_line(xray_gizmos, b[i], t[i], wire);
+        }
+        let rise = crate::glade::roof_rise(piece, shape);
+        if rise > 0.05 {
+            let top_h = ext.y + rise;
+            if kind == Some(crate::glade::GladeKind::Tower) {
+                let apex = pt(0.0, top_h, 0.0);
+                for corner in t {
+                    dashed_line(xray_gizmos, corner, apex, wire);
+                }
+            } else if kind == Some(crate::glade::GladeKind::Room) {
+                if ext.x >= ext.z {
+                    let r0 = pt(-hx, top_h, 0.0);
+                    let r1 = pt(hx, top_h, 0.0);
+                    dashed_line(xray_gizmos, r0, r1, wire);
+                    dashed_line(xray_gizmos, t[0], r0, wire);
+                    dashed_line(xray_gizmos, t[3], r0, wire);
+                    dashed_line(xray_gizmos, t[1], r1, wire);
+                    dashed_line(xray_gizmos, t[2], r1, wire);
+                } else {
+                    let r0 = pt(0.0, top_h, -hz);
+                    let r1 = pt(0.0, top_h, hz);
+                    dashed_line(xray_gizmos, r0, r1, wire);
+                    dashed_line(xray_gizmos, t[0], r0, wire);
+                    dashed_line(xray_gizmos, t[1], r0, wire);
+                    dashed_line(xray_gizmos, t[3], r1, wire);
+                    dashed_line(xray_gizmos, t[2], r1, wire);
+                }
+            }
+        }
+    }
+
+    // 2. Tactile handles (4 outward face arrows, vertical height bar, roof apex arrow)
+    let head_len = if touch { 0.28 } else { 0.18 };
+    let head_w = if touch { 0.16 } else { 0.10 };
+    let node_r = if touch { 0.14 } else { 0.09 };
+    for (handle, tip, stem_base) in glade_handle_visuals_for(piece, shape, touch) {
+        match handle {
+            GizmoHandle::GladeWidth | GizmoHandle::GladeLength | GizmoHandle::GladeRoofPitch => {
+                glade_arrow(gizmos, stem_base, tip, head_len, head_w, white);
+            }
+            GizmoHandle::GladeHeight => {
+                let bottom = Vec3::new(stem_base.x, root.y, stem_base.z);
+                gizmos.line(bottom, tip, white);
+                for end in [bottom, tip] {
+                    gizmos.sphere(Isometry3d::new(end, Quat::IDENTITY), node_r, white);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 3. Ground-plane 4 arrow move controls + 2 corner rotation arcs
+    let move_head_len = if touch { 0.22 } else { 0.15 };
+    let move_head_w = if touch { 0.13 } else { 0.09 };
+    for (base, tip) in glade_move_arrows(piece, shape, touch) {
+        glade_arrow(gizmos, base, tip, move_head_len, move_head_w, white);
+    }
+    let arc_head_len = if touch { 0.18 } else { 0.12 };
+    let arc_head_w = if touch { 0.11 } else { 0.075 };
+    for arc in glade_rotation_arcs(piece, shape, touch) {
+        for pair in arc.windows(2) {
+            gizmos.line(pair[0], pair[1], white);
+        }
+        if arc.len() >= 2 {
+            let start_dir = (arc[0] - arc[1]).normalize_or_zero();
+            if start_dir != Vec3::ZERO {
+                glade_arrowhead(gizmos, arc[0], start_dir, arc_head_len, arc_head_w, white);
+            }
+            let last = arc.len() - 1;
+            let end_dir = (arc[last] - arc[last - 1]).normalize_or_zero();
+            if end_dir != Vec3::ZERO {
+                glade_arrowhead(gizmos, arc[last], end_dir, arc_head_len, arc_head_w, white);
+            }
+        }
+    }
+}
+
+pub(super) fn transform_gizmo(
+    gizmos: &mut Gizmos,
+    xray_gizmos: &mut Gizmos<XrayGizmos>,
+    piece: &Piece,
+    shape: &model::Shape,
+    touch: bool,
+) {
+    if shape.is_glade() {
+        glade_transform_gizmo(gizmos, xray_gizmos, piece, shape, touch);
+        return;
+    }
+
     let origin = gizmo_origin(piece, shape);
     let (reach, ring) = gizmo_frame(piece, shape);
 
@@ -31,11 +239,12 @@ pub(super) fn transform_gizmo(gizmos: &mut Gizmos, piece: &Piece, shape: &model:
         closed(gizmos, &gizmo_plane_corners(origin, a, b, reach), colour);
     }
 
-    for (u, v, colour) in [
+    let rotation_rings: &[(Vec3, Vec3, Color)] = &[
         (Vec3::Y, Vec3::Z, GIZMO_X),
         (Vec3::X, Vec3::Z, GIZMO_Y),
         (Vec3::X, Vec3::Y, GIZMO_Z),
-    ] {
+    ];
+    for &(u, v, colour) in rotation_rings {
         let points: Vec<Vec3> = (0..32)
             .map(|i| {
                 let a = std::f32::consts::TAU * i as f32 / 32.0;
@@ -44,6 +253,168 @@ pub(super) fn transform_gizmo(gizmos: &mut Gizmos, piece: &Piece, shape: &model:
             .collect();
         closed(gizmos, &points, colour);
     }
+}
+
+/// Tactile 3D handles for Glade buildings: `(handle, handle_pos, stem_anchor_pos)`.
+pub(super) fn glade_handle_visuals(
+    piece: &Piece,
+    shape: &model::Shape,
+) -> Vec<(GizmoHandle, Vec3, Vec3)> {
+    glade_handle_visuals_for(piece, shape, false)
+}
+
+/// Tactile 3D handles for Glade buildings, with enlarged spacing on touch screens.
+pub(super) fn glade_handle_visuals_for(
+    piece: &Piece,
+    shape: &model::Shape,
+    touch: bool,
+) -> Vec<(GizmoHandle, Vec3, Vec3)> {
+    if !shape.is_glade() {
+        return Vec::new();
+    }
+    let kind = crate::glade::GladeKind::from_shape(shape);
+    if kind == Some(crate::glade::GladeKind::Path) {
+        return Vec::new();
+    }
+    let ext = crate::glade::piece_extents(piece, shape);
+    let root = Vec3::new(piece.pos.x, piece.elevation, piece.pos.y);
+    let rot = model::piece_quat(piece);
+    let mid_y = (ext.y * 0.5).max(0.35);
+    let hx = ext.x * 0.5;
+    let hz = ext.z * 0.5;
+    let pad = if touch { 0.56 } else { 0.34 };
+    let v_pad = if touch { 0.52 } else { 0.32 };
+
+    let mut out = vec![
+        (
+            GizmoHandle::GladeWidth,
+            root + rot * Vec3::new(hx + pad, mid_y, 0.0),
+            root + rot * Vec3::new(hx, mid_y, 0.0),
+        ),
+        (
+            GizmoHandle::GladeWidth,
+            root + rot * Vec3::new(-hx - pad, mid_y, 0.0),
+            root + rot * Vec3::new(-hx, mid_y, 0.0),
+        ),
+    ];
+
+    if !matches!(
+        kind,
+        Some(crate::glade::GladeKind::Door | crate::glade::GladeKind::Window)
+    ) {
+        out.push((
+            GizmoHandle::GladeLength,
+            root + rot * Vec3::new(0.0, mid_y, hz + pad),
+            root + rot * Vec3::new(0.0, mid_y, hz),
+        ));
+        out.push((
+            GizmoHandle::GladeLength,
+            root + rot * Vec3::new(0.0, mid_y, -hz - pad),
+            root + rot * Vec3::new(0.0, mid_y, -hz),
+        ));
+    }
+
+    let height_anchor_xz = if matches!(
+        kind,
+        Some(
+            crate::glade::GladeKind::Wall
+                | crate::glade::GladeKind::Door
+                | crate::glade::GladeKind::Window
+        )
+    ) {
+        Vec2::ZERO
+    } else {
+        Vec2::new(hx + pad * 0.55, hz + pad * 0.55)
+    };
+    out.push((
+        GizmoHandle::GladeHeight,
+        root + rot * Vec3::new(height_anchor_xz.x, ext.y, height_anchor_xz.y),
+        root + rot * Vec3::new(height_anchor_xz.x, 0.0, height_anchor_xz.y),
+    ));
+
+    if matches!(
+        kind,
+        Some(
+            crate::glade::GladeKind::Room
+                | crate::glade::GladeKind::Tower
+                | crate::glade::GladeKind::Terrain
+        )
+    ) {
+        let top_h = crate::glade::total_height(piece, shape);
+        out.push((
+            GizmoHandle::GladeRoofPitch,
+            root + rot * Vec3::new(0.0, top_h + v_pad * 1.15, 0.0),
+            root + rot * Vec3::new(0.0, top_h, 0.0),
+        ));
+    }
+    out
+}
+
+/// 4 ground-plane move arrows (`(base, tip)` in world space) outside the piece's
+/// base footprint, one per cardinal face, for dragging on the XZ plane.
+pub(super) fn glade_move_arrows(
+    piece: &Piece,
+    shape: &model::Shape,
+    touch: bool,
+) -> Vec<(Vec3, Vec3)> {
+    if !shape.is_glade()
+        || crate::glade::GladeKind::from_shape(shape) == Some(crate::glade::GladeKind::Path)
+    {
+        return Vec::new();
+    }
+    let ext = crate::glade::piece_extents(piece, shape);
+    let root = Vec3::new(piece.pos.x, piece.elevation, piece.pos.y);
+    let rot = model::piece_quat(piece);
+    let hx = ext.x * 0.5;
+    let hz = ext.z * 0.5;
+    let y = 0.05;
+    let inner = if touch { 0.24 } else { 0.16 };
+    let outer = if touch { 0.88 } else { 0.62 };
+    let pt = |x: f32, z: f32| root + rot * Vec3::new(x, y, z);
+
+    vec![
+        (pt(hx + inner, 0.0), pt(hx + outer, 0.0)),
+        (pt(-hx - inner, 0.0), pt(-hx - outer, 0.0)),
+        (pt(0.0, hz + inner), pt(0.0, hz + outer)),
+        (pt(0.0, -hz - inner), pt(0.0, -hz - outer)),
+    ]
+}
+
+/// 2 corner rotation arcs on the ground plane at opposite corners outside the
+/// piece's base footprint (avoiding the `(+hx, +hz)` height-bar corner).
+pub(super) fn glade_rotation_arcs(
+    piece: &Piece,
+    shape: &model::Shape,
+    touch: bool,
+) -> Vec<Vec<Vec3>> {
+    if !shape.is_glade()
+        || crate::glade::GladeKind::from_shape(shape) == Some(crate::glade::GladeKind::Path)
+    {
+        return Vec::new();
+    }
+    let ext = crate::glade::piece_extents(piece, shape);
+    let root = Vec3::new(piece.pos.x, piece.elevation, piece.pos.y);
+    let rot = model::piece_quat(piece);
+    let hx = ext.x * 0.5;
+    let hz = ext.z * 0.5;
+    let y = 0.05;
+    let arc_pad = if touch { 0.48 } else { 0.32 };
+    let radius = (hx * hx + hz * hz).sqrt() + arc_pad;
+    let half_span = 0.36_f32;
+    const ARC_STEPS: usize = 10;
+
+    [(-hz).atan2(hx), hz.atan2(-hx)]
+        .into_iter()
+        .map(|center_angle| {
+            (0..=ARC_STEPS)
+                .map(|i| {
+                    let t = i as f32 / ARC_STEPS as f32;
+                    let a = center_angle + (t * 2.0 - 1.0) * half_span;
+                    root + rot * Vec3::new(a.cos() * radius, y, a.sin() * radius)
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Where the gizmo's axes meet: just above the piece's base, or at ground level
@@ -105,7 +476,12 @@ pub(super) fn gizmo_frame(piece: &Piece, shape: &model::Shape) -> (f32, f32) {
 
 /// The piece's bounding box as the largest of its local ground-plane extent and
 /// its height, in metres. Tilt does not change the gizmo size.
-pub(super) fn bounding_size(_piece: &Piece, shape: &model::Shape) -> f32 {
+pub(super) fn bounding_size(piece: &Piece, shape: &model::Shape) -> f32 {
+    if shape.is_glade() {
+        let ext = crate::glade::piece_extents(piece, shape);
+        let top = crate::glade::total_height(piece, shape);
+        return ext.x.max(ext.z).max(top);
+    }
     let points = model::shape_points(shape);
     let (low, high) = outline_bounds(&points);
     let ground = Vec2::new(high.x - low.x, high.y - low.y);
@@ -115,13 +491,22 @@ pub(super) fn bounding_size(_piece: &Piece, shape: &model::Shape) -> f32 {
 /// World-space bounding box of a piece: the low and high corners of its fully
 /// oriented box, projected onto `(x, z)`.
 pub(super) fn piece_bounds(piece: &Piece, shape: &model::Shape) -> (Vec2, Vec2) {
-    let points = model::shape_points(shape);
+    let points = if shape.is_glade() {
+        crate::glade::local_footprint(piece, shape)
+    } else {
+        model::shape_points(shape)
+    };
+    let top = if shape.is_glade() {
+        crate::glade::total_height(piece, shape)
+    } else {
+        shape.top()
+    };
     let root = Vec3::new(piece.pos.x, piece.elevation, piece.pos.y);
     let rotation = model::piece_quat(piece);
     let mut low = Vec2::splat(f32::MAX);
     let mut high = Vec2::splat(f32::MIN);
     for point in &points {
-        for y in [shape.base, shape.top()] {
+        for y in [shape.base, top] {
             let world = root + rotation * Vec3::new(point.x, y, point.y);
             low.x = low.x.min(world.x);
             low.y = low.y.min(world.z);
@@ -192,6 +577,44 @@ pub(super) fn gizmo_hit(
 
     let project = |point: Vec3| camera.world_to_viewport(camera_transform, point).ok();
 
+    if shape.is_glade() {
+        let orb_radius = if touch { 64.0 } else { 28.0 };
+        let mut best: Option<(f32, GizmoHandle)> = None;
+        for (handle, tip, stem_base) in glade_handle_visuals_for(piece, shape, touch) {
+            if let Some(tip_screen) = project(tip) {
+                let d_tip = screen.distance(tip_screen);
+                let d_stem = project(stem_base)
+                    .map(|stem_screen| point_segment_distance(screen, stem_screen, tip_screen))
+                    .unwrap_or(d_tip);
+                let d = d_tip.min(d_stem);
+                if d <= orb_radius && best.is_none_or(|(best_d, _)| d < best_d) {
+                    best = Some((d, handle));
+                }
+            }
+        }
+
+        let ground_hit = if touch { 40.0 } else { 22.0 };
+        for (base, tip) in glade_move_arrows(piece, shape, touch) {
+            if let (Some(base_screen), Some(tip_screen)) = (project(base), project(tip)) {
+                let d = point_segment_distance(screen, base_screen, tip_screen);
+                if d <= ground_hit && best.is_none_or(|(best_d, _)| d < best_d) {
+                    best = Some((d, GizmoHandle::Xz));
+                }
+            }
+        }
+        for arc in glade_rotation_arcs(piece, shape, touch) {
+            for pair in arc.windows(2) {
+                if let (Some(a_screen), Some(b_screen)) = (project(pair[0]), project(pair[1])) {
+                    let d = point_segment_distance(screen, a_screen, b_screen);
+                    if d <= ground_hit && best.is_none_or(|(best_d, _)| d < best_d) {
+                        best = Some((d, GizmoHandle::Yaw));
+                    }
+                }
+            }
+        }
+        return best.map(|(_, handle)| handle);
+    }
+
     // Plane handles first: their squares are small and unambiguous, and a
     // click inside one must not be stolen by an axis line crossing behind it.
     for (handle, a, b) in [
@@ -214,8 +637,12 @@ pub(super) fn gizmo_hit(
     }
 
     let mut best: Option<(f32, GizmoHandle)> = None;
-    // Fingertips need a bigger target than a mouse cursor.
-    let hit_radius = if touch { 24.0 } else { GIZMO_HANDLE_HIT };
+    // Fingertips need a bigger target than a mouse cursor, especially on Glade buildings.
+    let hit_radius = if touch {
+        if shape.is_glade() { 38.0 } else { 24.0 }
+    } else {
+        GIZMO_HANDLE_HIT
+    };
     if let Ok(origin_screen) = camera.world_to_viewport(camera_transform, origin) {
         for (handle, point) in gizmo_handle_points(piece, shape) {
             if !matches!(handle, GizmoHandle::X | GizmoHandle::Y | GizmoHandle::Z) {
@@ -236,15 +663,25 @@ pub(super) fn gizmo_hit(
 
     if best.is_none() {
         let mut ring_best: Option<(f32, GizmoHandle)> = None;
-        for (handle, axis) in [
-            (GizmoHandle::Pitch, Vec3::X),
-            (GizmoHandle::Yaw, Vec3::Y),
-            (GizmoHandle::Roll, Vec3::Z),
-        ] {
+        let ring_tol = if touch && shape.is_glade() {
+            GIZMO_YAW_HIT * 2.0
+        } else {
+            GIZMO_YAW_HIT
+        };
+        let rotation_axes: &[(GizmoHandle, Vec3)] = if shape.is_glade() {
+            &[(GizmoHandle::Yaw, Vec3::Y)]
+        } else {
+            &[
+                (GizmoHandle::Pitch, Vec3::X),
+                (GizmoHandle::Yaw, Vec3::Y),
+                (GizmoHandle::Roll, Vec3::Z),
+            ]
+        };
+        for &(handle, axis) in rotation_axes {
             if let Some(hit) = ray.plane_intersection_point(origin, InfinitePlane3d::new(axis)) {
                 let radius = (hit - origin).length();
                 let error = (radius - ring).abs();
-                if error < ring * GIZMO_YAW_HIT && ring_best.is_none_or(|(d, _)| error < d) {
+                if error < ring * ring_tol && ring_best.is_none_or(|(d, _)| error < d) {
                     ring_best = Some((error, handle));
                 }
             }
@@ -282,18 +719,20 @@ pub(super) fn gizmo_grab(
 /// mouse and touch) build the drag here so they can never disagree about who
 /// moves.
 pub(super) fn dragged_group(editor: &Editor, id: u32) -> Vec<Piece> {
-    editor
+    let mut ids: Vec<u32> = editor
         .selection
         .ids()
         .iter()
-        .filter(|selected| **selected != id)
-        .filter_map(|selected| {
-            editor
-                .pieces
-                .iter()
-                .find(|piece| piece.id == *selected)
-                .copied()
-        })
+        .copied()
+        .filter(|selected| *selected != id)
+        .collect();
+    for mate_id in editor.attached_building_mates(id) {
+        if !ids.contains(&mate_id) {
+            ids.push(mate_id);
+        }
+    }
+    ids.into_iter()
+        .filter_map(|selected| editor.pieces.iter().find(|piece| piece.id == selected).copied())
         .collect()
 }
 
@@ -338,10 +777,15 @@ pub(super) fn gizmo_drag_point(ray: Ray3d, handle: GizmoHandle, origin: Vec3) ->
     match handle {
         GizmoHandle::X => ray_axis_point(ray, origin, Vec3::X),
         GizmoHandle::Z => ray_axis_point(ray, origin, Vec3::Z),
-        GizmoHandle::Y => vertical_drag_point(ray, origin),
+        GizmoHandle::Y | GizmoHandle::GladeHeight | GizmoHandle::GladeRoofPitch => {
+            vertical_drag_point(ray, origin)
+        }
         GizmoHandle::Xy => plane_ray_point(ray, origin, Vec3::Z),
         GizmoHandle::Zy => plane_ray_point(ray, origin, Vec3::X),
-        GizmoHandle::Xz | GizmoHandle::Yaw => plane_ray_point(ray, origin, Vec3::Y),
+        GizmoHandle::Xz
+        | GizmoHandle::Yaw
+        | GizmoHandle::GladeWidth
+        | GizmoHandle::GladeLength => plane_ray_point(ray, origin, Vec3::Y),
         GizmoHandle::Pitch => plane_ray_point(ray, origin, Vec3::X),
         GizmoHandle::Roll => plane_ray_point(ray, origin, Vec3::Z),
     }
@@ -391,17 +835,87 @@ pub(super) fn dragged_piece(start: Piece, handle: GizmoHandle, grab: Vec3, curre
             piece.pos.y += delta.z;
         }
         GizmoHandle::Pitch | GizmoHandle::Yaw | GizmoHandle::Roll => {
+            let shape = &shapes()[start.shape];
+            if shape.is_glade() && matches!(handle, GizmoHandle::Pitch | GizmoHandle::Roll) {
+                return piece;
+            }
             let axis = match handle {
                 GizmoHandle::Pitch => Vec3::X,
                 GizmoHandle::Yaw => Vec3::Y,
                 GizmoHandle::Roll => Vec3::Z,
                 _ => unreachable!(),
             };
-            let shape = &shapes()[start.shape];
             let origin = gizmo_origin(&start, shape);
             if let Some(angle) = signed_angle_around(axis, grab - origin, current - origin) {
                 let rotation = Quat::from_axis_angle(axis, angle) * model::piece_quat(&start);
                 model::set_piece_quat(&mut piece, rotation);
+            }
+        }
+        GizmoHandle::GladeWidth
+        | GizmoHandle::GladeLength
+        | GizmoHandle::GladeHeight
+        | GizmoHandle::GladeRoofPitch => {
+            let shape = &shapes()[start.shape];
+            let mut ext = crate::glade::piece_extents(&start, shape);
+            let root = Vec3::new(start.pos.x, start.elevation, start.pos.y);
+            let inv_rot = model::piece_quat(&start).inverse();
+            let local_grab = inv_rot * (grab - root);
+            let local_curr = inv_rot * (current - root);
+            let kind = crate::glade::GladeKind::from_shape(shape);
+            match handle {
+                GizmoHandle::GladeWidth => {
+                    let sign = if local_grab.x >= 0.0 { 1.0 } else { -1.0 };
+                    let dw = (local_curr.x - local_grab.x) * sign * 2.0;
+                    let (min_w, max_w) = match kind {
+                        Some(crate::glade::GladeKind::Wall) => (0.8, crate::glade::GLADE_MAX_SPAN),
+                        Some(crate::glade::GladeKind::Terrain) => (
+                            crate::glade::TERRAIN_MIN_SPAN,
+                            crate::glade::TERRAIN_MAX_SPAN,
+                        ),
+                        _ => (1.0, crate::glade::GLADE_MAX_SPAN),
+                    };
+                    ext.x = (ext.x + dw).clamp(min_w, max_w);
+                    if kind == Some(crate::glade::GladeKind::Tower) {
+                        ext.z = ext.x;
+                    }
+                    piece.trigger_size = ext;
+                }
+                GizmoHandle::GladeLength => {
+                    let sign = if local_grab.z >= 0.0 { 1.0 } else { -1.0 };
+                    let dz = (local_curr.z - local_grab.z) * sign * 2.0;
+                    let (min_z, max_z) = match kind {
+                        Some(crate::glade::GladeKind::Wall) => (0.22, 1.4),
+                        Some(crate::glade::GladeKind::Terrain) => (
+                            crate::glade::TERRAIN_MIN_SPAN,
+                            crate::glade::TERRAIN_MAX_SPAN,
+                        ),
+                        _ => (1.0, crate::glade::GLADE_MAX_SPAN),
+                    };
+                    ext.z = (ext.z + dz).clamp(min_z, max_z);
+                    if kind == Some(crate::glade::GladeKind::Tower) {
+                        ext.x = ext.z;
+                    }
+                    piece.trigger_size = ext;
+                }
+                GizmoHandle::GladeHeight => {
+                    let (min_h, max_h) = match kind {
+                        Some(crate::glade::GladeKind::Terrain) => (
+                            crate::glade::TERRAIN_MIN_HEIGHT,
+                            crate::glade::TERRAIN_MAX_HEIGHT,
+                        ),
+                        _ => (
+                            crate::glade::GLADE_MIN_HEIGHT,
+                            crate::glade::GLADE_MAX_HEIGHT,
+                        ),
+                    };
+                    ext.y = (ext.y + delta.y).clamp(min_h, max_h);
+                    piece.trigger_size = ext;
+                }
+                GizmoHandle::GladeRoofPitch => {
+                    let start_alpha = start.trigger_alpha.clamp(0.0, 1.0);
+                    piece.trigger_alpha = (start_alpha + delta.y * 0.25).clamp(0.0, 1.0);
+                }
+                _ => {}
             }
         }
     }
@@ -450,6 +964,11 @@ pub(super) fn snap_elevation(
 
     // The ground is the natural zero, not `-base`; every piece starts there.
     consider(0.0);
+    let terrain_h = crate::glade::terrain_height_at(piece.pos, others)
+        .max(crate::glade::world_terrain_height_at(piece.pos, others));
+    if terrain_h > 0.01 {
+        consider(terrain_h - shape.base);
+    }
     for other in others {
         if other.id == piece.id {
             continue;
@@ -457,6 +976,11 @@ pub(super) fn snap_elevation(
         let Some(other_shape) = shapes().get(other.shape) else {
             continue;
         };
+        if let Some(chunk_h) = crate::glade::terrain_chunk_height_at(other, other_shape, piece.pos)
+        {
+            consider(chunk_h - shape.base);
+            continue;
+        }
         let (low, high) = piece_bounds(other, other_shape);
         if piece.pos.x < low.x - HIT_PAD
             || piece.pos.x > high.x + HIT_PAD
@@ -465,7 +989,12 @@ pub(super) fn snap_elevation(
         {
             continue;
         }
-        consider(other.elevation + other_shape.top() - shape.base);
+        let other_top = if other_shape.is_glade() {
+            crate::glade::piece_extents(other, other_shape).y
+        } else {
+            other_shape.top()
+        };
+        consider(other.elevation + other_top - shape.base);
     }
 
     if let Some((distance, elevation)) = best
@@ -493,6 +1022,24 @@ pub(super) fn apply_gizmo_drag(editor: &mut Editor, drag: GizmoDrag, ray: Option
 
     if matches!(
         drag.handle,
+        GizmoHandle::X | GizmoHandle::Z | GizmoHandle::Xz
+    ) && matches!(shape.id, "glade_door" | "glade_window" | "door" | "gate")
+        && (piece.pos - drag.start.pos).length_squared() > 1e-8
+    {
+        let mut moving: Vec<u32> = drag.others.iter().map(|other| other.id).collect();
+        moving.push(drag.id);
+        let candidates = snap_against(editor, &moving);
+        if let Some((snapped_pos, snapped_rot, wall_elev)) =
+            crate::glade::snap_door_to_glade_wall_with_elevation(&piece, &candidates, Some(ray), &[])
+        {
+            piece.pos = snapped_pos;
+            piece.rot = snapped_rot;
+            piece.elevation = wall_elev;
+        }
+    }
+
+    if matches!(
+        drag.handle,
         GizmoHandle::Y | GizmoHandle::Xy | GizmoHandle::Zy
     ) {
         if (raw - drag.last_raw).abs() > 1e-6 {
@@ -514,24 +1061,49 @@ pub(super) fn apply_gizmo_drag(editor: &mut Editor, drag: GizmoDrag, ray: Option
             piece.elevation = drag.last;
         }
     }
-    // The rest of the selection takes the same delta as the grabbed piece.
-    // One formula covers translate, lift and rotate: a translate handle leaves
-    // the quaternion delta at identity, and a rotation handle leaves the
-    // position delta at zero.
-    let delta_pos = piece.pos - drag.start.pos;
-    let delta_elevation = piece.elevation - drag.start.elevation;
+    // The rest of the selection (and any building attachments) takes the same
+    // delta as the grabbed piece, orbiting around `drag.start` when rotated.
     let delta_rot = model::piece_quat(&piece) * model::piece_quat(&drag.start).inverse();
     for other in &drag.others {
         let mut moved = *other;
-        moved.pos += delta_pos;
-        moved.elevation += delta_elevation;
+        let rel = Vec3::new(
+            other.pos.x - drag.start.pos.x,
+            other.elevation - drag.start.elevation,
+            other.pos.y - drag.start.pos.y,
+        );
+        let rotated_rel = delta_rot * rel;
+        moved.pos = piece.pos + Vec2::new(rotated_rel.x, rotated_rel.z);
+        moved.elevation = piece.elevation + rotated_rel.y;
         model::set_piece_quat(&mut moved, delta_rot * model::piece_quat(other));
         if let Some(target) = editor.pieces.iter_mut().find(|target| target.id == other.id) {
             *target = moved;
         }
     }
 
+    let old_piece = editor.pieces[index];
     editor.pieces[index] = piece;
+    if matches!(
+        drag.handle,
+        GizmoHandle::GladeWidth | GizmoHandle::GladeLength
+    ) {
+        crate::glade::pin_doors_on_glade_resize(&old_piece, &piece, &mut editor.pieces);
+    }
+    if shape.id == "glade_terrain" {
+        let snapshot = editor.pieces.clone();
+        let terrain_idx = drag.start.shape;
+        let reach = piece.trigger_size.x.max(piece.trigger_size.z) * 0.65 + 2.0;
+        for other in &mut editor.pieces {
+            if other.shape == terrain_idx {
+                continue;
+            }
+            if other.pos.distance(piece.pos) <= reach {
+                let ground_h = crate::glade::world_terrain_height_at(other.pos, &snapshot);
+                if (other.elevation - ground_h).abs() <= 5.0 {
+                    other.elevation = ground_h;
+                }
+            }
+        }
+    }
     editor.gizmo_drag = Some(GizmoDrag {
         last_raw: raw,
         last: piece.elevation,
@@ -646,12 +1218,20 @@ pub(super) fn actor_arrow(gizmos: &mut Gizmos, character: Character) {
 }
 
 pub(super) fn selection_box(gizmos: &mut Gizmos, piece: &Piece, shape: &model::Shape) {
-    let points = model::shape_points(shape);
+    let points = if shape.is_glade() {
+        crate::glade::local_footprint(piece, shape)
+    } else {
+        model::shape_points(shape)
+    };
     let root = Vec3::new(piece.pos.x, piece.elevation, piece.pos.y);
     let rotation = model::piece_quat(piece);
     let at = |p: Vec2, y: f32| root + rotation * Vec3::new(p.x, y, p.y);
     let low = shape.base - 0.01;
-    let high = shape.top() + 0.01;
+    let high = if shape.is_glade() {
+        crate::glade::piece_extents(piece, shape).y + 0.01
+    } else {
+        shape.top() + 0.01
+    };
     for i in 0..points.len() {
         let a = points[i];
         let b = points[(i + 1) % points.len()];
@@ -665,8 +1245,29 @@ pub(super) fn anchors(gizmos: &mut Gizmos, piece: &Piece, shape: &model::Shape) 
     let size = 0.07;
     let root = Vec3::new(piece.pos.x, piece.elevation, piece.pos.y);
     let rotation = model::piece_quat(piece);
+    let scale = if shape.is_glade() {
+        let ext = crate::glade::piece_extents(piece, shape);
+        let def = crate::glade::default_size(shape);
+        Vec2::new(
+            (ext.x / def.x.max(0.1)).max(0.1),
+            (ext.z / def.z.max(0.1)).max(0.1),
+        )
+    } else {
+        Vec2::ONE
+    };
+    let top_y = if shape.is_glade() {
+        crate::glade::piece_extents(piece, shape).y
+    } else {
+        shape.top()
+    };
     for anchor in &shape.anchors {
-        let c = root + rotation * Vec3::new(anchor.local.x, shape.top() + 0.03, anchor.local.y);
+        let c = root
+            + rotation
+                * Vec3::new(
+                    anchor.local.x * scale.x,
+                    top_y + 0.03,
+                    anchor.local.y * scale.y,
+                );
         let corners = [
             c + rotation * Vec3::new(0.0, 0.0, size),
             c + rotation * Vec3::new(size, 0.0, 0.0),

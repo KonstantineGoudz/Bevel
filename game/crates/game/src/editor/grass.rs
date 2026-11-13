@@ -133,35 +133,76 @@ pub(super) fn finish_grass_stroke(
     }
 }
 
-/// A fixed cluster of tapered blades (single triangles) around the origin,
-/// roughly one hex-corner wide and knee-high. One baked mesh serves every
-/// hex; per-hex yaw and scale supply the variety.
+/// A fixed cluster of curved, multi-segment 3D blades around the origin,
+/// roughly one hex-corner wide and knee-high. Each blade has 3 vertical
+/// segments (root -> mid1 -> mid2 -> pointed tip) with `uv.y` in `0.0..=1.0`
+/// so the grass vertex shader bends blades smoothly with zero alpha overdraw.
 pub(super) fn grass_tuft_mesh() -> Mesh {
-    // (base_x, base_z, lean_x, lean_z, half_width, height)
-    let blades: [(f32, f32, f32, f32, f32, f32); 7] = [
-        (0.00, 0.00, 0.02, -0.03, 0.045, 0.42),
-        (0.16, 0.05, 0.10, 0.02, 0.040, 0.34),
-        (-0.15, 0.08, -0.09, 0.04, 0.040, 0.36),
-        (0.05, -0.16, 0.04, -0.10, 0.038, 0.30),
-        (-0.06, -0.14, -0.05, -0.08, 0.038, 0.33),
-        (0.22, -0.10, 0.13, -0.05, 0.034, 0.26),
-        (-0.21, -0.05, -0.12, -0.02, 0.034, 0.28),
+    // (base_x, base_z, lean_x, lean_z, half_width, height, yaw_rad)
+    const BLADES: [(f32, f32, f32, f32, f32, f32, f32); 12] = [
+        (0.00, 0.00, 0.03, -0.05, 0.044, 0.44, 0.15),
+        (0.15, 0.05, 0.12, 0.03, 0.038, 0.36, 0.85),
+        (-0.14, 0.08, -0.11, 0.05, 0.038, 0.38, 1.65),
+        (0.06, -0.15, 0.05, -0.12, 0.036, 0.32, 2.35),
+        (-0.07, -0.13, -0.06, -0.10, 0.036, 0.34, 3.05),
+        (0.21, -0.09, 0.15, -0.06, 0.032, 0.28, 3.75),
+        (-0.20, -0.04, -0.14, -0.03, 0.032, 0.30, 4.45),
+        (0.09, 0.16, 0.08, 0.11, 0.034, 0.31, 5.15),
+        (-0.04, 0.17, -0.04, 0.12, 0.032, 0.29, 0.55),
+        (0.18, 0.14, 0.13, 0.10, 0.030, 0.25, 1.95),
+        (-0.18, -0.15, -0.12, -0.11, 0.030, 0.26, 2.85),
+        (0.02, -0.04, -0.02, 0.04, 0.040, 0.40, 4.10),
     ];
-    let mut positions = Vec::with_capacity(blades.len() * 3);
-    let mut normals = Vec::with_capacity(blades.len() * 3);
-    let mut uvs = Vec::with_capacity(blades.len() * 3);
-    let mut indices = Vec::with_capacity(blades.len() * 3);
-    for (i, (bx, bz, lx, lz, w, h)) in blades.into_iter().enumerate() {
-        let base = (i * 3) as u32;
-        // Blades face a fixed yaw; the material is double-sided.
-        positions.push([bx - w, 0.0, bz]);
-        positions.push([bx + w, 0.0, bz]);
-        positions.push([bx + lx, h, bz + lz]);
-        for _ in 0..3 {
-            normals.push([0.0, 0.7, 0.7]);
-            uvs.push([0.5, 0.5]);
+    // 7 vertices and 5 triangles (15 indices) per 3-segment tapered blade.
+    let mut positions = Vec::with_capacity(BLADES.len() * 7);
+    let mut normals = Vec::with_capacity(BLADES.len() * 7);
+    let mut uvs = Vec::with_capacity(BLADES.len() * 7);
+    let mut indices = Vec::with_capacity(BLADES.len() * 15);
+
+    const LEVELS: [(f32, f32, f32); 3] = [(0.0, 1.0, 0.0), (0.35, 0.72, 0.16), (0.70, 0.38, 0.52)];
+
+    for (bx, bz, lx, lz, w, h, yaw) in BLADES {
+        let base = positions.len() as u32;
+        let (sy, cy) = yaw.sin_cos();
+        // Upward-biased normal so directional sun lights the grass softly from any angle.
+        let n = Vec3::new(lx * 0.35, 0.92, lz * 0.35).normalize().to_array();
+
+        for (h_frac, w_scale, lean_frac) in LEVELS {
+            let y = h * h_frac;
+            let cx = bx + lx * lean_frac;
+            let cz = bz + lz * lean_frac;
+            let hw = w * w_scale;
+            let dx = cy * hw;
+            let dz = sy * hw;
+            positions.push([cx - dx, y, cz - dz]);
+            positions.push([cx + dx, y, cz + dz]);
+            normals.push(n);
+            normals.push(n);
+            uvs.push([0.0, h_frac]);
+            uvs.push([1.0, h_frac]);
         }
-        indices.extend_from_slice(&[base, base + 1, base + 2]);
+        // Pointed blade tip.
+        positions.push([bx + lx, h, bz + lz]);
+        normals.push(n);
+        uvs.push([0.5, 1.0]);
+
+        indices.extend_from_slice(&[
+            base,
+            base + 1,
+            base + 3,
+            base + 0,
+            base + 3,
+            base + 2,
+            base + 2,
+            base + 3,
+            base + 5,
+            base + 2,
+            base + 5,
+            base + 4,
+            base + 4,
+            base + 5,
+            base + 6,
+        ]);
     }
     Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -171,6 +212,28 @@ pub(super) fn grass_tuft_mesh() -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
     .with_inserted_indices(Indices::U32(indices))
+}
+
+/// Pushes elapsed time, wind config, and active player position to all
+/// `GrassMaterial` assets so wind and character bending stay live.
+pub(super) fn sync_grass_shader_uniforms(
+    time: Res<Time>,
+    config: Res<crate::grass_material::GrassWindConfig>,
+    materials: ResMut<Assets<crate::grass_material::GrassMaterial>>,
+    editor: Res<Editor>,
+    player: Query<&GlobalTransform, With<CharacterVisual>>,
+) {
+    let player_pos = player
+        .iter()
+        .next()
+        .map(|gt| gt.translation())
+        .or_else(|| {
+            editor
+                .character
+                .as_ref()
+                .map(|c| Vec3::new(c.pos.x, c.feet, c.pos.y))
+        });
+    crate::grass_material::update_grass_uniforms(time, config, materials, player_pos);
 }
 
 // ---------------------------------------------------------------------------
@@ -336,5 +399,20 @@ mod tests {
             .collect();
         assert!(spins.len() > 1, "neighbouring hexes should vary");
         assert!(tuft_scale(1) < tuft_scale(GRASS_MAX));
+    }
+
+    #[test]
+    fn tuft_mesh_has_multi_segment_blades_with_root_to_tip_uvs() {
+        let mesh = grass_tuft_mesh();
+        assert_eq!(mesh.count_vertices(), 12 * 7);
+        let Some(bevy::mesh::VertexAttributeValues::Float32x2(uvs)) =
+            mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+        else {
+            panic!("expected Float32x2 UVs");
+        };
+        let min_v = uvs.iter().map(|uv| uv[1]).fold(f32::INFINITY, f32::min);
+        let max_v = uvs.iter().map(|uv| uv[1]).fold(f32::NEG_INFINITY, f32::max);
+        assert!((min_v - 0.0).abs() < 1e-6);
+        assert!((max_v - 1.0).abs() < 1e-6);
     }
 }

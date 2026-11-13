@@ -9,6 +9,9 @@ use bevy_rapier3d::prelude::{NoUserData, RapierPhysicsPlugin};
 pub mod controls;
 mod controls_codes;
 mod editor;
+pub mod glade;
+pub mod gltf_export;
+pub mod grass_material;
 pub mod locomotion;
 mod mesh;
 pub mod model;
@@ -97,7 +100,7 @@ pub fn wasm_start() {
 /// checkout's `game/assets/` a few levels up from `target/<profile>/` or
 /// `target/<triple>/<profile>/`. Shipped apps that put `assets/` beside the
 /// executable keep the default.
-fn asset_root() -> String {
+pub(crate) fn asset_root() -> String {
     let desktop = cfg!(any(
         target_os = "windows",
         target_os = "macos",

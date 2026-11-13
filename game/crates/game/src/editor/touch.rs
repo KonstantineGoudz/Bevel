@@ -13,8 +13,7 @@ pub(super) fn touch_input(
     window: Single<&Window, With<PrimaryWindow>>,
     mut state: ResMut<TouchState>,
     editor: Res<Editor>,
-    panel_state: Res<PropertiesPanelState>,
-    outliner: Res<OutlinerState>,
+    right_panel: Res<RightPanelState>,
 ) {
     state.look = Vec2::ZERO;
     state.pan = Vec2::ZERO;
@@ -55,20 +54,11 @@ pub(super) fn touch_input(
         if !control && editor.mode == Mode::Play && minimap_hit(pos, size, s) {
             control = true;
         }
-        // A press on the floating property panel is panel business, never a
-        // camera gesture or a grid tap.
+        // A press on the right side panel (or its edge tab) is panel business,
+        // never a camera gesture or a grid tap.
         if !control
-            && editor.mode == Mode::Build
-            && !editor.selection.is_empty()
-            && over_properties_panel(pos, size, true, panel_state.collapsed, &state)
-        {
-            control = true;
-        }
-        // Same for the object graph: its rows, toggles and label field own
-        // the press.
-        if !control
-            && editor.mode == Mode::Build
-            && over_outliner_panel(pos, size, outliner.collapsed, &state)
+            && object_editing_allowed(editor.mode)
+            && over_right_panel(pos, size, &right_panel, &state)
         {
             control = true;
         }
@@ -243,8 +233,7 @@ pub(super) fn touch_gizmo_fallback(
     mut touch: ResMut<TouchState>,
     focus: Res<InputFocus>,
     menu: Res<AddMenu>,
-    panel_state: Res<PropertiesPanelState>,
-    outliner: Res<OutlinerState>,
+    right_panel: Res<RightPanelState>,
 ) {
     if !touch.enabled || capture.grabbed || menu.open {
         return;
@@ -274,10 +263,7 @@ pub(super) fn touch_gizmo_fallback(
             || over_controls(pos, size, s)
             || over_pad_cluster(pos, size, s)
             || (editor.mode == Mode::Play && minimap_hit(pos, size, s))
-            || (!editor.selection.is_empty()
-                && over_properties_panel(pos, size, true, panel_state.collapsed, &touch))
-            || (editor.mode == Mode::Build
-                && over_outliner_panel(pos, size, outliner.collapsed, &touch))
+            || (object_editing_allowed(editor.mode) && over_right_panel(pos, size, &right_panel, &touch))
         {
             continue;
         }
@@ -590,15 +576,35 @@ pub(super) fn run_touch_action(
         TouchAction::Redo => editor.redo(),
         TouchAction::Path => {
             editor.tool = None;
-            // Toggle, like the palette button, so a second tap leaves path
-            // mode. The active state is shown on the button and in the status.
-            editor.actor_tool = if editor.actor_tool == Some(ActorTool::Path) {
-                None
+            let spline_selected = editor
+                .selection
+                .primary()
+                .and_then(|id| editor.pieces.iter().find(|p| p.id == id))
+                .and_then(|p| shapes().get(p.shape))
+                .is_some_and(|s| matches!(s.id, "glade_wall" | "glade_path"));
+            if spline_selected {
+                editor.actor_tool = if editor.actor_tool == Some(ActorTool::Platform) {
+                    None
+                } else {
+                    Some(ActorTool::Platform)
+                };
+                editor.drag = None;
+                editor.note = if editor.actor_tool == Some(ActorTool::Platform) {
+                    "spline path: tap waypoints to curve"
+                } else {
+                    "spline path closed"
+                };
             } else {
-                Some(ActorTool::Path)
-            };
-            editor.selection.clear();
-            editor.drag = None;
+                // Toggle, like the palette button, so a second tap leaves path
+                // mode. The active state is shown on the button and in the status.
+                editor.actor_tool = if editor.actor_tool == Some(ActorTool::Path) {
+                    None
+                } else {
+                    Some(ActorTool::Path)
+                };
+                editor.selection.clear();
+                editor.drag = None;
+            }
         }
         TouchAction::Plan => {
             let entering = editor.actor_tool != Some(ActorTool::Plan);
@@ -750,8 +756,7 @@ pub(super) fn on_path_press(
     mut touch: ResMut<TouchState>,
     focus: Res<InputFocus>,
     menu: Res<AddMenu>,
-    panel_state: Res<PropertiesPanelState>,
-    outliner: Res<OutlinerState>,
+    right_panel: Res<RightPanelState>,
 ) {
     if event.button != PointerButton::Primary || capture.grabbed {
         return;
@@ -766,14 +771,7 @@ pub(super) fn on_path_press(
         touch.multi = true;
     }
     let pos = event.pointer.position;
-    if !editor.selection.is_empty()
-        && over_properties_panel(pos, window.size(), true, panel_state.collapsed, &touch)
-    {
-        return;
-    }
-    if editor.mode == Mode::Build
-        && over_outliner_panel(pos, window.size(), outliner.collapsed, &touch)
-    {
+    if object_editing_allowed(editor.mode) && over_right_panel(pos, window.size(), &right_panel, &touch) {
         return;
     }
     // The Play minimap owns its corner; its own observers route the press.

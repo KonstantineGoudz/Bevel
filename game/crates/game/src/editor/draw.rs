@@ -12,7 +12,9 @@ pub(super) fn draw(
     movers: Res<Movers>,
     cursor: Res<Cursor>,
     orbit: Res<Orbit>,
+    touch: Res<TouchState>,
     mut gizmos: Gizmos,
+    mut xray_gizmos: Gizmos<XrayGizmos>,
 ) {
     let (cq, cr) = model::pixel_to_hex(Vec2::new(orbit.target.x, orbit.target.z));
     for dq in -8..=8 {
@@ -20,7 +22,10 @@ pub(super) fn draw(
             let center = model::hex_center(cq + dq, cr + dr);
             let points: Vec<Vec3> = model::hex_corners(center)
                 .iter()
-                .map(|p| Vec3::new(p.x, GRID_Y, p.y))
+                .map(|p| {
+                    let h = crate::glade::world_terrain_height_at(*p, &editor.pieces);
+                    Vec3::new(p.x, h + GRID_Y, p.y)
+                })
                 .collect();
             closed(&mut gizmos, &points, GRID);
         }
@@ -35,14 +40,18 @@ pub(super) fn draw(
             let center = model::nearest_hex(p);
             let points: Vec<Vec3> = model::hex_corners(center)
                 .iter()
-                .map(|q| Vec3::new(q.x, GRID_Y + 0.002, q.y))
+                .map(|q| {
+                    let h = crate::glade::world_terrain_height_at(*q, &editor.pieces);
+                    Vec3::new(q.x, h + GRID_Y + 0.012, q.y)
+                })
                 .collect();
             closed(&mut gizmos, &points, GRID_HOVER);
 
             // World cursor: a sphere on the snapped spot, a ring around it and
             // a short vertical spike so it reads in both top and first person.
             let spot = placement_spot(&editor, p);
-            let at = Vec3::new(spot.0.x, 0.04, spot.0.y);
+            let spot_h = crate::glade::world_terrain_height_at(spot.0, &editor.pieces);
+            let at = Vec3::new(spot.0.x, spot_h + 0.04, spot.0.y);
             let ring: Vec<Vec3> = (0..24)
                 .map(|i| {
                     let a = std::f32::consts::TAU * i as f32 / 24.0;
@@ -52,6 +61,28 @@ pub(super) fn draw(
             closed(&mut gizmos, &ring, PATH);
             gizmos.line(at, at + Vec3::Y * 0.45, PATH);
             gizmos.sphere(Isometry3d::new(at, Quat::IDENTITY), 0.05, PATH);
+        }
+    }
+
+    // Live 3D concentric terrain brush ring when `glade_terrain` is armed.
+    if editor
+        .tool
+        .and_then(|t| shapes().get(t))
+        .is_some_and(|s| s.id == "glade_terrain")
+        && let Some(p) = cursor.last_world
+    {
+        let brush_color = Color::srgb_u8(0xf4, 0xd3, 0x5e);
+        let inner_color = Color::srgb_u8(0x98, 0xd8, 0x62);
+        for (radius, col) in [(3.1, inner_color), (5.4, brush_color)] {
+            let ring_pts: Vec<Vec3> = (0..40)
+                .map(|i| {
+                    let a = std::f32::consts::TAU * i as f32 / 40.0;
+                    let q = p + Vec2::new(a.cos(), a.sin()) * radius;
+                    let h = crate::glade::world_terrain_height_at(q, &editor.pieces);
+                    Vec3::new(q.x, h + 0.05, q.y)
+                })
+                .collect();
+            closed(&mut gizmos, &ring_pts, col);
         }
     }
 
@@ -88,7 +119,17 @@ pub(super) fn draw(
             selection_box(&mut gizmos, piece, shape);
             anchors(&mut gizmos, piece, shape);
             if orbit.mode != ViewMode::First && editor.selection.is_primary(*id) {
-                transform_gizmo(&mut gizmos, piece, shape);
+                transform_gizmo(&mut gizmos, &mut xray_gizmos, piece, shape, touch.enabled);
+                if shape.is_glade() {
+                    let y = piece.elevation + 0.03;
+                    for (a, b) in crate::glade::boolean_union_outline(&editor.pieces) {
+                        gizmos.line(
+                            Vec3::new(a.x, y, a.y),
+                            Vec3::new(b.x, y, b.y),
+                            Color::srgb_u8(0x52, 0xd6, 0xf4),
+                        );
+                    }
+                }
             }
         }
     }
@@ -171,13 +212,16 @@ pub(super) fn draw(
         }
     }
 
-    // Moving-platform paths: amber for the selected piece, muted otherwise.
+    // Moving-platform and spline paths: amber for the selected piece, muted otherwise.
     // Drawn in Build and in Play so the motion stays readable while riding.
     for piece in &editor.pieces {
+        let is_glade_path = shapes()
+            .get(piece.shape)
+            .is_some_and(|s| s.id == "glade_path");
         let Some(mover) = movers.map.get(&piece.id) else {
             continue;
         };
-        if mover.waypoints.len() < 2 && mover.track.is_none() {
+        if !is_glade_path && mover.waypoints.len() < 2 && mover.track.is_none() {
             continue;
         }
         let colour = if editor.selection.is_primary(piece.id) {
@@ -196,6 +240,11 @@ pub(super) fn draw(
                 gizmos.linestrip(line, colour);
             }
         }
+        let controls = if editor.selection.is_primary(piece.id) {
+            mover.controls()
+        } else {
+            Vec::new()
+        };
         for (index, waypoint) in mover.waypoints.iter().enumerate() {
             let at = Vec3::new(waypoint.pos.x, y, waypoint.pos.y);
             let selected_waypoint =
@@ -214,8 +263,8 @@ pub(super) fn draw(
                 mover_waypoint_gizmo(&mut gizmos, at);
             }
             // Tangent handles for the selected piece's path, like the plan.
-            if editor.selection.is_primary(piece.id) {
-                for control in [waypoint.incoming, waypoint.outgoing].into_iter().flatten() {
+            if let Some(ctrl) = controls.get(index) {
+                for control in [ctrl.incoming, ctrl.outgoing].into_iter().flatten() {
                     let handle = Vec3::new(control.x, y, control.y);
                     gizmos.line(at, handle, waypoint_colour);
                     gizmos.sphere(

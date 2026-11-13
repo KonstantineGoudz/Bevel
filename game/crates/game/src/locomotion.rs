@@ -98,7 +98,9 @@ pub struct LocomotionInput {
     pub grounded: bool,
     /// `true` while the landing-slide flag is active.
     pub sliding: bool,
-    /// Horizontal speed in m/s, *including* any platform ride velocity.
+    /// Horizontal speed in m/s of the character's own motion, *excluding* the
+    /// velocity of a platform underfoot. Standing still on a mover is idle;
+    /// walking on one counts by the walk itself, not the ride.
     pub horizontal_speed: f32,
     /// Vertical velocity in m/s. Positive is up.
     pub vertical_velocity: f32,

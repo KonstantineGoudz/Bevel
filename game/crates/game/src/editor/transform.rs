@@ -62,6 +62,13 @@ pub(super) fn keyboard_transform(
         } else {
             Some(axis)
         };
+        if transform.mode == TransformMode::Rotate
+            && shapes().get(transform.base.shape).is_some_and(|s| s.is_glade())
+            && matches!(next, Some(TransformAxis::X | TransformAxis::Z))
+        {
+            editor.note = "glade objects only rotate on Y";
+            return true;
+        }
         if next != transform.axis {
             transform.axis = next;
             if let Some(piece) = editor
@@ -350,7 +357,15 @@ pub(super) fn moved_piece(
             }
             piece
         }
-        TransformMode::Rotate => dragged_piece(base, rotation_handle(axis), grab, current),
+        TransformMode::Rotate => {
+            let shape = &shapes()[base.shape];
+            let effective_axis = if shape.is_glade() {
+                Some(TransformAxis::Y)
+            } else {
+                axis
+            };
+            dragged_piece(base, rotation_handle(effective_axis), grab, current)
+        }
     }
 }
 

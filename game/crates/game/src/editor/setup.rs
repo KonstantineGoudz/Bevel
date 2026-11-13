@@ -101,6 +101,7 @@ pub(super) fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut grass_materials: ResMut<Assets<crate::grass_material::GrassMaterial>>,
     orbit: Res<Orbit>,
 ) {
     let eye = orbit.target
@@ -120,34 +121,35 @@ pub(super) fn setup(
         Projection::Perspective(PerspectiveProjection {
             fov: 60.0_f32.to_radians(),
             near: 0.05,
-            far: 400.0,
+            far: 800.0,
             ..default()
         }),
         Transform::from_translation(eye).looking_at(orbit.target, Vec3::Y),
     ));
 
-    commands.insert_resource(ClearColor(Color::srgb_u8(0x0a, 0x0d, 0x12)));
+    commands.insert_resource(ClearColor(Color::srgb_u8(0x7e, 0xb2, 0x88)));
     commands.insert_resource(GlobalAmbientLight {
-        color: Color::srgb_u8(0xb8, 0xc8, 0xe0),
-        brightness: 280.0,
+        color: Color::srgb_u8(0xf4, 0xf0, 0xd8),
+        brightness: 420.0,
         ..default()
     });
 
     commands.spawn((
         DirectionalLight {
-            illuminance: 7_500.0,
+            color: Color::srgb_u8(0xff, 0xf6, 0xdd),
+            illuminance: 9_200.0,
             shadow_maps_enabled: true,
             ..default()
         },
-        Transform::from_xyz(7.0, 12.0, 6.0).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
+        Transform::from_xyz(9.0, 14.0, 7.5).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
     ));
 
     // Invisible floor under the whole grid: the character always has something
     // to stand on, so walking off a tile does not drop it into the void.
-    // Half extents: 160 x 0.2 x 160 m.
+    // Half extents: 260 x 0.1 x 260 m (520 x 0.2 x 520 m).
     commands.spawn((
         RigidBody::Fixed,
-        Collider::cuboid(80.0, 0.1, 80.0),
+        Collider::cuboid(260.0, 0.1, 260.0),
         Transform::from_xyz(0.0, -0.1, 0.0),
     ));
     // Solid geometry: one mesh set per catalogue entry.
@@ -167,10 +169,19 @@ pub(super) fn setup(
     let mut parts = Vec::with_capacity(shapes().len());
     let mut mats = Vec::with_capacity(shapes().len());
     for shape in shapes() {
+        let is_double_sided = shape.is_glade()
+            || matches!(shape.style, Style::Door | Style::Gate)
+            || matches!(shape.id, "glade_door" | "glade_window" | "door" | "gate");
         mats.push(materials.add(StandardMaterial {
             base_color: shape.color,
             perceptual_roughness: 0.85,
             metallic: 0.0,
+            double_sided: is_double_sided,
+            cull_mode: if is_double_sided {
+                None
+            } else {
+                Some(bevy::render::render_resource::Face::Back)
+            },
             ..default()
         }));
         let mut made = Vec::new();
@@ -211,21 +222,27 @@ pub(super) fn setup(
     // every angle.
     let grass = meshes.add(grass_tuft_mesh());
     let grass_mats = [
-        materials.add(StandardMaterial {
-            base_color: Color::srgb_u8(0x3f, 0xa0, 0x4d),
-            perceptual_roughness: 0.9,
-            metallic: 0.0,
-            double_sided: true,
-            cull_mode: None,
-            ..default()
+        grass_materials.add(crate::grass_material::GrassMaterial {
+            base: StandardMaterial {
+                base_color: Color::srgb_u8(0x4b, 0xaa, 0x45),
+                perceptual_roughness: 0.85,
+                metallic: 0.0,
+                double_sided: true,
+                cull_mode: None,
+                ..default()
+            },
+            extension: crate::grass_material::GrassExt::painted_tuft(false),
         }),
-        materials.add(StandardMaterial {
-            base_color: Color::srgb_u8(0x5a, 0xb8, 0x3a),
-            perceptual_roughness: 0.9,
-            metallic: 0.0,
-            double_sided: true,
-            cull_mode: None,
-            ..default()
+        grass_materials.add(crate::grass_material::GrassMaterial {
+            base: StandardMaterial {
+                base_color: Color::srgb_u8(0x68, 0xc2, 0x3c),
+                perceptual_roughness: 0.85,
+                metallic: 0.0,
+                double_sided: true,
+                cull_mode: None,
+                ..default()
+            },
+            extension: crate::grass_material::GrassExt::painted_tuft(true),
         }),
     ];
     commands.insert_resource(Kit {
@@ -307,22 +324,59 @@ pub(super) fn setup(
 
     let mut children = vec![header];
 
-    for category in CATEGORIES {
-        children.push(palette_label(&mut commands, &category.to_uppercase()));
+    // Mode tabs: Build (general level authoring) vs Building (procedural
+    // buildings, walls/paths, and selection-driven attachments).
+    let mode_tabs = commands
+        .spawn(Node {
+            width: percent(100),
+            flex_direction: FlexDirection::Row,
+            column_gap: px(4),
+            margin: UiRect::bottom(px(4)),
+            ..default()
+        })
+        .id();
+    let build_tab = palette_compact_button(&mut commands, PaletteAction::Build, "Build");
+    let building_tab = palette_compact_button(&mut commands, PaletteAction::Building, "Building");
+    commands
+        .entity(mode_tabs)
+        .add_children(&[build_tab, building_tab]);
+    children.push(mode_tabs);
 
+    let spawn_category = |commands: &mut Commands, category: &str, out: &mut Vec<Entity>| {
+        out.push(palette_label(commands, &category.to_uppercase()));
         for (index, shape) in shapes().iter().enumerate() {
             if shape.category != category {
                 continue;
             }
-            children.push(palette_button(
-                &mut commands,
+            out.push(palette_button(
+                commands,
                 PaletteAction::Shape(index),
                 shape.name,
             ));
         }
+    };
+
+    // 1. General Build mode group
+    let build_group = commands
+        .spawn((
+            PaletteGroup::BuildMode,
+            Node {
+                width: percent(100),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(1),
+                ..default()
+            },
+        ))
+        .id();
+    let mut build_children = Vec::new();
+    for category in CATEGORIES {
+        if matches!(category, "Building" | "Walls & Paths" | "Doors & Windows") {
+            continue;
+        }
+        spawn_category(&mut commands, category, &mut build_children);
     }
 
-    children.push(palette_label(&mut commands, "ACTOR"));
+    build_children.push(palette_label(&mut commands, "ACTOR"));
     let actor_row = commands
         .spawn(Node {
             width: percent(100),
@@ -340,7 +394,7 @@ pub(super) fn setup(
         palette_compact_button(&mut commands, PaletteAction::CopyJson, "JSON"),
     ];
     commands.entity(actor_row).add_children(&actor_buttons);
-    children.push(actor_row);
+    build_children.push(actor_row);
 
     let path_actions = commands
         .spawn((
@@ -359,7 +413,7 @@ pub(super) fn setup(
         palette_compact_button(&mut commands, PaletteAction::Smooth, "Smooth"),
     ];
     commands.entity(path_actions).add_children(&path_buttons);
-    children.push(path_actions);
+    build_children.push(path_actions);
 
     // Grass brush options: erase toggle plus the optional navigation toll.
     let grass_actions = commands
@@ -379,7 +433,112 @@ pub(super) fn setup(
         palette_compact_button(&mut commands, PaletteAction::GrassSlow, "Slow"),
     ];
     commands.entity(grass_actions).add_children(&grass_buttons);
-    children.push(grass_actions);
+    build_children.push(grass_actions);
+    commands.entity(build_group).add_children(&build_children);
+    children.push(build_group);
+
+    // 2. Building mode: core Building + Walls & Paths
+    let building_base = commands
+        .spawn((
+            PaletteGroup::BuildingBase,
+            Node {
+                width: percent(100),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(1),
+                display: Display::None,
+                ..default()
+            },
+        ))
+        .id();
+    let mut building_children = Vec::new();
+    spawn_category(&mut commands, "Building", &mut building_children);
+    spawn_category(&mut commands, "Walls & Paths", &mut building_children);
+    commands
+        .entity(building_base)
+        .add_children(&building_children);
+    children.push(building_base);
+
+    // 3. Building mode contextual group: Doors & Windows (shown when a building/wall is selected)
+    let doors_group = commands
+        .spawn((
+            PaletteGroup::DoorsAndWindows,
+            Node {
+                width: percent(100),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(1),
+                display: Display::None,
+                ..default()
+            },
+        ))
+        .id();
+    let mut doors_children = Vec::new();
+    spawn_category(&mut commands, "Doors & Windows", &mut doors_children);
+    commands.entity(doors_group).add_children(&doors_children);
+    children.push(doors_group);
+
+    // 4. Building mode contextual group: Fixtures (shown when a building, wall, or surface is selected)
+    let fixtures_group = commands
+        .spawn((
+            PaletteGroup::BuildingFixtures,
+            Node {
+                width: percent(100),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(1),
+                display: Display::None,
+                ..default()
+            },
+        ))
+        .id();
+    let mut fixtures_children = vec![palette_label(&mut commands, "FIXTURES")];
+    if let Some((brazier_idx, brazier)) = shapes()
+        .iter()
+        .enumerate()
+        .find(|(_, s)| s.id == "brazier")
+    {
+        fixtures_children.push(palette_button(
+            &mut commands,
+            PaletteAction::Shape(brazier_idx),
+            brazier.name,
+        ));
+    }
+    let lamps_soon = commands
+        .spawn((
+            Text::new("Lamps (coming soon)"),
+            TextFont {
+                font_size: FontSize::Px(11.0),
+                ..default()
+            },
+            TextColor(MUTED),
+            Node {
+                margin: UiRect::new(px(6), px(0), px(3), px(2)),
+                ..default()
+            },
+        ))
+        .id();
+    fixtures_children.push(lamps_soon);
+    commands
+        .entity(fixtures_group)
+        .add_children(&fixtures_children);
+    children.push(fixtures_group);
+
+    // 5. Building mode selection hint when nothing compatible is selected
+    let selection_hint = commands
+        .spawn((
+            BuildingSelectionHint,
+            Text::new("Select a building or wall for doors, windows & fixtures"),
+            TextFont {
+                font_size: FontSize::Px(11.0),
+                ..default()
+            },
+            TextColor(MUTED),
+            Node {
+                margin: UiRect::top(px(8)),
+                display: Display::None,
+                ..default()
+            },
+        ))
+        .id();
+    children.push(selection_hint);
 
     commands.entity(panel).add_children(&children);
 
@@ -468,8 +627,7 @@ pub(super) fn setup(
 
     spawn_touch_ui(&mut commands);
     spawn_minimap(&mut commands);
-    spawn_properties_panel(&mut commands);
-    spawn_object_graph(&mut commands);
+    spawn_right_panel(&mut commands);
     spawn_character_status(&mut commands);
     spawn_add_menu(&mut commands);
     spawn_home_menu(&mut commands);

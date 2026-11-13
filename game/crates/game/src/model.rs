@@ -456,9 +456,17 @@ impl Shape {
     pub fn is_trigger(self: &Shape) -> bool {
         self.is_trigger
     }
+
+    pub fn is_glade(&self) -> bool {
+        self.id.starts_with("glade_")
+    }
+
+    pub fn is_parametric(&self) -> bool {
+        self.is_trigger || self.is_glade()
+    }
 }
 
-pub const CATEGORIES: [&str; 9] = [
+pub const CATEGORIES: [&str; 12] = [
     "Surface",
     "Barrier",
     "Traversal",
@@ -468,6 +476,9 @@ pub const CATEGORIES: [&str; 9] = [
     "Hazard",
     "Marker",
     "Trigger",
+    "Building",
+    "Walls & Paths",
+    "Doors & Windows",
 ];
 
 #[allow(clippy::too_many_arguments)]
@@ -878,6 +889,100 @@ static SHAPES: LazyLock<Vec<Shape>> = LazyLock::new(|| {
             0.0,
             ring_anchors(4, 0.6, 0.0),
         ),
+        // Procedural Building pieces (formerly Glade)
+        shape(
+            "glade_tower",
+            "Building Tower",
+            "Building",
+            SnapMode::Center,
+            0xd8ccb8,
+            Geometry::Circle { r: 1.2 },
+            Style::Plain,
+            2.4,
+            0.0,
+            ring_anchors(8, 1.2, 0.0),
+        ),
+        shape(
+            "glade_room",
+            "Building Room",
+            "Building",
+            SnapMode::Center,
+            0xdfd3be,
+            Geometry::Rect { w: 2.8, h: 2.2 },
+            Style::Plain,
+            2.0,
+            0.0,
+            ring_anchors(4, 1.4, 0.0),
+        ),
+        shape(
+            "glade_wall",
+            "Building Wall",
+            "Walls & Paths",
+            SnapMode::Edge,
+            0x9aa4b0,
+            Geometry::Bar {
+                len: 2.6,
+                thick: 0.34,
+            },
+            Style::Plain,
+            1.6,
+            0.0,
+            end_anchors(2.6),
+        ),
+        shape(
+            "glade_door",
+            "Building Door",
+            "Doors & Windows",
+            SnapMode::Edge,
+            0xc9924a,
+            Geometry::Bar {
+                len: 1.15,
+                thick: 0.42,
+            },
+            Style::Plain,
+            2.1,
+            0.0,
+            end_anchors(1.15),
+        ),
+        shape(
+            "glade_window",
+            "Building Window",
+            "Doors & Windows",
+            SnapMode::Edge,
+            0x8ec5e8,
+            Geometry::Bar {
+                len: 0.72,
+                thick: 0.42,
+            },
+            Style::Plain,
+            0.92,
+            0.0,
+            end_anchors(0.72),
+        ),
+        shape(
+            "glade_terrain",
+            "Building Terrain",
+            "Building",
+            SnapMode::Center,
+            0x8c857b,
+            Geometry::Circle { r: 2.8 },
+            Style::Plain,
+            2.2,
+            0.0,
+            ring_anchors(8, 2.8, 0.0),
+        ),
+        shape(
+            "glade_path",
+            "Building Path",
+            "Walls & Paths",
+            SnapMode::Center,
+            0xd4a96a,
+            Geometry::Circle { r: 0.55 },
+            Style::Plain,
+            0.2,
+            0.0,
+            ring_anchors(4, 0.55, 0.0),
+        ),
     ]
 });
 
@@ -1024,8 +1129,13 @@ pub fn piece_quat(piece: &Piece) -> bevy::math::Quat {
 pub fn set_piece_quat(piece: &mut Piece, rotation: bevy::math::Quat) {
     let (yaw, pitch, roll) = rotation.to_euler(bevy::math::EulerRot::YXZ);
     piece.rot = normalize_angle(-yaw);
-    piece.pitch = normalize_angle(pitch);
-    piece.roll = normalize_angle(roll);
+    if shapes().get(piece.shape).is_some_and(|s| s.is_glade()) {
+        piece.pitch = 0.0;
+        piece.roll = 0.0;
+    } else {
+        piece.pitch = normalize_angle(pitch);
+        piece.roll = normalize_angle(roll);
+    }
 }
 
 /// Effective trigger shape for a piece, respecting the shape's own kind.
@@ -1194,13 +1304,24 @@ pub fn trigger_overlaps(piece: &Piece, shape: &Shape, pos: Vec2, feet: f32, head
 
 pub fn world_anchors(piece: &Piece, shape: &Shape) -> Vec<WorldAnchor> {
     let (sin, cos) = piece.rot.sin_cos();
+    let scale = if shape.is_glade() {
+        let ext = crate::glade::piece_extents(piece, shape);
+        let def = crate::glade::default_size(shape);
+        Vec2::new(
+            (ext.x / def.x.max(0.1)).max(0.1),
+            (ext.z / def.z.max(0.1)).max(0.1),
+        )
+    } else {
+        Vec2::ONE
+    };
     shape
         .anchors
         .iter()
         .map(|a| {
+            let scaled = Vec2::new(a.local.x * scale.x, a.local.y * scale.y);
             let rotated = Vec2::new(
-                a.local.x * cos - a.local.y * sin,
-                a.local.x * sin + a.local.y * cos,
+                scaled.x * cos - scaled.y * sin,
+                scaled.x * sin + scaled.y * cos,
             );
             let normal = Vec2::new(
                 a.normal.x * cos - a.normal.y * sin,
@@ -1241,6 +1362,14 @@ fn point_in_polygon(points: &[Vec2], p: Vec2) -> bool {
 #[allow(dead_code)] // shape-accurate footprint test, used by tests and gameplay
 pub fn hit_test(shape: &Shape, piece: &Piece, p: Vec2, pad: f32) -> bool {
     let local = to_local(piece, p);
+    if shape.is_glade() {
+        let ext = crate::glade::piece_extents(piece, shape);
+        if crate::glade::GladeKind::from_shape(shape) == Some(crate::glade::GladeKind::Tower) {
+            return local.length() <= ext.x * 0.5 + pad;
+        }
+        let fp = crate::glade::local_footprint(piece, shape);
+        return point_in_polygon(&fp, local) || local.length() <= pad;
+    }
     if let Geometry::Circle { r } = shape.geom {
         return local.length() <= r + pad;
     }
@@ -1331,6 +1460,15 @@ pub fn snap_piece(
     grid: bool,
     threshold: f32,
 ) -> Snap {
+    if matches!(shape.id, "glade_door" | "glade_window" | "door" | "gate")
+        && let Some((pos, rot)) = crate::glade::snap_door_to_glade_wall(piece, others)
+    {
+        return Snap {
+            pos,
+            rot,
+            kind: SnapKind::Anchor,
+        };
+    }
     if anchors {
         if let Some(snap) = anchor_snap(piece, shape, others, threshold) {
             return snap;
@@ -1608,11 +1746,11 @@ mod tests {
 
     #[test]
     fn catalogue_has_every_piece() {
-        assert_eq!(shapes().len(), 27);
+        assert_eq!(shapes().len(), 34);
         let mut ids: Vec<_> = shapes().iter().map(|s| s.id).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 27);
+        assert_eq!(ids.len(), 34);
         for cat in CATEGORIES {
             assert!(shapes().iter().any(|s| s.category == cat), "missing {cat}");
         }

@@ -21,9 +21,9 @@ pub(super) fn surface_target(
 
 /// Height of the walkable surface under `at`, ignoring walls' vertical faces.
 pub(super) fn surface_height(rapier: &RapierContext, filter: QueryFilter, at: Vec2) -> Option<f32> {
-    let origin = Vec3::new(at.x, 8.0, at.y);
+    let origin = Vec3::new(at.x, 26.0, at.y);
     rapier
-        .cast_ray_and_get_normal(origin, Vec3::NEG_Y, 16.0, true, filter)
+        .cast_ray_and_get_normal(origin, Vec3::NEG_Y, 34.0, true, filter)
         .filter(|(_, hit)| hit.normal.y > 0.3)
         .map(|(_, hit)| origin.y - hit.time_of_impact)
 }
@@ -300,26 +300,29 @@ pub(super) fn mover_handle_at(
             best = Some((distance, handle));
         }
     };
+    let controls = mover.controls();
     for (index, waypoint) in mover.waypoints.iter().enumerate() {
         let id = index as u32;
         consider(waypoint.pos, PathHandle::Waypoint(id));
-        if let Some(incoming) = waypoint.incoming {
-            consider(
-                incoming,
-                PathHandle::Tangent {
-                    waypoint: id,
-                    side: TangentSide::Incoming,
-                },
-            );
-        }
-        if let Some(outgoing) = waypoint.outgoing {
-            consider(
-                outgoing,
-                PathHandle::Tangent {
-                    waypoint: id,
-                    side: TangentSide::Outgoing,
-                },
-            );
+        if let Some(ctrl) = controls.get(index) {
+            if let Some(incoming) = ctrl.incoming {
+                consider(
+                    incoming,
+                    PathHandle::Tangent {
+                        waypoint: id,
+                        side: TangentSide::Incoming,
+                    },
+                );
+            }
+            if let Some(outgoing) = ctrl.outgoing {
+                consider(
+                    outgoing,
+                    PathHandle::Tangent {
+                        waypoint: id,
+                        side: TangentSide::Outgoing,
+                    },
+                );
+            }
         }
     }
     // The borrow of `best` through `consider` ends with its last call above.

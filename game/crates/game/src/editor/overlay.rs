@@ -12,7 +12,9 @@ pub(super) fn update_palette(
 ) {
     for (button, mut bg, mut border) in &mut buttons {
         let on = match button.0 {
-            PaletteAction::Build | PaletteAction::Play | PaletteAction::View => false,
+            PaletteAction::Build => editor.mode == Mode::Build,
+            PaletteAction::Building => editor.mode == Mode::Building,
+            PaletteAction::Play | PaletteAction::View => false,
             PaletteAction::Shape(index) => editor.tool == Some(index),
             PaletteAction::Character => editor.actor_tool == Some(ActorTool::Place),
             PaletteAction::Path => editor.actor_tool == Some(ActorTool::Path),
@@ -26,8 +28,9 @@ pub(super) fn update_palette(
                     )
             }
             PaletteAction::Smooth => {
-                editor.actor_tool == Some(ActorTool::Plan)
-                    && editor.plan.as_ref().is_some_and(|plan| !plan.is_empty())
+                editor.actor_tool == Some(ActorTool::Platform)
+                    || (editor.actor_tool == Some(ActorTool::Plan)
+                        && editor.plan.as_ref().is_some_and(|plan| !plan.is_empty()))
             }
             PaletteAction::Grass => editor.actor_tool == Some(ActorTool::Grass),
             PaletteAction::GrassErase => editor.grass_erase,
@@ -41,11 +44,50 @@ pub(super) fn update_palette(
     }
 }
 
+pub(super) fn sync_palette_groups(
+    editor: Res<Editor>,
+    mut groups: Query<(&PaletteGroup, &mut Node), Without<BuildingSelectionHint>>,
+    mut hints: Query<&mut Node, With<BuildingSelectionHint>>,
+) {
+    let ctx = selection_palette_context(&editor);
+    for (group, mut node) in &mut groups {
+        let show = match group {
+            PaletteGroup::BuildMode => editor.mode == Mode::Build,
+            PaletteGroup::BuildingBase => editor.mode == Mode::Building,
+            PaletteGroup::DoorsAndWindows => {
+                editor.mode == Mode::Building && ctx.supports_doors_and_windows
+            }
+            PaletteGroup::BuildingFixtures => {
+                editor.mode == Mode::Building && ctx.supports_fixtures
+            }
+        };
+        let display = if show { Display::Flex } else { Display::None };
+        if node.display != display {
+            node.display = display;
+        }
+    }
+    let show_hint =
+        editor.mode == Mode::Building && !ctx.supports_doors_and_windows && !ctx.supports_fixtures;
+    let hint_display = if show_hint {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    for mut node in &mut hints {
+        if node.display != hint_display {
+            node.display = hint_display;
+        }
+    }
+}
+
 pub(super) fn sync_path_actions(
     editor: Res<Editor>,
     mut row: Single<&mut Node, With<PathActions>>,
 ) {
-    let display = if editor.actor_tool == Some(ActorTool::Plan) {
+    let display = if matches!(
+        editor.actor_tool,
+        Some(ActorTool::Plan | ActorTool::Platform)
+    ) {
         Display::Flex
     } else {
         Display::None

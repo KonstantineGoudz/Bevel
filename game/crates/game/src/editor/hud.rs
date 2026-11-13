@@ -409,6 +409,29 @@ mod tests {
     }
 
     #[test]
+    fn a_platform_ride_does_not_read_as_walking() {
+        // Idle on a mover: world velocity is non-zero, self motion is zero.
+        let mut riding = ready_character(Health::default(), Vec2::ZERO, 0.0);
+        riding.grounded = true;
+        riding.ride_vel = Vec2::new(3.0, 0.0);
+        assert!(riding.velocity().length() > 2.0);
+        assert_eq!(
+            riding.locomotion_state(),
+            crate::locomotion::LocomotionState::Stationary
+        );
+
+        // Stepping on the mover counts by the step, not by the ride: this
+        // reads as walking even though the world speed is sprinting-fast.
+        let mut stepping = riding;
+        stepping.hv = Vec2::new(2.2, 0.0);
+        assert!(stepping.velocity().length() > crate::locomotion::RUN_MIN_SPEED);
+        assert_eq!(
+            stepping.locomotion_state(),
+            crate::locomotion::LocomotionState::Walking
+        );
+    }
+
+    #[test]
     fn the_status_window_tracks_the_character() {
         let mut app = App::new();
         app.init_resource::<Editor>();

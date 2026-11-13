@@ -409,3 +409,152 @@ fn a_selected_waypoints_gizmo_shafts_grab_like_the_dot() {
     // Empty space selects nothing and must not append.
     assert!(!mover_click_hit(&mut app, Vec2::new(5.0, 5.0)));
 }
+
+#[test]
+fn play_routes_do_not_create_glade_paths_only_glade_path_tool_does() {
+    let mut editor = Editor::default();
+    editor.mode = Mode::Play;
+    let track = path::Track::new(vec![Vec2::ZERO, Vec2::new(4.0, 0.0)]);
+    let line: Vec<Vec3> = track.points().iter().map(|p| Vec3::new(p.x, 0.07, p.y)).collect();
+    editor.route = Some(Route {
+        track,
+        trail: Vec::new(),
+        line,
+        distances: vec![0.0, 4.0],
+        controls: vec![
+            path::AnchorControls {
+                incoming: None,
+                outgoing: None,
+            };
+            2
+        ],
+        valid: true,
+        hexes: 4,
+    });
+    let mut plan = Plan::default();
+    plan.append(Vec2::ZERO, (0, 0), 0.0);
+    plan.append(Vec2::new(4.0, 0.0), (2, 0), 0.0);
+    editor.plan = Some(plan);
+
+    // A moving platform also has waypoints in Movers, but is not a glade_path.
+    let mut movers = Movers::default();
+    let mut block = test_piece(1);
+    block.shape = model::shape_index("block").expect("block");
+    editor.pieces.push(block);
+    let block_mover = movers.mover_mut(1, Vec2::ZERO);
+    block_mover
+        .waypoints
+        .push(crate::platforms::PlatformWaypoint::new(Vec2::new(3.0, 0.0)));
+
+    assert!(
+        collect_glade_paths(&editor, &movers).is_empty(),
+        "character routes, plans, and moving platforms must not spawn dirt/stone paths"
+    );
+
+    // Only a dedicated glade_path piece creates terrain path geometry.
+    let mut path_piece = test_piece(2);
+    path_piece.shape = model::shape_index("glade_path").expect("glade_path");
+    path_piece.pos = Vec2::new(1.0, 1.0);
+    editor.pieces.push(path_piece);
+    let path_mover = movers.mover_mut(2, Vec2::new(1.0, 1.0));
+    path_mover
+        .waypoints
+        .push(crate::platforms::PlatformWaypoint::new(Vec2::new(5.0, 1.0)));
+
+    let paths = collect_glade_paths(&editor, &movers);
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0], vec![Vec2::new(1.0, 1.0), Vec2::new(5.0, 1.0)]);
+}
+
+#[test]
+fn glade_path_exposes_and_drags_bezier_tangent_handles_in_curve_editor() {
+    let mut app = physics_app();
+    let path_shape = model::shape_index("glade_path").expect("glade_path");
+    {
+        let world = app.world_mut();
+        let mut editor = world.resource_mut::<Editor>();
+        let mut piece = test_piece(9);
+        piece.shape = path_shape;
+        editor.pieces.push(piece);
+        editor.selection.set(9);
+        editor.actor_tool = Some(ActorTool::Platform);
+    }
+    {
+        let mut movers = app.world_mut().resource_mut::<Movers>();
+        let mover = movers.mover_mut(9, Vec2::ZERO);
+        mover
+            .waypoints
+            .push(crate::platforms::PlatformWaypoint::new(Vec2::new(6.0, 0.0)));
+        mover.rebuild();
+    }
+    viewport_camera(&mut app);
+
+    let controls = app
+        .world()
+        .resource::<Movers>()
+        .map
+        .get(&9)
+        .expect("mover")
+        .controls();
+    let outgoing = controls[0].outgoing.expect("automatic outgoing tangent");
+    let handle_screen = viewport_of(&mut app, Vec3::new(outgoing.x, 0.06, outgoing.y));
+
+    let world = app.world_mut();
+    let mut camera_q = world.query::<(&Camera, &Transform)>();
+    let (camera, cam_transform) = camera_q.single(world).expect("camera");
+    let hit = mover_handle_at(
+        world.resource::<Editor>(),
+        world.resource::<Movers>(),
+        camera,
+        &GlobalTransform::from(*cam_transform),
+        handle_screen,
+        10.0,
+    );
+    assert_eq!(
+        hit,
+        Some(PathHandle::Tangent {
+            waypoint: 0,
+            side: TangentSide::Outgoing,
+        }),
+        "glade_path tangent handles are grabbable in the curve editor"
+    );
+
+    // Drag the outgoing tangent handle off-axis and verify the glade_path spine curves.
+    let bent_screen = viewport_of(&mut app, Vec3::new(2.0, 0.06, 3.0));
+    let drag = PathDrag {
+        pointer: PointerId::Mouse,
+        handle: PathHandle::Tangent {
+            waypoint: 0,
+            side: TangentSide::Outgoing,
+        },
+    };
+    let moved = {
+        let world = app.world_mut();
+        world.resource_scope(|world, mut editor: Mut<Editor>| {
+            world.resource_scope(|world, mut movers: Mut<Movers>| {
+                let mut camera_q = world.query::<(&Camera, &Transform)>();
+                let (camera, cam_transform) = camera_q.single(world).expect("camera");
+                apply_mover_drag(
+                    &mut editor,
+                    &mut movers,
+                    drag,
+                    bent_screen,
+                    camera,
+                    &GlobalTransform::from(*cam_transform),
+                )
+            })
+        })
+    };
+    assert!(moved);
+
+    let paths = collect_glade_paths(
+        app.world().resource::<Editor>(),
+        app.world().resource::<Movers>(),
+    );
+    assert_eq!(paths.len(), 1);
+    assert!(
+        paths[0].iter().any(|p| p.y > 0.4),
+        "dragging the curve handle bends the glade_path geometry spine: {:?}",
+        paths[0]
+    );
+}

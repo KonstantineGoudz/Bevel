@@ -207,6 +207,7 @@ fn a_finger_can_grab_and_drag_a_gizmo_handle() {
     app.init_resource::<PointerCapture>();
     app.init_resource::<OutlinerState>();
     app.init_resource::<PropertiesPanelState>();
+    app.init_resource::<RightPanelState>();
     app.world_mut().resource_mut::<TouchState>().enabled = true;
     app.world_mut().spawn((
         Window {
@@ -344,6 +345,7 @@ fn a_finger_can_grab_the_negative_end_of_an_axis() {
     app.init_resource::<PointerCapture>();
     app.init_resource::<OutlinerState>();
     app.init_resource::<PropertiesPanelState>();
+    app.init_resource::<RightPanelState>();
     app.world_mut().resource_mut::<TouchState>().enabled = true;
     app.world_mut().spawn((
         Window {
@@ -478,6 +480,7 @@ fn raw_touch_grabs_a_gizmo_without_pointer_events() {
     app.init_resource::<PointerCapture>();
     app.init_resource::<OutlinerState>();
     app.init_resource::<PropertiesPanelState>();
+    app.init_resource::<RightPanelState>();
     app.init_resource::<AddMenu>();
     app.init_resource::<InputFocus>();
     {

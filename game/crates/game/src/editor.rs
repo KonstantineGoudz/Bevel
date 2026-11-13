@@ -98,7 +98,8 @@ pub struct EditorPlugin;
 
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Editor>()
+        app.add_plugins(crate::grass_material::GrassShaderPlugin)
+            .init_resource::<Editor>()
             .init_resource::<Cursor>()
             .init_resource::<Orbit>()
             .init_resource::<LastSaved>()
@@ -120,9 +121,11 @@ impl Plugin for EditorPlugin {
             .init_resource::<AddMenu>()
             .init_resource::<Minimap>()
             .init_resource::<GrassVisuals>()
+            .init_resource::<WorldTerrainVisuals>()
             .init_resource::<OutlinerState>()
             .init_resource::<OutlinerEdit>()
             .init_resource::<PropertiesPanelState>()
+            .init_resource::<RightPanelState>()
             .init_resource::<HomeMenu>()
             // Remappable controls, loaded from browser storage on web.
             .insert_resource(crate::controls::Controls::load())
@@ -190,6 +193,7 @@ impl Plugin for EditorPlugin {
                     .chain()
                     .after(refresh_route),
             )
+            .add_systems(Update, camera_occlusion.after(camera_control))
             // Character model + animation. Its own chain so the editor's
             // tuples stay under Bevy's limit; it runs after `sync_visuals` has
             // spawned or despawned the capsule root.
@@ -234,10 +238,13 @@ impl Plugin for EditorPlugin {
                     handle_transparency_slider,
                     sync_properties_chrome,
                     sync_properties_panel,
+                    sync_right_panel,
+                    properties_scroll,
                     sync_transparency_slider,
                     sync_trigger_color_buttons,
                     sync_trigger_visible_label,
                     update_palette,
+                    sync_palette_groups,
                     sync_path_actions,
                     sync_grass_actions,
                     update_touch_buttons,
@@ -256,7 +263,12 @@ impl Plugin for EditorPlugin {
             // editor chains stay under Bevy's tuple limit.
             .add_systems(
                 Update,
-                (sync_home_menu, sync_home_name_field)
+                (
+                    sync_world_terrain,
+                    sync_grass_shader_uniforms,
+                    sync_home_menu,
+                    sync_home_name_field,
+                )
                     .chain()
                     .after(sync_visuals),
             )
@@ -273,6 +285,7 @@ impl Plugin for EditorPlugin {
             .add_observer(on_add_menu_item)
             .add_observer(on_home_button);
 
+        gizmo::configure_xray_gizmos(app);
         minimap::configure_minimap_gizmos(app);
     }
 }
@@ -341,6 +354,14 @@ struct Editor {
     grass_stroke_dirty: bool,
     /// Last dabbed hex this stroke, so holding still does not repaint.
     grass_dab: Option<Hex>,
+    /// Active continuous Tiny Glade terrain brush stroke.
+    terrain_stroke: bool,
+    /// Whether the open terrain brush stroke modified any terrain yet.
+    terrain_stroke_dirty: bool,
+    /// Target plateau height locked at the start of the terrain stroke.
+    terrain_stroke_target_h: f32,
+    /// Last sculpted world XZ position during the current terrain stroke.
+    terrain_stroke_last_pos: Option<Vec2>,
     /// One pending platform waypoint from the Motion tool, drained by movers.
     platform_request: Option<(u32, Vec2)>,
 }
@@ -409,6 +430,10 @@ impl Default for Editor {
             grass_stroke: false,
             grass_stroke_dirty: false,
             grass_dab: None,
+            terrain_stroke: false,
+            terrain_stroke_dirty: false,
+            terrain_stroke_target_h: 2.5,
+            terrain_stroke_last_pos: None,
             platform_request: None,
         }
     }
@@ -464,11 +489,16 @@ impl Character {
     }
 
     /// Snapshot of the physics fields the locomotion state machine reads.
+    ///
+    /// Horizontal speed is the character's *own* motion (`hv`), not the
+    /// world motion of the platform underfoot: a rider standing still on a
+    /// mover is idle, even though `velocity()` (and the status readout)
+    /// reports the platform's speed.
     pub(crate) fn locomotion_input(self) -> LocomotionInput {
         LocomotionInput::new(
             self.grounded,
             self.sliding,
-            (self.hv + self.ride_vel).length(),
+            self.hv.length(),
             self.vy,
             self.health.is_dead(),
         )
@@ -508,6 +538,7 @@ struct Walk {
 struct Ghost {
     pos: Vec2,
     rot: f32,
+    elevation: f32,
     kind: SnapKind,
 }
 
@@ -543,6 +574,14 @@ enum GizmoHandle {
     Zy,
     /// Ground plane spanned by X and Z.
     Xz,
+    /// Glade building width / diameter handle.
+    GladeWidth,
+    /// Glade building depth / wall length handle.
+    GladeLength,
+    /// Glade wall height handle (controls fence / wall / crenellated tier).
+    GladeHeight,
+    /// Glade roof pitch handle at the roof apex.
+    GladeRoofPitch,
 }
 
 #[derive(Clone)]
@@ -800,20 +839,21 @@ fn next_capture(grabbed: bool, last_mode: Mode, last_view: ViewMode, input: Capt
     grabbed
 }
 
-/// Authoring versus playing. Build owns object editing (place, select, gizmos,
-/// rotate, delete); Play hands the capsule to the player while route editing
-/// (waypoints and curve handles) and view switching stay available.
+/// Authoring versus playing. Build owns general level editing; Building owns
+/// procedural building authoring and contextual attachments; Play hands the
+/// capsule to the player while route editing and view switching stay available.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 enum Mode {
     #[default]
     Build,
+    Building,
     Play,
 }
 
 impl Mode {
     fn toggled(self) -> Self {
         match self {
-            Mode::Build => Mode::Play,
+            Mode::Build | Mode::Building => Mode::Play,
             Mode::Play => Mode::Build,
         }
     }
@@ -821,6 +861,7 @@ impl Mode {
     fn label(self) -> &'static str {
         match self {
             Mode::Build => "build",
+            Mode::Building => "building",
             Mode::Play => "play",
         }
     }
@@ -993,6 +1034,56 @@ struct Nav {
 #[derive(Component)]
 struct PaletteButton(PaletteAction);
 
+/// Left-palette section whose visibility depends on the active editor `Mode`
+/// and the currently selected object(s).
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+enum PaletteGroup {
+    /// General dungeon / level categories + actor tools (`Mode::Build`).
+    BuildMode,
+    /// Core building tools: Building + Walls & Paths (`Mode::Building`).
+    BuildingBase,
+    /// Contextual group: Doors & Windows, shown when a building or wall is selected.
+    DoorsAndWindows,
+    /// Contextual group: Fixtures (e.g. brazier, upcoming lamps), shown when a
+    /// building, wall, or surface is selected.
+    BuildingFixtures,
+}
+
+/// Hint shown in `Mode::Building` when no building/wall/surface is selected.
+#[derive(Component)]
+struct BuildingSelectionHint;
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct SelectionPaletteContext {
+    supports_doors_and_windows: bool,
+    supports_fixtures: bool,
+}
+
+fn selection_palette_context(editor: &Editor) -> SelectionPaletteContext {
+    let mut ctx = SelectionPaletteContext::default();
+    for id in editor.selection.ids() {
+        let Some(piece) = editor.pieces.iter().find(|p| p.id == *id) else {
+            continue;
+        };
+        let Some(shape) = shapes().get(piece.shape) else {
+            continue;
+        };
+        if matches!(
+            shape.id,
+            "glade_room" | "glade_tower" | "glade_wall" | "wall" | "tall_wall" | "arch"
+        ) {
+            ctx.supports_doors_and_windows = true;
+            ctx.supports_fixtures = true;
+        } else if matches!(
+            shape.id,
+            "glade_terrain" | "floor" | "bridge" | "block" | "fence"
+        ) {
+            ctx.supports_fixtures = true;
+        }
+    }
+    ctx
+}
+
 /// Desktop Walk/Smooth row, shown only while Plan mode is active.
 #[derive(Component)]
 struct PathActions;
@@ -1004,6 +1095,7 @@ struct GrassActions;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PaletteAction {
     Build,
+    Building,
     Play,
     View,
     Shape(usize),
@@ -1105,6 +1197,9 @@ struct TouchStatus;
 #[derive(Resource, Default)]
 struct Visuals {
     map: HashMap<u32, Entity>,
+    /// Cached procedural signature per Glade piece (and ghost 0) so meshes
+    /// rebuild reactively when overlapping neighbours, paths, or dimensions change.
+    glade_signatures: HashMap<u32, u64>,
     character: Option<Entity>,
     /// The glTF avatar that follows the capsule root.
     character_avatar: Option<Entity>,
@@ -1127,7 +1222,7 @@ struct Kit {
     /// Baked grass tuft cluster, shared by every grassy hex.
     grass: Handle<Mesh>,
     /// Two green tints, picked per hex so the sward varies.
-    grass_mats: [Handle<StandardMaterial>; 2],
+    grass_mats: [Handle<crate::grass_material::GrassMaterial>; 2],
 }
 
 mod add_menu;
@@ -1151,6 +1246,7 @@ mod outliner;
 mod overlay;
 mod picking;
 mod properties;
+mod right_panel;
 mod route;
 mod save;
 mod selection;
@@ -1181,6 +1277,7 @@ use outliner::*;
 use overlay::*;
 use picking::*;
 use properties::*;
+use right_panel::*;
 use route::*;
 use save::*;
 use setup::*;

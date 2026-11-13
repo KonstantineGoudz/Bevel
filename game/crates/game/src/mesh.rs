@@ -282,10 +282,20 @@ fn push_tri(
         verts.swap(1, 2);
     }
     let first = positions.len() as u32;
+    let ax = normal.x.abs();
+    let ay = normal.y.abs();
+    let az = normal.z.abs();
     for v in verts {
         positions.push(v.to_array());
         normals.push(normal.to_array());
-        uvs.push([v.x * 0.5, v.z * 0.5]);
+        let uv = if ay >= ax && ay >= az {
+            [v.x * 0.5, v.z * 0.5]
+        } else if ax >= az {
+            [v.z * 0.5, v.y * 0.5]
+        } else {
+            [v.x * 0.5, v.y * 0.5]
+        };
+        uvs.push(uv);
     }
     indices.extend([first, first + 1, first + 2]);
 }

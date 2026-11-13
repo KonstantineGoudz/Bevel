@@ -841,3 +841,354 @@ fn a_gizmo_drag_carries_the_rest_of_the_selection() {
     );
     assert!(other.elevation.abs() < 1e-6, "a ground drag does not lift");
 }
+
+#[test]
+fn glade_gizmo_handles_resize_width_length_height_and_roof_pitch() {
+    let room_idx = model::shape_index("glade_room").unwrap();
+    let room_shape = &shapes()[room_idx];
+    let start = Piece {
+        id: 1,
+        shape: room_idx,
+        pos: Vec2::ZERO,
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::glade::default_size(room_shape),
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::glade::GLADE_DEFAULT_ROOF_PITCH,
+        trigger_color: crate::glade::GLADE_DEFAULT_ROOF_COLOR,
+        trigger_visible: true,
+        interact: crate::model::InteractAction::None,
+    };
+
+    let handles = glade_handle_visuals(&start, room_shape);
+    assert_eq!(handles.len(), 6, "room has +X/-X width, +Z/-Z length, height, and roof pitch handles");
+
+    // Drag +X width handle outward by 0.5m -> width grows by 1.0m (from 3.2 to 4.2)
+    let widened = dragged_piece(
+        start,
+        GizmoHandle::GladeWidth,
+        Vec3::new(1.6, 1.3, 0.0),
+        Vec3::new(2.1, 1.3, 0.0),
+    );
+    assert!((widened.trigger_size.x - 4.2).abs() < 1e-4);
+
+    // Drag +Z length handle outward by 0.4m -> length grows by 0.8m (from 2.4 to 3.2)
+    let lengthened = dragged_piece(
+        start,
+        GizmoHandle::GladeLength,
+        Vec3::new(0.0, 1.3, 1.2),
+        Vec3::new(0.0, 1.3, 1.6),
+    );
+    assert!((lengthened.trigger_size.z - 3.2).abs() < 1e-4);
+
+    // Drag height handle down by 1.8m -> height drops from 2.6m to 0.8m (low fence tier!)
+    let lowered = dragged_piece(
+        start,
+        GizmoHandle::GladeHeight,
+        Vec3::new(1.0, 2.6, 1.0),
+        Vec3::new(1.0, 0.8, 1.0),
+    );
+    assert!((lowered.trigger_size.y - 0.8).abs() < 1e-4);
+    assert_eq!(
+        crate::glade::wall_tier(lowered.trigger_size.y),
+        crate::glade::WallTier::LowFence
+    );
+
+    // Drag roof pitch handle down by 2.0m -> pitch drops to 0 (crenellated battlements!)
+    let flattened = dragged_piece(
+        start,
+        GizmoHandle::GladeRoofPitch,
+        Vec3::new(0.0, 3.8, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+    );
+    assert_eq!(
+        crate::glade::roof_style(&flattened, room_shape),
+        crate::glade::GladeRoofStyle::Battlements
+    );
+
+    // Touch mode places Glade handles further outward and gives Glade doors a simplified 3-handle set.
+    let touch_handles = glade_handle_visuals_for(&start, room_shape, true);
+    assert!(
+        touch_handles[0].1.x > handles[0].1.x + 0.15,
+        "mobile touch handles sit further out from the wall for easy finger grabs"
+    );
+
+    let door_idx = model::shape_index("glade_door").unwrap();
+    let door_shape = &shapes()[door_idx];
+    let door_piece = Piece {
+        shape: door_idx,
+        trigger_size: crate::glade::default_size(door_shape),
+        ..start
+    };
+    let door_handles = glade_handle_visuals_for(&door_piece, door_shape, true);
+    assert_eq!(
+        door_handles.len(),
+        3,
+        "glade_door shows only +X/-X width and top height handles"
+    );
+}
+
+#[test]
+fn glade_pieces_can_only_rotate_around_the_y_axis() {
+    let room_idx = model::shape_index("glade_room").unwrap();
+    let room_shape = &shapes()[room_idx];
+    let start = Piece {
+        id: 1,
+        shape: room_idx,
+        pos: Vec2::ZERO,
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::glade::default_size(room_shape),
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::glade::GLADE_DEFAULT_ROOF_PITCH,
+        trigger_color: crate::glade::GLADE_DEFAULT_ROOF_COLOR,
+        trigger_visible: true,
+        interact: crate::model::InteractAction::None,
+    };
+    let origin = gizmo_origin(&start, room_shape);
+
+    // Pitch handle drag must NOT tilt Glade objects
+    let pitch_drag = dragged_piece(
+        start,
+        GizmoHandle::Pitch,
+        origin + Vec3::Y,
+        origin + Vec3::Z,
+    );
+    assert_eq!(pitch_drag.pitch, 0.0, "Glade piece pitch must remain 0");
+    assert_eq!(pitch_drag.roll, 0.0, "Glade piece roll must remain 0");
+    assert_eq!(pitch_drag.rot, start.rot, "Glade piece rot must remain untouched on pitch drag");
+
+    // Roll handle drag must NOT tilt Glade objects
+    let roll_drag = dragged_piece(
+        start,
+        GizmoHandle::Roll,
+        origin + Vec3::X,
+        origin + Vec3::Y,
+    );
+    assert_eq!(roll_drag.pitch, 0.0, "Glade piece pitch must remain 0");
+    assert_eq!(roll_drag.roll, 0.0, "Glade piece roll must remain 0");
+    assert_eq!(roll_drag.rot, start.rot, "Glade piece rot must remain untouched on roll drag");
+
+    // Yaw handle drag DOES rotate Glade objects around the Y axis
+    let angle = 0.5_f32;
+    let (sin, cos) = angle.sin_cos();
+    let yaw_drag = dragged_piece(
+        start,
+        GizmoHandle::Yaw,
+        origin + Vec3::X,
+        origin + Vec3::X * cos + Vec3::Z * sin,
+    );
+    assert_eq!(yaw_drag.pitch, 0.0);
+    assert_eq!(yaw_drag.roll, 0.0);
+    assert!((yaw_drag.rot - angle).abs() < 1e-4, "Glade piece rotates freely on Y axis (yaw)");
+
+    // set_piece_quat forces pitch and roll to 0 for Glade pieces
+    let mut modified = start;
+    model::set_piece_quat(&mut modified, Quat::from_euler(bevy::math::EulerRot::XYZ, 0.4, 0.8, -0.3));
+    assert_eq!(modified.pitch, 0.0, "pitch clamped to 0");
+    assert_eq!(modified.roll, 0.0, "roll clamped to 0");
+    assert!(modified.rot.abs() > 0.01, "yaw preserved");
+}
+
+#[test]
+fn glade_terrain_and_tent_houses_support_gizmo_reshaping_and_elevation_snapping() {
+    let terrain_idx = model::shape_index("glade_terrain").unwrap();
+    let terrain_shape = &shapes()[terrain_idx];
+    let terrain = Piece {
+        id: 1,
+        shape: terrain_idx,
+        pos: Vec2::ZERO,
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::glade::default_size(terrain_shape),
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::glade::GLADE_DEFAULT_ROOF_PITCH,
+        trigger_color: crate::glade::DEFAULT_TERRAIN_COLOR,
+        trigger_visible: true,
+        interact: crate::model::InteractAction::None,
+    };
+
+    // Terrain chunk exposes all 6 tactile handles (+X/-X width, +Z/-Z length, height, and falloff/cliff steepness)
+    let handles = glade_handle_visuals(&terrain, terrain_shape);
+    assert_eq!(handles.len(), 6);
+
+    // Drag terrain height up to 15.0m (doubled height range!)
+    let tall_terrain = dragged_piece(
+        terrain,
+        GizmoHandle::GladeHeight,
+        Vec3::new(1.0, terrain.trigger_size.y, 1.0),
+        Vec3::new(1.0, 15.0, 1.0),
+    );
+    assert!((tall_terrain.trigger_size.y - 15.0).abs() < 1e-4);
+
+    // Drag room height down to 0.20m -> transforms into a tent-like house!
+    let room_idx = model::shape_index("glade_room").unwrap();
+    let room_shape = &shapes()[room_idx];
+    let room = Piece {
+        id: 2,
+        shape: room_idx,
+        trigger_size: crate::glade::default_size(room_shape),
+        ..terrain
+    };
+    let tent_room = dragged_piece(
+        room,
+        GizmoHandle::GladeHeight,
+        Vec3::new(1.0, 2.6, 1.0),
+        Vec3::new(1.0, 0.20, 1.0),
+    );
+    assert!((tent_room.trigger_size.y - 0.20).abs() < 1e-4);
+    assert!(crate::glade::is_tent_house(&tent_room, room_shape));
+
+    // Snapping elevation of a piece over `glade_terrain` snaps cleanly onto the terrain plateau height
+    let expected_h = crate::glade::terrain_height_at(Vec2::ZERO, &[terrain]);
+    let snapped_y = snap_elevation(
+        room,
+        room_shape,
+        &[terrain],
+        expected_h - 0.08,
+        1.0,
+        true,
+        ELEVATION_SNAP,
+    );
+    assert!(
+        (snapped_y - expected_h).abs() < 1e-4,
+        "piece snaps onto terrain plateau height {expected_h}, got {snapped_y}"
+    );
+
+    // Verify Rapier trimesh collider builds cleanly for `glade_terrain`
+    let collider = piece_collider_for_glade(&terrain, terrain_shape, &[terrain], &[], None);
+    assert!(collider.is_some(), "glade_terrain generates a walkable 3D collider");
+
+    // Verify continuous terrain brush stroke (`apply_terrain_brush_dab` + `finish_terrain_stroke`)
+    // extends a large-scale plateau across a drag and lifts buildings sitting on it!
+    let mut editor = Editor::default();
+    editor.pieces.push(Piece {
+        id: 1,
+        shape: room_idx,
+        pos: Vec2::new(3.0, 0.0),
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::glade::default_size(room_shape),
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::glade::GLADE_DEFAULT_ROOF_PITCH,
+        trigger_color: crate::glade::GLADE_DEFAULT_ROOF_COLOR,
+        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+        interact: crate::model::InteractAction::None,
+    });
+    editor.next_id = 2;
+
+    assert!(apply_terrain_brush_dab(&mut editor, Vec2::new(0.0, 0.0), false));
+    assert!(apply_terrain_brush_dab(&mut editor, Vec2::new(3.2, 0.0), false));
+    finish_terrain_stroke(&mut editor);
+
+    let room_after = editor.pieces.iter().find(|p| p.id == 1).unwrap();
+    assert!(
+        room_after.elevation > 1.8,
+        "room sitting on sculpted terrain stroke is lifted onto the plateau (elevation = {})",
+        room_after.elevation
+    );
+    assert_eq!(
+        editor.undo.len(),
+        1,
+        "entire continuous terrain brush drag commits as a single undo step"
+    );
+
+    // Shift+drag (`lower = true`) carves into the built-in hillside
+    let hill_pos = Vec2::new(-7.6, -6.8);
+    let before_hill = crate::glade::world_terrain_height_at(hill_pos, &editor.pieces);
+    assert!(apply_terrain_brush_dab(&mut editor, hill_pos, true));
+    finish_terrain_stroke(&mut editor);
+    let after_hill = crate::glade::world_terrain_height_at(hill_pos, &editor.pieces);
+    assert!(
+        after_hill < before_hill - 0.5,
+        "lowering terrain brush carves into the built-in hillside ({before_hill} -> {after_hill})"
+    );
+}
+
+#[test]
+fn glade_gizmo_provides_4_move_arrows_and_2_corner_rotation_arcs() {
+    use bevy::camera::{RenderTargetInfo, Viewport};
+
+    let room_idx = model::shape_index("glade_room").unwrap();
+    let room_shape = &shapes()[room_idx];
+    let room = Piece {
+        id: 1,
+        shape: room_idx,
+        pos: Vec2::ZERO,
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: crate::model::Trigger::harmless(),
+        trigger_size: crate::glade::default_size(room_shape),
+        trigger_shape_override: crate::model::TriggerShape::Box,
+        trigger_alpha: crate::glade::GLADE_DEFAULT_ROOF_PITCH,
+        trigger_color: crate::glade::GLADE_DEFAULT_ROOF_COLOR,
+        trigger_visible: true,
+        interact: crate::model::InteractAction::None,
+    };
+
+    let arrows = glade_move_arrows(&room, room_shape, false);
+    assert_eq!(arrows.len(), 4, "Glade building has 4 ground-plane move arrows");
+    let arcs = glade_rotation_arcs(&room, room_shape, false);
+    assert_eq!(arcs.len(), 2, "Glade building has 2 corner rotation arcs");
+
+    let mut editor = Editor::default();
+    editor.pieces.push(room);
+    editor.selection.set(1);
+
+    let mut camera = Camera::default();
+    camera.viewport = Some(Viewport {
+        physical_position: UVec2::ZERO,
+        physical_size: UVec2::new(800, 600),
+        depth: 0.0..1.0,
+    });
+    camera.computed.clip_from_view =
+        Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, 800.0 / 600.0, 0.1, 100.0);
+    camera.computed.target_info = Some(RenderTargetInfo {
+        physical_size: UVec2::new(800, 600),
+        scale_factor: 1.0,
+    });
+    let cam_global = GlobalTransform::from(
+        Transform::from_xyz(0.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
+    );
+
+    for (base, tip) in &arrows {
+        let mid = (*base + *tip) * 0.5;
+        let screen = camera.world_to_viewport(&cam_global, mid).unwrap();
+        let ray = camera.viewport_to_world(&cam_global, screen).unwrap();
+        assert_eq!(
+            gizmo_hit(&editor, &camera, &cam_global, screen, ray, false),
+            Some(GizmoHandle::Xz),
+            "clicking move arrow at {mid} hits GizmoHandle::Xz"
+        );
+    }
+
+    for arc in &arcs {
+        let mid = arc[arc.len() / 2];
+        let screen = camera.world_to_viewport(&cam_global, mid).unwrap();
+        let ray = camera.viewport_to_world(&cam_global, screen).unwrap();
+        assert_eq!(
+            gizmo_hit(&editor, &camera, &cam_global, screen, ray, false),
+            Some(GizmoHandle::Yaw),
+            "clicking corner arc at {mid} hits GizmoHandle::Yaw"
+        );
+    }
+}

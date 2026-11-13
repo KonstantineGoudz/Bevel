@@ -18,43 +18,33 @@ use bevy::text::{EditableText, TextCursorStyle};
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::TextInput;
 
-pub(super) const OUTLINER_WIDTH: f32 = 250.0;
-pub(super) const OUTLINER_MARGIN: f32 = 8.0;
-pub(super) const OUTLINER_TOP: f32 = 38.0;
-/// Touch geometry: docked below the toolbar like the properties panel.
-pub(super) const OUTLINER_TOUCH_LEFT: f32 = 8.0;
-pub(super) const OUTLINER_TOUCH_TOP: f32 = 140.0;
-pub(super) const OUTLINER_HEIGHT: f32 = 350.0;
 /// Height of the title bar when the graph is collapsed to just its header.
 pub(super) const OUTLINER_COLLAPSED_HEIGHT: f32 = 34.0;
 
-/// Whether a logical screen point is over the floating object graph.
-/// Geometry mirrors `sync_outliner_panel`: the touch layout docks below the
-/// toolbar and renders at the input layer's scale.
+/// Whether a logical screen point is over the docked object graph section
+/// inside the right side panel.
 pub(super) fn over_outliner_panel(
     screen: Vec2,
-    _size: Vec2,
+    size: Vec2,
+    right_panel: &RightPanelState,
     collapsed: bool,
     touch: &TouchState,
 ) -> bool {
+    if !right_panel.open {
+        return false;
+    }
     let s = if touch.enabled { touch.ui_scale } else { 1.0 };
-    let left = if touch.enabled {
-        OUTLINER_TOUCH_LEFT
-    } else {
-        PANEL_WIDTH + OUTLINER_MARGIN
-    };
     let top = if touch.enabled {
-        OUTLINER_TOUCH_TOP
+        RIGHT_PANEL_TOUCH_TOP
     } else {
-        OUTLINER_TOP
-    };
+        0.0
+    } + RIGHT_PANEL_HEADER_HEIGHT;
     let height = if collapsed {
         OUTLINER_COLLAPSED_HEIGHT
     } else {
-        OUTLINER_HEIGHT
+        right_panel.outliner_height
     };
-    screen.x >= left * s
-        && screen.x <= (left + OUTLINER_WIDTH) * s
+    screen.x >= size.x - right_panel.width * s
         && screen.y >= top * s
         && screen.y <= (top + height) * s
 }
@@ -130,16 +120,13 @@ pub(super) struct OutlinerEdit {
     committed: bool,
 }
 
-pub(super) fn spawn_object_graph(commands: &mut Commands) {
+pub(super) fn spawn_object_graph(commands: &mut Commands) -> Entity {
     let panel = commands
         .spawn((
             OutlinerPanel,
             Node {
-                position_type: PositionType::Absolute,
-                left: px(PANEL_WIDTH + OUTLINER_MARGIN),
-                top: px(OUTLINER_TOP),
-                width: px(OUTLINER_WIDTH),
-                height: px(OUTLINER_HEIGHT),
+                width: percent(100),
+                min_height: px(OUTLINER_COLLAPSED_HEIGHT),
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::all(px(8)),
                 row_gap: px(5),
@@ -356,51 +343,14 @@ pub(super) fn spawn_object_graph(commands: &mut Commands) {
         .entity(body)
         .add_children(&[toolbar, label_row, list, hint]);
     commands.entity(panel).add_children(&[header, body]);
+    panel
 }
 
 pub(super) fn sync_outliner_panel(
-    editor: Res<Editor>,
-    touch: Res<TouchState>,
     state: Res<OutlinerState>,
-    mut panels: Query<&mut Node, (With<OutlinerPanel>, Without<OutlinerBody>)>,
-    mut bodies: Query<&mut Node, (With<OutlinerBody>, Without<OutlinerPanel>)>,
+    mut bodies: Query<&mut Node, With<OutlinerBody>>,
     mut labels: Query<&mut Text, With<OutlinerCollapseLabel>>,
 ) {
-    let height = if state.collapsed {
-        OUTLINER_COLLAPSED_HEIGHT
-    } else {
-        OUTLINER_HEIGHT
-    };
-    let left = if touch.enabled {
-        OUTLINER_TOUCH_LEFT
-    } else {
-        PANEL_WIDTH + OUTLINER_MARGIN
-    };
-    let top = if touch.enabled {
-        OUTLINER_TOUCH_TOP
-    } else {
-        OUTLINER_TOP
-    };
-    let visible = editor.mode == Mode::Build;
-    for mut panel in &mut panels {
-        if panel.left != px(left) {
-            panel.left = px(left);
-        }
-        if panel.top != px(top) {
-            panel.top = px(top);
-        }
-        if panel.height != px(height) {
-            panel.height = px(height);
-        }
-        let display = if visible {
-            Display::Flex
-        } else {
-            Display::None
-        };
-        if panel.display != display {
-            panel.display = display;
-        }
-    }
     for mut body in &mut bodies {
         let display = if state.collapsed {
             Display::None
@@ -924,7 +874,7 @@ pub(super) fn on_outliner_press(
     if event.button != PointerButton::Primary {
         return;
     }
-    if editor.keyboard_transform.is_some() || editor.mode != Mode::Build {
+    if editor.keyboard_transform.is_some() || !object_editing_allowed(editor.mode) {
         return;
     }
     state.drag = None;
@@ -1130,7 +1080,7 @@ pub(super) fn outliner_shortcuts(
     mut state: ResMut<OutlinerState>,
     inputs: Query<Entity, With<OutlinerNameInput>>,
 ) {
-    if menu.open || focus.get().is_some() || editor.mode != Mode::Build {
+    if menu.open || focus.get().is_some() || !object_editing_allowed(editor.mode) {
         return;
     }
     if input.just_pressed(Action::Back) {
@@ -1168,6 +1118,7 @@ pub(super) fn outliner_scroll(
     mut list: Query<(&mut ScrollPosition, &ComputedNode), With<OutlinerList>>,
     touch: Res<TouchState>,
     editor: Res<Editor>,
+    right_panel: Res<RightPanelState>,
     state: Res<OutlinerState>,
 ) {
     let raw: f32 = wheel
@@ -1177,13 +1128,13 @@ pub(super) fn outliner_scroll(
             MouseScrollUnit::Pixel => wheel.y,
         })
         .sum();
-    if state.collapsed || editor.mode != Mode::Build || raw == 0.0 {
+    if state.collapsed || !object_editing_allowed(editor.mode) || raw == 0.0 {
         return;
     }
     let Some(cursor) = window.cursor_position() else {
         return;
     };
-    if !over_outliner_panel(cursor, window.size(), state.collapsed, &touch) {
+    if !over_outliner_panel(cursor, window.size(), &right_panel, state.collapsed, &touch) {
         return;
     }
     let Ok((mut position, computed)) = list.single_mut() else {

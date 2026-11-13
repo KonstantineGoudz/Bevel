@@ -19,7 +19,7 @@ pub(super) fn on_palette_activate(
     nav: Res<Nav>,
     rapier: ReadRapierContext,
     player: Query<Entity, With<CharacterVisual>>,
-    movers: Res<Movers>,
+    mut movers: ResMut<Movers>,
     mut home: ResMut<HomeMenu>,
 ) {
     // While the pointer is captured the mouse only looks; Tab must release it
@@ -56,6 +56,7 @@ pub(super) fn on_palette_activate(
     }
     match button.0 {
         PaletteAction::Build => set_mode(&mut editor, Mode::Build),
+        PaletteAction::Building => set_mode(&mut editor, Mode::Building),
         PaletteAction::Play => set_mode(&mut editor, Mode::Play),
         PaletteAction::View => cycle_view(&mut orbit, &editor),
         PaletteAction::Shape(index) => {
@@ -152,7 +153,18 @@ pub(super) fn on_palette_activate(
             }
         }
         PaletteAction::Smooth => {
-            if editor.actor_tool == Some(ActorTool::Plan)
+            if editor.actor_tool == Some(ActorTool::Platform)
+                && let Some(id) = editor.selection.primary()
+                && let Some(mover) = movers.map.get_mut(&id)
+            {
+                for wp in &mut mover.waypoints {
+                    wp.incoming = None;
+                    wp.outgoing = None;
+                }
+                mover.rebuild();
+                editor.hard_dirty = true;
+                editor.note = "smoothed";
+            } else if editor.actor_tool == Some(ActorTool::Plan)
                 && let Ok(rapier_ctx) = rapier.single()
                 && smooth_plan(&mut editor, &nav, &rapier_ctx, filter)
             {
@@ -247,10 +259,10 @@ pub(super) fn refresh_route(
 }
 
 /// Object editing — placing, selecting, gizmos, rotate/delete/undo — is
-/// Build-only. Route editing (waypoints and curve handles) stays available in
-/// Play so the authored path can be test-driven and reshaped.
+/// Build/Building-only. Route editing (waypoints and curve handles) stays
+/// available in Play so the authored path can be test-driven and reshaped.
 pub(super) fn object_editing_allowed(mode: Mode) -> bool {
-    mode == Mode::Build
+    matches!(mode, Mode::Build | Mode::Building)
 }
 
 /// Switch modes. Play holsters the object tools so a stray click cannot place,
@@ -281,6 +293,9 @@ pub(super) fn set_mode(editor: &mut Editor, mode: Mode) {
         Mode::Build => {
             editor.note = "build mode";
         }
+        Mode::Building => {
+            editor.note = "building mode";
+        }
     }
 }
 
@@ -289,7 +304,11 @@ pub(super) fn set_mode(editor: &mut Editor, mode: Mode) {
 pub(super) fn palette_is_authoring(action: PaletteAction) -> bool {
     !matches!(
         action,
-        PaletteAction::Build | PaletteAction::Play | PaletteAction::View | PaletteAction::CopyJson
+        PaletteAction::Build
+            | PaletteAction::Building
+            | PaletteAction::Play
+            | PaletteAction::View
+            | PaletteAction::CopyJson
     )
 }
 
@@ -334,8 +353,7 @@ pub(super) fn interact(
     gesture: Res<PathGesture>,
     nav: Res<Nav>,
     gates: MenuHome,
-    outliner: Res<OutlinerState>,
-    panel_state: Res<PropertiesPanelState>,
+    right_panel: Res<RightPanelState>,
     camera: Single<(&Camera, &Transform), Without<MinimapCamera>>,
     rapier: ReadRapierContext,
     player: Query<Entity, With<CharacterVisual>>,
@@ -488,18 +506,7 @@ pub(super) fn interact(
     if !playing && !touch.enabled && screen.x <= PANEL_WIDTH {
         return;
     }
-    if !playing
-        && over_properties_panel(
-            screen,
-            cursor.screen_size,
-            !editor.selection.is_empty(),
-            panel_state.collapsed,
-            &touch,
-        )
-    {
-        return;
-    }
-    if !playing && over_outliner_panel(screen, cursor.screen_size, outliner.collapsed, &touch) {
+    if !playing && over_right_panel(screen, cursor.screen_size, &right_panel, &touch) {
         return;
     }
 
@@ -560,6 +567,23 @@ pub(super) fn interact(
     if let Some(tool) = editor.tool {
         let shape = &shapes()[tool];
         let default_trigger = crate::model::Trigger::damaging(shape.damage);
+        let default_size = if shape.is_glade() {
+            crate::glade::default_size(shape)
+        } else {
+            crate::model::TRIGGER_DEFAULT_SIZE
+        };
+        let default_alpha = if shape.is_glade() {
+            crate::glade::GLADE_DEFAULT_ROOF_PITCH
+        } else {
+            crate::model::TRIGGER_DEFAULT_ALPHA
+        };
+        let default_color = if shape.id == "glade_terrain" {
+            crate::glade::DEFAULT_TERRAIN_COLOR
+        } else if shape.is_glade() {
+            crate::glade::GLADE_DEFAULT_ROOF_COLOR
+        } else {
+            crate::model::TRIGGER_DEFAULT_COLOR
+        };
         let raw = Piece {
             id: 0,
             shape: tool,
@@ -570,68 +594,269 @@ pub(super) fn interact(
             elevation: 0.0,
             dynamic: false,
             trigger: default_trigger,
-            trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+            trigger_size: default_size,
             trigger_shape_override: crate::model::TriggerShape::Box,
-            trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
-            trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+            trigger_alpha: default_alpha,
+            trigger_color: default_color,
             trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
             interact: crate::model::InteractAction::None,
         };
-        let snap = model::snap_piece(
-            &raw,
-            shape,
-            &editor.pieces,
-            editor.snap,
-            editor.snap,
-            SNAP_THRESHOLD,
-        );
+        let (snap, snap_elevation) =
+            if matches!(shape.id, "glade_door" | "glade_window" | "door" | "gate") {
+            let wall_spines: Vec<(u32, Vec<Vec2>)> = editor
+                .pieces
+                .iter()
+                .filter_map(|p| movers::glade_wall_spine(p, &movers).map(|pts| (p.id, pts)))
+                .collect();
+            if let Some((pos, rot, wall_elev)) =
+                crate::glade::snap_door_to_glade_wall_with_elevation(
+                    &raw,
+                    &editor.pieces,
+                    cursor.ray,
+                    &wall_spines,
+                )
+            {
+                (
+                    model::Snap {
+                        pos,
+                        rot,
+                        kind: SnapKind::Anchor,
+                    },
+                    wall_elev,
+                )
+            } else if matches!(shape.id, "glade_door" | "glade_window") {
+                // Building doors and windows must attach to a building wall;
+                // do not show a ground ghost or allow placing them in open space.
+                editor.ghost = None;
+                if clicked {
+                    editor.note = "click on a building wall to place a door or window";
+                }
+                return;
+            } else {
+                let s = model::snap_piece(
+                    &raw,
+                    shape,
+                    &editor.pieces,
+                    editor.snap,
+                    editor.snap,
+                    SNAP_THRESHOLD,
+                );
+                let h = crate::glade::world_terrain_height_at(s.pos, &editor.pieces);
+                (s, h)
+            }
+        } else {
+            let s = model::snap_piece(
+                &raw,
+                shape,
+                &editor.pieces,
+                editor.snap,
+                editor.snap,
+                SNAP_THRESHOLD,
+            );
+            let h = if shape.id == "glade_terrain" {
+                0.0
+            } else {
+                crate::glade::world_terrain_height_at(s.pos, &editor.pieces)
+            };
+            (s, h)
+        };
         editor.ghost = Some(Ghost {
             pos: snap.pos,
             rot: snap.rot,
+            elevation: snap_elevation,
             kind: snap.kind,
         });
 
+        // Continuous Tiny Glade terrain brush: when `glade_terrain` is armed,
+        // clicking and dragging continuously raises/extends a plateau ridge
+        // across the landscape (or Shift+drag lowers/carves terrain), keeping
+        // the brush armed for multi-stroke sculpting.
+        if shape.id == "glade_terrain" {
+            let held = input.pressed(Action::PrimaryClick);
+            let shift =
+                input.keys.pressed(KeyCode::ShiftLeft) || input.keys.pressed(KeyCode::ShiftRight);
+            let lower = shift || editor.grass_erase;
+            if clicked || held {
+                if apply_terrain_brush_dab(&mut editor, world, lower) {
+                    editor.note = if lower {
+                        "lowered / carved terrain (drag to sculpt)"
+                    } else {
+                        "sculpted terrain plateau (drag to extend, Shift+drag to lower)"
+                    };
+                }
+                if !held {
+                    finish_terrain_stroke(&mut editor);
+                }
+            }
+            if input.just_released(Action::PrimaryClick) && editor.terrain_stroke {
+                finish_terrain_stroke(&mut editor);
+            }
+            return;
+        }
+
+        // Dedicated dirt/stone terrain path tool: clicking starts a `glade_path`
+        // piece and subsequent clicks extend its polyline/spline until Esc or
+        // another tool is chosen.
+        if shape.id == "glade_path" {
+            if clicked {
+                if let Some(sel_id) = editor.selection.primary()
+                    && let Some(sel_piece) = editor.pieces.iter().find(|p| p.id == sel_id).copied()
+                    && shapes()
+                        .get(sel_piece.shape)
+                        .is_some_and(|s| s.id == "glade_path")
+                {
+                    let last_pos = movers
+                        .map
+                        .get(&sel_id)
+                        .and_then(|m| m.waypoints.last())
+                        .map(|w| w.pos)
+                        .unwrap_or(sel_piece.pos);
+                    if snap.pos.distance(last_pos) > 0.15 {
+                        editor.commit();
+                        let mover = movers.mover_mut(sel_id, sel_piece.pos);
+                        mover
+                            .waypoints
+                            .push(crate::platforms::PlatformWaypoint::new(snap.pos));
+                        mover.selected = Some(mover.waypoints.len() - 1);
+                        mover.rebuild();
+                        editor.hard_dirty = true;
+                        editor.note = "path extended (Esc to finish)";
+                    }
+                } else {
+                    editor.commit();
+                    let id = editor.next_id;
+                    editor.next_id += 1;
+                    editor.pieces.push(Piece {
+                        id,
+                        shape: tool,
+                        pos: snap.pos,
+                        rot: snap.rot,
+                        pitch: 0.0,
+                        roll: 0.0,
+                        elevation: snap_elevation,
+                        dynamic: false,
+                        trigger: default_trigger,
+                        trigger_size: default_size,
+                        trigger_shape_override: crate::model::TriggerShape::Box,
+                        trigger_alpha: default_alpha,
+                        trigger_color: default_color,
+                        trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+                        interact: crate::model::InteractAction::None,
+                    });
+                    editor.selection.set(id);
+                    movers.mover_mut(id, snap.pos);
+                    editor.hard_dirty = true;
+                    editor.note = "path started — click to add points (Esc to finish)";
+                }
+            }
+            return;
+        }
+
         if clicked {
+            let shift =
+                input.keys.pressed(KeyCode::ShiftLeft) || input.keys.pressed(KeyCode::ShiftRight);
+            let keep_stamping = keeps_stamping(shift, touch.append);
+
+            // Chained path-wall drawing: when stamping a `glade_wall` with Shift or
+            // mobile `Add` while an existing `glade_wall` is selected, append the clicked
+            // point to that wall's curved path spine instead of spawning a separate piece!
+            if shape.id == "glade_wall"
+                && keep_stamping
+                && let Some(sel_id) = editor.selection.primary()
+                && let Some(sel_piece) = editor.pieces.iter().find(|p| p.id == sel_id).copied()
+                && shapes()
+                    .get(sel_piece.shape)
+                    .is_some_and(|s| s.id == "glade_wall")
+                && snap.pos.distance(sel_piece.pos) > 0.15
+            {
+                editor.commit();
+                let mover = movers.mover_mut(sel_id, sel_piece.pos);
+                mover
+                    .waypoints
+                    .push(crate::platforms::PlatformWaypoint::new(snap.pos));
+                mover.selected = Some(mover.waypoints.len() - 1);
+                mover.rebuild();
+                editor.hard_dirty = true;
+                editor.note = "wall path extended (Shift/Add to keep drawing)";
+                return;
+            }
+
             editor.commit();
             let id = editor.next_id;
             editor.next_id += 1;
-            editor.pieces.push(Piece {
+            let initial_elevation = snap_elevation;
+            let placed = Piece {
                 id,
                 shape: tool,
                 pos: snap.pos,
                 rot: snap.rot,
                 pitch: 0.0,
                 roll: 0.0,
-                elevation: 0.0,
+                elevation: initial_elevation,
                 dynamic: false,
                 trigger: default_trigger,
-                trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
+                trigger_size: default_size,
                 trigger_shape_override: crate::model::TriggerShape::Box,
-                trigger_alpha: crate::model::TRIGGER_DEFAULT_ALPHA,
-                trigger_color: crate::model::TRIGGER_DEFAULT_COLOR,
+                trigger_alpha: default_alpha,
+                trigger_color: default_color,
                 trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
                 interact: crate::model::InteractAction::None,
-            });
+            };
+            editor.pieces.push(placed);
             editor.selection.set(id);
-            editor.note = match snap.kind {
-                SnapKind::Anchor => "placed: anchor snap",
-                SnapKind::Grid => "placed: grid snap",
-                SnapKind::Free => "placed: free",
+            if let Some(host_id) = crate::glade::find_host_building(&placed, &editor.pieces) {
+                editor.auto_group_with_host(id, host_id);
+            }
+
+            // If a new `glade_wall` is placed onto an active `Plan` curve, adopt
+            // the plan's waypoints (including Bezier tangents) so the wall follows the path!
+            let mut followed_plan = false;
+            if shape.id == "glade_wall"
+                && let Some(plan) = &editor.plan
+                && plan.waypoints.len() >= 2
+                && plan
+                    .waypoints
+                    .iter()
+                    .any(|w| w.pos.distance(snap.pos) <= 2.0)
+            {
+                let plan_wps: Vec<crate::platforms::PlatformWaypoint> = plan
+                    .waypoints
+                    .iter()
+                    .map(|w| crate::platforms::PlatformWaypoint {
+                        pos: w.pos,
+                        incoming: w.incoming,
+                        outgoing: w.outgoing,
+                    })
+                    .collect();
+                let mover = movers.mover_mut(id, snap.pos);
+                mover.waypoints = plan_wps;
+                mover.rebuild();
+                followed_plan = true;
+            }
+
+            editor.note = if followed_plan {
+                "placed: wall following plan path"
+            } else {
+                match snap.kind {
+                    SnapKind::Anchor => "placed: anchor snap",
+                    SnapKind::Grid => "placed: grid snap",
+                    SnapKind::Free => "placed: free",
+                }
             };
             // One drop per palette click. Holding Shift (or the sticky touch
             // Add) keeps the stamp armed, so a row of blocks is a Shift-click
             // each, while a plain click hands the pointer back to selection so
             // the piece can be moved straight away.
-            let shift =
-                input.keys.pressed(KeyCode::ShiftLeft) || input.keys.pressed(KeyCode::ShiftRight);
-            if !keeps_stamping(shift, touch.append) {
+            if !keep_stamping {
                 editor.tool = None;
                 editor.ghost = None;
-                editor.note = match snap.kind {
-                    SnapKind::Anchor => "placed: anchor snap (Shift keeps stamping)",
-                    SnapKind::Grid => "placed: grid snap (Shift keeps stamping)",
-                    SnapKind::Free => "placed: free (Shift keeps stamping)",
-                };
+                if !followed_plan {
+                    editor.note = match snap.kind {
+                        SnapKind::Anchor => "placed: anchor snap (Shift keeps stamping)",
+                        SnapKind::Grid => "placed: grid snap (Shift keeps stamping)",
+                        SnapKind::Free => "placed: free (Shift keeps stamping)",
+                    };
+                }
             }
         }
         return;
@@ -918,17 +1143,25 @@ pub(super) fn click_selection(editor: &mut Editor, hit: u32, append: bool) -> bo
 /// The other selected pieces as `(id, offset)` measured from the grabbed
 /// piece, so one drag carries the whole selection rigidly.
 pub(super) fn group_offsets(editor: &Editor, anchor: u32, anchor_pos: Vec2) -> Vec<(u32, Vec2)> {
-    editor
+    let mut ids: Vec<u32> = editor
         .selection
         .ids()
         .iter()
-        .filter(|id| **id != anchor)
+        .copied()
+        .filter(|id| *id != anchor)
+        .collect();
+    for mate_id in editor.attached_building_mates(anchor) {
+        if !ids.contains(&mate_id) {
+            ids.push(mate_id);
+        }
+    }
+    ids.into_iter()
         .filter_map(|id| {
             editor
                 .pieces
                 .iter()
-                .find(|piece| piece.id == *id)
-                .map(|piece| (*id, piece.pos - anchor_pos))
+                .find(|piece| piece.id == id)
+                .map(|piece| (id, piece.pos - anchor_pos))
         })
         .collect()
 }
@@ -964,28 +1197,49 @@ pub(super) fn apply_body_drag(editor: &mut Editor, drag: Drag, base: Vec2) {
     let mut moving: Vec<u32> = drag.group.iter().map(|(id, _)| *id).collect();
     moving.push(drag.id);
     let candidates = snap_against(editor, &moving);
-    let snap = model::snap_piece(
-        &raw,
-        shape,
-        &candidates,
-        editor.snap,
-        false,
-        SNAP_THRESHOLD,
-    );
-    let changed = {
+    let (snap, door_elev) = if matches!(shape.id, "glade_door" | "glade_window" | "door" | "gate")
+        && let Some((pos, rot, wall_elev)) =
+            crate::glade::snap_door_to_glade_wall_with_elevation(&raw, &candidates, None, &[])
+    {
+        (
+            model::Snap {
+                pos,
+                rot,
+                kind: SnapKind::Anchor,
+            },
+            Some(wall_elev),
+        )
+    } else {
+        (
+            model::snap_piece(
+                &raw,
+                shape,
+                &candidates,
+                editor.snap,
+                false,
+                SNAP_THRESHOLD,
+            ),
+            None,
+        )
+    };
+    let (changed, delta_elev) = {
         let target = &mut editor.pieces[index];
+        let new_elev = door_elev.unwrap_or(target.elevation);
+        let delta_elev = new_elev - target.elevation;
         let changed = (target.pos - snap.pos).length_squared() > 1e-10
-            || (target.rot - snap.rot).abs() > 1e-6;
+            || (target.rot - snap.rot).abs() > 1e-6
+            || delta_elev.abs() > 1e-6;
         target.pos = snap.pos;
         target.rot = snap.rot;
-        changed
+        target.elevation = new_elev;
+        (changed, delta_elev)
     };
-    // The rest of the selection follows the grabbed piece rigidly, keeping
-    // the layout captured at grab time. They do not snap: the anchor's snap
-    // is what places the group.
+    // The rest of the selection (and attached building items) follows the grabbed
+    // piece rigidly, keeping the layout captured at grab time.
     for (id, offset) in &drag.group {
         if let Some(other) = editor.pieces.iter_mut().find(|p| p.id == *id) {
             other.pos = snap.pos + *offset;
+            other.elevation += delta_elev;
         }
     }
     if changed {
@@ -1009,4 +1263,196 @@ fn drag_plane_point(ray: Ray3d, height: f32) -> Option<Vec2> {
     }
     let hit = ray.origin + dir * t;
     Some(Vec2::new(hit.x, hit.z))
+}
+
+/// Apply one continuous dab of the Tiny Glade terrain brush at `pos`.
+/// When `lower` is false, raises or extends a wide plateau ridge along the
+/// stroke; when `lower` is true, lowers or carves terrain (including carving
+/// into the built-in hillside). Also lifts/lowers non-terrain pieces sitting
+/// on the sculpted ground so buildings ride cleanly with the terrain.
+pub(super) fn apply_terrain_brush_dab(editor: &mut Editor, pos: Vec2, lower: bool) -> bool {
+    let Some(terrain_idx) = model::shape_index("glade_terrain") else {
+        return false;
+    };
+    let terrain_shape = &shapes()[terrain_idx];
+    let default_ext = crate::glade::default_size(terrain_shape);
+
+    if !editor.terrain_stroke {
+        editor.commit();
+        editor.terrain_stroke = true;
+        editor.terrain_stroke_dirty = false;
+        editor.terrain_stroke_last_pos = None;
+
+        let current_h = crate::glade::world_terrain_height_at(pos, &editor.pieces);
+        let near_chunk_center = editor.pieces.iter().find_map(|p| {
+            (p.shape == terrain_idx && p.elevation >= -0.05 && p.pos.distance(pos) <= 2.4)
+                .then_some(p.trigger_size.y)
+        });
+        editor.terrain_stroke_target_h = if let Some(chunk_h) = near_chunk_center {
+            (chunk_h + 1.45).clamp(
+                crate::glade::TERRAIN_MIN_HEIGHT,
+                crate::glade::TERRAIN_MAX_HEIGHT,
+            )
+        } else if current_h > 0.45 {
+            current_h.clamp(default_ext.y, crate::glade::TERRAIN_MAX_HEIGHT)
+        } else {
+            default_ext.y
+        };
+    }
+
+    if let Some(last_pos) = editor.terrain_stroke_last_pos
+        && last_pos.distance(pos) < 1.35
+        && editor.terrain_stroke_dirty
+    {
+        return false;
+    }
+    let prev_pos = editor.terrain_stroke_last_pos;
+    editor.terrain_stroke_last_pos = Some(pos);
+
+    let mut changed = false;
+    if lower {
+        let mut to_remove = Vec::new();
+        for piece in &mut editor.pieces {
+            if piece.shape != terrain_idx || piece.elevation < -0.05 {
+                continue;
+            }
+            let d = piece.pos.distance(pos);
+            if d <= 3.6 {
+                piece.trigger_size.y -= 1.45;
+                changed = true;
+                if piece.trigger_size.y < crate::glade::TERRAIN_MIN_HEIGHT + 0.08 {
+                    to_remove.push(piece.id);
+                }
+            } else if d <= 6.2 {
+                piece.trigger_size.y =
+                    (piece.trigger_size.y - 0.65).max(crate::glade::TERRAIN_MIN_HEIGHT);
+                changed = true;
+            }
+        }
+        if !to_remove.is_empty() {
+            editor.pieces.retain(|p| !to_remove.contains(&p.id));
+        }
+
+        // If carving into the built-in hillside or perimeter hills, spawn or
+        // deepen a negative-elevation carve node at `pos`.
+        if crate::glade::base_meadow_height_at(pos) > 0.15 {
+            if let Some(carve) = editor
+                .pieces
+                .iter_mut()
+                .find(|p| p.shape == terrain_idx && p.elevation < -0.05 && p.pos.distance(pos) <= 3.0)
+            {
+                carve.trigger_size.y =
+                    (carve.trigger_size.y + 1.2).min(crate::glade::TERRAIN_MAX_HEIGHT);
+                changed = true;
+            } else {
+                let id = editor.next_id;
+                editor.next_id += 1;
+                editor.pieces.push(Piece {
+                    id,
+                    shape: terrain_idx,
+                    pos,
+                    rot: 0.0,
+                    pitch: 0.0,
+                    roll: 0.0,
+                    elevation: -1.0,
+                    dynamic: false,
+                    trigger: crate::model::Trigger::harmless(),
+                    trigger_size: Vec3::new(9.5, 2.6, 9.5),
+                    trigger_shape_override: crate::model::TriggerShape::Box,
+                    trigger_alpha: crate::glade::GLADE_DEFAULT_ROOF_PITCH,
+                    trigger_color: crate::glade::DEFAULT_TERRAIN_COLOR,
+                    trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+                    interact: crate::model::InteractAction::None,
+                });
+                changed = true;
+            }
+        }
+    } else {
+        // Remove any negative carve node under the raising brush
+        editor.pieces.retain(|p| {
+            !(p.shape == terrain_idx && p.elevation < -0.05 && p.pos.distance(pos) <= 3.5)
+        });
+
+        let target_h = editor.terrain_stroke_target_h;
+        let stroke_rot = prev_pos
+            .filter(|p| p.distance(pos) > 0.25)
+            .map(|p| {
+                let d = pos - p;
+                d.x.atan2(d.y)
+            })
+            .unwrap_or(editor.ghost_rot);
+
+        if let Some(existing) = editor
+            .pieces
+            .iter_mut()
+            .filter(|p| p.shape == terrain_idx && p.elevation >= -0.05)
+            .min_by(|a, b| {
+                a.pos
+                    .distance(pos)
+                    .partial_cmp(&b.pos.distance(pos))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .filter(|p| p.pos.distance(pos) <= 2.8)
+        {
+            let new_h = existing.trigger_size.y.max(target_h);
+            let new_w = (existing.trigger_size.x + 1.2).min(16.0);
+            let new_l = (existing.trigger_size.z + 1.2).min(16.0);
+            existing.trigger_size = Vec3::new(new_w, new_h, new_l);
+            let id = existing.id;
+            editor.selection.set(id);
+            changed = true;
+        } else {
+            let id = editor.next_id;
+            editor.next_id += 1;
+            editor.pieces.push(Piece {
+                id,
+                shape: terrain_idx,
+                pos,
+                rot: stroke_rot,
+                pitch: 0.0,
+                roll: 0.0,
+                elevation: 0.0,
+                dynamic: false,
+                trigger: crate::model::Trigger::harmless(),
+                trigger_size: Vec3::new(default_ext.x, target_h, default_ext.z),
+                trigger_shape_override: crate::model::TriggerShape::Box,
+                trigger_alpha: crate::glade::GLADE_DEFAULT_ROOF_PITCH,
+                trigger_color: crate::glade::DEFAULT_TERRAIN_COLOR,
+                trigger_visible: crate::model::TRIGGER_DEFAULT_VISIBLE,
+                interact: crate::model::InteractAction::None,
+            });
+            editor.selection.set(id);
+            changed = true;
+        }
+    }
+
+    if changed {
+        // Lift or lower non-terrain pieces within the brush's influence radius
+        // so buildings, towers, walls, and trees ride smoothly on the terrain.
+        let snapshot = editor.pieces.clone();
+        for piece in &mut editor.pieces {
+            if piece.shape == terrain_idx {
+                continue;
+            }
+            if piece.pos.distance(pos) <= 9.5 {
+                let ground_h = crate::glade::world_terrain_height_at(piece.pos, &snapshot);
+                if (piece.elevation - ground_h).abs() <= 4.5 {
+                    piece.elevation = ground_h;
+                }
+            }
+        }
+        editor.terrain_stroke_dirty = true;
+        editor.hard_dirty = true;
+    }
+
+    changed
+}
+
+pub(super) fn finish_terrain_stroke(editor: &mut Editor) {
+    if !editor.terrain_stroke_dirty {
+        editor.undo.pop();
+    }
+    editor.terrain_stroke = false;
+    editor.terrain_stroke_dirty = false;
+    editor.terrain_stroke_last_pos = None;
 }

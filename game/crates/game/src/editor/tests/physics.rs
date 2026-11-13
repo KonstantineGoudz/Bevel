@@ -2990,3 +2990,535 @@ fn assert_pieces_clear(app: &App, a_id: u32, b_id: u32, context: &str) {
         );
     }
 }
+
+#[test]
+fn character_can_walk_into_glade_room_through_door() {
+    let mut app = physics_app();
+    let room_shape = &shapes()[model::shape_index("glade_room").unwrap()];
+    let door_shape = &shapes()[model::shape_index("glade_door").unwrap()];
+
+    let room = Piece {
+        id: 1,
+        shape: model::shape_index("glade_room").unwrap(),
+        pos: Vec2::ZERO,
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: model::Trigger::harmless(),
+        trigger_size: Vec3::new(3.0, 2.5, 3.0),
+        trigger_shape_override: model::TriggerShape::Box,
+        trigger_alpha: 0.5,
+        trigger_color: 0,
+        trigger_visible: true,
+        interact: model::InteractAction::None,
+    };
+
+    let (snapped_pos, snapped_rot) = crate::glade::snap_door_to_glade_wall(
+        &Piece {
+            id: 2,
+            shape: model::shape_index("glade_door").unwrap(),
+            pos: Vec2::new(0.0, 1.4),
+            ..room.clone()
+        },
+        &[room.clone()],
+    )
+    .expect("door snaps to room wall");
+
+    let door = Piece {
+        id: 2,
+        shape: model::shape_index("glade_door").unwrap(),
+        pos: snapped_pos,
+        rot: snapped_rot,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: model::Trigger::harmless(),
+        trigger_size: crate::glade::default_size(door_shape),
+        trigger_shape_override: model::TriggerShape::Box,
+        trigger_alpha: 0.5,
+        trigger_color: 0,
+        trigger_visible: true,
+        interact: model::InteractAction::None,
+    };
+
+    let all_pieces = vec![room.clone(), door.clone()];
+
+    // Spawn room collider
+    let room_collider =
+        colliders::piece_collider_for_glade(&room, room_shape, &all_pieces, &[], None)
+            .expect("room collider");
+    app.world_mut().spawn((
+        RigidBody::Fixed,
+        room_collider,
+        Transform::from_xyz(room.pos.x, room.elevation, room.pos.y),
+    ));
+
+    // Spawn door collider
+    let door_collider =
+        colliders::piece_collider_for_glade(&door, door_shape, &all_pieces, &[], None)
+            .expect("door collider");
+    app.world_mut().spawn((
+        RigidBody::Fixed,
+        door_collider,
+        Transform {
+            translation: Vec3::new(door.pos.x, door.elevation, door.pos.y),
+            rotation: model::piece_quat(&door),
+            ..default()
+        },
+    ));
+
+    app.update();
+    app.update();
+
+    // Place character outside the doorway at (0.0, 2.5) facing -Z (towards the house interior)
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    app.world_mut().resource_mut::<Orbit>().yaw = 0.0;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: Vec2::new(0.0, 2.5),
+            feet: 0.0,
+            yaw: 0.0,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            sliding: false,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyW);
+
+    for _ in 0..120 {
+        tick_character(&mut app);
+    }
+
+    let character = app.world().resource::<Editor>().character.unwrap();
+    // Verify the character walked through the doorway (pos.y = 1.5) and is now inside the room!
+    assert!(
+        character.pos.y < 0.5,
+        "character should have walked through the door into the house interior, got pos={:?}",
+        character.pos
+    );
+    assert!(
+        character.grounded,
+        "character must remain grounded inside the house"
+    );
+}
+
+#[test]
+fn character_cannot_walk_through_glade_room_solid_wall() {
+    let mut app = physics_app();
+    let room_shape = &shapes()[model::shape_index("glade_room").unwrap()];
+
+    let room = Piece {
+        id: 1,
+        shape: model::shape_index("glade_room").unwrap(),
+        pos: Vec2::ZERO,
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: model::Trigger::harmless(),
+        trigger_size: Vec3::new(3.0, 2.5, 3.0),
+        trigger_shape_override: model::TriggerShape::Box,
+        trigger_alpha: 0.5,
+        trigger_color: 0,
+        trigger_visible: true,
+        interact: model::InteractAction::None,
+    };
+
+    let all_pieces = vec![room.clone()];
+    let room_collider =
+        colliders::piece_collider_for_glade(&room, room_shape, &all_pieces, &[], None)
+            .expect("room collider");
+    app.world_mut().spawn((
+        RigidBody::Fixed,
+        room_collider,
+        Transform::from_xyz(room.pos.x, room.elevation, room.pos.y),
+    ));
+
+    app.update();
+    app.update();
+
+    // Place character at (0.0, 2.5) facing -Z (towards the solid South wall at y = 1.5)
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    app.world_mut().resource_mut::<Orbit>().yaw = 0.0;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: Vec2::new(0.0, 2.5),
+            feet: 0.0,
+            yaw: 0.0,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            sliding: false,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyW);
+
+    for _ in 0..120 {
+        tick_character(&mut app);
+    }
+
+    let character = app.world().resource::<Editor>().character.unwrap();
+    // Solid wall sits at y = 1.5; character capsule radius = 0.32, so character stops outside around y = 1.82
+    assert!(
+        character.pos.y > 1.7,
+        "character must be blocked by solid room wall without door, got pos={:?}",
+        character.pos
+    );
+}
+
+#[test]
+fn camera_occlusion_clips_camera_inside_building_when_player_enters() {
+    let mut app = physics_app();
+    let room_shape = &shapes()[model::shape_index("glade_room").unwrap()];
+    let door_shape = &shapes()[model::shape_index("glade_door").unwrap()];
+
+    let room = Piece {
+        id: 1,
+        shape: model::shape_index("glade_room").unwrap(),
+        pos: Vec2::ZERO,
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: model::Trigger::harmless(),
+        trigger_size: Vec3::new(3.0, 2.5, 3.0),
+        trigger_shape_override: model::TriggerShape::Box,
+        trigger_alpha: 0.5,
+        trigger_color: 0,
+        trigger_visible: true,
+        interact: model::InteractAction::None,
+    };
+    let (snapped_pos, snapped_rot) = crate::glade::snap_door_to_glade_wall(
+        &Piece {
+            id: 2,
+            shape: model::shape_index("glade_door").unwrap(),
+            pos: Vec2::new(0.0, 1.4),
+            ..room.clone()
+        },
+        &[room.clone()],
+    )
+    .unwrap();
+    let door = Piece {
+        id: 2,
+        shape: model::shape_index("glade_door").unwrap(),
+        pos: snapped_pos,
+        rot: snapped_rot,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: model::Trigger::harmless(),
+        trigger_size: crate::glade::default_size(door_shape),
+        trigger_shape_override: model::TriggerShape::Box,
+        trigger_alpha: 0.5,
+        trigger_color: 0,
+        trigger_visible: true,
+        interact: model::InteractAction::None,
+    };
+    let all_pieces = vec![room.clone(), door.clone()];
+
+    let room_collider =
+        colliders::piece_collider_for_glade(&room, room_shape, &all_pieces, &[], None).unwrap();
+    app.world_mut().spawn((
+        RigidBody::Fixed,
+        room_collider,
+        Transform::from_xyz(0.0, 0.0, 0.0),
+    ));
+
+    // Place character inside the house at (0.0, 0.0)
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: Vec2::ZERO,
+            feet: 0.0,
+            yaw: 0.0,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            sliding: false,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    app.world_mut().resource_mut::<Orbit>().distance = 8.0;
+    app.world_mut().resource_mut::<Orbit>().target = Vec3::ZERO;
+    app.world_mut().resource_mut::<Orbit>().yaw = 0.0;
+    app.world_mut().resource_mut::<Orbit>().pitch = 0.4;
+
+    // Spawn camera pointing at origin from outside (distance ~8m)
+    let cam_entity = app
+        .world_mut()
+        .spawn((Camera3d::default(), Transform::from_xyz(0.0, 5.0, 8.0)))
+        .id();
+
+    app.update();
+    app.update();
+
+    // Run camera_occlusion system
+    app.world_mut()
+        .run_system_once(super::super::camera::camera_occlusion)
+        .unwrap();
+
+    let cam_tf = app.world().get::<Transform>(cam_entity).unwrap();
+    let head = Vec3::new(0.0, EYE_HEIGHT, 0.0);
+    let dist_to_head = cam_tf.translation.distance(head);
+    assert!(
+        dist_to_head < 2.0,
+        "camera must be pulled inside the room to prevent occlusion: distance={dist_to_head}"
+    );
+}
+
+#[test]
+fn character_exits_glade_room_through_door() {
+    let mut app = physics_app();
+    let room_shape = &shapes()[model::shape_index("glade_room").unwrap()];
+    let door_shape = &shapes()[model::shape_index("glade_door").unwrap()];
+
+    let room = Piece {
+        id: 1,
+        shape: model::shape_index("glade_room").unwrap(),
+        pos: Vec2::ZERO,
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: model::Trigger::harmless(),
+        trigger_size: Vec3::new(3.2, 2.6, 2.4),
+        trigger_shape_override: model::TriggerShape::Box,
+        trigger_alpha: 0.5,
+        trigger_color: 0,
+        trigger_visible: true,
+        interact: model::InteractAction::None,
+    };
+
+    let (snapped_pos, snapped_rot) = crate::glade::snap_door_to_glade_wall(
+        &Piece {
+            id: 2,
+            shape: model::shape_index("glade_door").unwrap(),
+            pos: Vec2::new(0.0, 1.2),
+            ..room.clone()
+        },
+        &[room.clone()],
+    )
+    .expect("door snaps to room wall");
+
+    let door = Piece {
+        id: 2,
+        shape: model::shape_index("glade_door").unwrap(),
+        pos: snapped_pos,
+        rot: snapped_rot,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: model::Trigger::harmless(),
+        trigger_size: crate::glade::default_size(door_shape),
+        trigger_shape_override: model::TriggerShape::Box,
+        trigger_alpha: 0.5,
+        trigger_color: 0,
+        trigger_visible: true,
+        interact: model::InteractAction::None,
+    };
+
+    let all_pieces = vec![room.clone(), door.clone()];
+    let room_collider =
+        colliders::piece_collider_for_glade(&room, room_shape, &all_pieces, &[], None).unwrap();
+    app.world_mut().spawn((
+        RigidBody::Fixed,
+        room_collider,
+        Transform::from_xyz(room.pos.x, room.elevation, room.pos.y),
+    ));
+    let door_collider =
+        colliders::piece_collider_for_glade(&door, door_shape, &all_pieces, &[], None).unwrap();
+    app.world_mut().spawn((
+        RigidBody::Fixed,
+        door_collider,
+        Transform {
+            translation: Vec3::new(door.pos.x, door.elevation, door.pos.y),
+            rotation: model::piece_quat(&door),
+            ..default()
+        },
+    ));
+
+    app.update();
+    app.update();
+
+    // Place character INSIDE the house at (0.0, 0.0) and walk +Z (KeyS when yaw=0) out the door at z=1.2
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    app.world_mut().resource_mut::<Orbit>().yaw = 0.0;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: Vec2::new(0.0, 0.0),
+            feet: 0.0,
+            yaw: 0.0,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            sliding: false,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyS);
+
+    for _ in 0..120 {
+        tick_character(&mut app);
+    }
+
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        character.pos.y > 2.0,
+        "character should have exited the house through the door, got pos={:?}",
+        character.pos
+    );
+}
+
+#[test]
+fn scaling_glade_room_pins_door_to_wall_and_character_can_exit() {
+    let mut app = physics_app();
+    let room_shape = &shapes()[model::shape_index("glade_room").unwrap()];
+    let door_shape = &shapes()[model::shape_index("glade_door").unwrap()];
+
+    let old_room = Piece {
+        id: 1,
+        shape: model::shape_index("glade_room").unwrap(),
+        pos: Vec2::ZERO,
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: model::Trigger::harmless(),
+        trigger_size: Vec3::new(3.2, 2.6, 2.4),
+        trigger_shape_override: model::TriggerShape::Box,
+        trigger_alpha: 0.5,
+        trigger_color: 0,
+        trigger_visible: true,
+        interact: model::InteractAction::None,
+    };
+
+    let (snapped_pos, snapped_rot) = crate::glade::snap_door_to_glade_wall(
+        &Piece {
+            id: 2,
+            shape: model::shape_index("glade_door").unwrap(),
+            pos: Vec2::new(0.0, 1.2),
+            ..old_room.clone()
+        },
+        &[old_room.clone()],
+    )
+    .expect("door snaps to room wall");
+
+    let door = Piece {
+        id: 2,
+        shape: model::shape_index("glade_door").unwrap(),
+        pos: snapped_pos,
+        rot: snapped_rot,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: model::Trigger::harmless(),
+        trigger_size: crate::glade::default_size(door_shape),
+        trigger_shape_override: model::TriggerShape::Box,
+        trigger_alpha: 0.5,
+        trigger_color: 0,
+        trigger_visible: true,
+        interact: model::InteractAction::None,
+    };
+
+    // Scale the house larger: Z goes from 2.4 (wall at 1.2) to 5.0 (wall at 2.5)
+    let mut scaled_room = old_room.clone();
+    scaled_room.trigger_size = Vec3::new(5.0, 2.6, 5.0);
+
+    let mut pieces = vec![scaled_room.clone(), door];
+    crate::glade::pin_doors_on_glade_resize(&old_room, &scaled_room, &mut pieces);
+    let pinned_door = pieces[1].clone();
+    assert!(
+        (pinned_door.pos.y - 2.5).abs() < 1e-4,
+        "door must stay pinned to the scaled +Z wall at z=2.5, got {:?}",
+        pinned_door.pos
+    );
+
+    let room_collider =
+        colliders::piece_collider_for_glade(&scaled_room, room_shape, &pieces, &[], None).unwrap();
+    app.world_mut().spawn((
+        RigidBody::Fixed,
+        room_collider,
+        Transform::from_xyz(scaled_room.pos.x, scaled_room.elevation, scaled_room.pos.y),
+    ));
+    let door_collider =
+        colliders::piece_collider_for_glade(&pinned_door, door_shape, &pieces, &[], None).unwrap();
+    app.world_mut().spawn((
+        RigidBody::Fixed,
+        door_collider,
+        Transform {
+            translation: Vec3::new(pinned_door.pos.x, pinned_door.elevation, pinned_door.pos.y),
+            rotation: model::piece_quat(&pinned_door),
+            ..default()
+        },
+    ));
+
+    app.update();
+    app.update();
+
+    app.world_mut().resource_mut::<Orbit>().mode = ViewMode::Third;
+    app.world_mut().resource_mut::<Orbit>().yaw = 0.0;
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.character = Some(Character {
+            pos: Vec2::new(0.0, 1.5),
+            feet: 0.0,
+            yaw: 0.0,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            sliding: false,
+            health: crate::statuses::Health::default(),
+        });
+        editor.walk = None;
+    }
+
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::KeyS);
+
+    for _ in 0..120 {
+        tick_character(&mut app);
+    }
+
+    let character = app.world().resource::<Editor>().character.unwrap();
+    assert!(
+        character.pos.y > 3.2,
+        "character should exit the scaled house through the pinned door, got pos={:?}",
+        character.pos
+    );
+}

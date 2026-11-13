@@ -74,6 +74,10 @@ impl Mover {
         self.dir = dir;
         Some(track.at(distance).0)
     }
+
+    pub(super) fn controls(&self) -> Vec<crate::path::AnchorControls> {
+        platforms::platform_controls(&self.waypoints, self.mode == PlatformMode::Loop)
+    }
 }
 
 #[derive(Resource, Default)]
@@ -213,11 +217,18 @@ pub(super) fn apply_mover_drag(
     let Some(mover) = movers.map.get_mut(&id) else {
         return false;
     };
+    let plane_y = editor
+        .pieces
+        .iter()
+        .find(|p| p.id == id)
+        .map_or(0.0, |p| p.elevation);
     let Ok(ray) = camera.viewport_to_world(camera_transform, screen) else {
         return false;
     };
-    let Some(point) = ray.plane_intersection_point(Vec3::ZERO, InfinitePlane3d::new(Vec3::Y))
-    else {
+    let Some(point) = ray.plane_intersection_point(
+        Vec3::new(0.0, plane_y, 0.0),
+        InfinitePlane3d::new(Vec3::Y),
+    ) else {
         return false;
     };
     let pos = Vec2::new(point.x, point.z);
@@ -283,6 +294,55 @@ fn platform_pose(piece: &Piece) -> (Vec3, Quat) {
     )
 }
 
+/// Sample a `Mover`'s Bezier track or polyline waypoints into a world-space 2D spine.
+fn mover_spine(mover: &Mover, always_sample_track: bool) -> Option<Vec<Vec2>> {
+    if mover.waypoints.len() < 2 {
+        return None;
+    }
+    let has_bezier = always_sample_track
+        || mover
+            .waypoints
+            .iter()
+            .any(|w| w.incoming.is_some() || w.outgoing.is_some());
+    let closed = mover.mode == PlatformMode::Loop;
+    if has_bezier
+        && let Some(track) = &mover.track
+        && track.total() > 0.1
+    {
+        let total = track.total();
+        let steps = (total / 0.75).ceil().clamp(3.0, 64.0) as usize;
+        let pts: Vec<Vec2> = (0..=steps)
+            .map(|i| track.at(total * (i as f32 / steps as f32)).0)
+            .collect();
+        return Some(pts);
+    }
+    let mut pts: Vec<Vec2> = mover.waypoints.iter().map(|w| w.pos).collect();
+    if closed && pts.len() >= 3 {
+        pts.push(pts[0]);
+    }
+    Some(pts)
+}
+
+/// Return the world-space 2D polyline spine for a path-following `glade_wall`,
+/// if the wall has 2 or more waypoints in `movers`.
+pub(crate) fn glade_wall_spine(piece: &Piece, movers: &Movers) -> Option<Vec<Vec2>> {
+    let shape = shapes().get(piece.shape)?;
+    if shape.id != "glade_wall" {
+        return None;
+    }
+    mover_spine(movers.map.get(&piece.id)?, false)
+}
+
+/// Return the world-space 2D polyline spine for a `glade_path` piece,
+/// if it has 2 or more waypoints in `movers`.
+pub(crate) fn glade_path_spine(piece: &Piece, movers: &Movers) -> Option<Vec<Vec2>> {
+    let shape = shapes().get(piece.shape)?;
+    if shape.id != "glade_path" {
+        return None;
+    }
+    mover_spine(movers.map.get(&piece.id)?, true)
+}
+
 /// Physics body for an editor piece. Simulated props stay `Dynamic`.
 /// Pieces riding a motion path are `KinematicPositionBased`: the editor
 /// still authors every teleport, but Rapier derives a velocity from each
@@ -292,6 +352,12 @@ fn platform_pose(piece: &Piece) -> (Vec3, Quat) {
 pub(super) fn piece_body(piece: &Piece, movers: &Movers) -> RigidBody {
     if piece.dynamic {
         RigidBody::Dynamic
+    } else if shapes()
+        .get(piece.shape)
+        .is_some_and(|s| matches!(s.id, "glade_wall" | "glade_path"))
+    {
+        // Static Glade walls and terrain paths use their Mover path as a geometry spine rather than moving.
+        RigidBody::Fixed
     } else if movers.map.get(&piece.id).is_some_and(|m| m.track.is_some()) {
         RigidBody::KinematicPositionBased
     } else {
@@ -461,6 +527,13 @@ pub(super) fn move_movers(
 
     // Advance pieces first, remembering deltas for ridden ones.
     for piece in &mut editor.pieces {
+        // Glade walls and terrain paths use their Mover waypoints as a geometry spine rather than moving.
+        if shapes()
+            .get(piece.shape)
+            .is_some_and(|s| matches!(s.id, "glade_wall" | "glade_path"))
+        {
+            continue;
+        }
         let Some(mover) = movers.map.get_mut(&piece.id) else {
             continue;
         };

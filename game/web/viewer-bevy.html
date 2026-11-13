@@ -6,7 +6,7 @@
     <title>Party Dungeon — model viewer (Bevy)</title>
     <meta
       name="description"
-      content="Import and view .glb and .gltf files in the Rust/Bevy model viewer."
+      content="Import .glb and .gltf files, or view the models packaged with the game, in the Rust/Bevy model viewer."
     />
     <style>
       html, body {
@@ -32,22 +32,11 @@
         font: 13px/1.5 ui-monospace, Menlo, monospace;
         white-space: pre-wrap;
       }
-      #hint {
-        position: fixed;
-        left: 12px;
-        bottom: 10px;
-        color: #5c6b7e;
-        font: 12px/1.5 ui-monospace, Menlo, monospace;
-        user-select: none;
-        pointer-events: none;
-      }
-      #hint a { color: inherit; pointer-events: auto; }
     </style>
   </head>
   <body>
     <canvas id="bevy"></canvas>
     <pre id="error"></pre>
-    <div id="hint">Bevy glTF viewer (Rust) &middot; <a href="./">back to maps</a> &middot; Import button is inside the 3D view</div>
     <a id="back" href="./" hidden>Back to maps</a>
     <script type="module">
       import init from "./pkg/party_dungeon.js";
@@ -76,10 +65,32 @@
         console.warn("Browser storage is unavailable; the viewer does not need it.", error);
       }
 
-      init().catch((err) => {
-        showError(`Failed to start the Bevy viewer build:\n\n${err}`);
-        console.error(err);
-      });
+      // The Rust panel lists the models shipped in assets/. The build script
+      // writes assets/models.json; fetch it before Bevy boots so the list is
+      // ready when the panel is built (a missing manifest just means none).
+      const packagedModelList = async () => {
+        try {
+          const response = await fetch("./assets/models.json", { cache: "no-store" });
+          if (!response.ok) return [];
+          const data = await response.json();
+          return Array.isArray(data?.models)
+            ? data.models.filter((name) => typeof name === "string")
+            : [];
+        } catch (error) {
+          console.warn("Could not read the packaged model list.", error);
+          return [];
+        }
+      };
+
+      packagedModelList()
+        .then((models) => {
+          window.__packagedModels = models;
+          return init();
+        })
+        .catch((err) => {
+          showError(`Failed to start the Bevy viewer build:\n\n${err}`);
+          console.error(err);
+        });
     </script>
   </body>
 </html>

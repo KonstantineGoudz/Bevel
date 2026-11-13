@@ -56,6 +56,99 @@ fn full_editor_schedule_runs_without_panicking() {
 }
 
 #[test]
+fn boot_app_with_glade_pieces_runs_without_panicking() {
+    let mut app = boot_app();
+    let json = serde_json::json!({
+        "version": 1,
+        "pieces": [
+            {
+                "id": 1,
+                "shape": "glade_tower",
+                "x": 0.0,
+                "z": 0.0,
+                "elevation": 0.0,
+                "rotDeg": 0.0,
+                "pitchDeg": 0.0,
+                "rollDeg": 0.0,
+                "dynamic": false,
+                "triggerWidth": 3.0,
+                "triggerLength": 3.0,
+                "triggerHeight": 4.0,
+                "triggerAlpha": 0.8
+            },
+            {
+                "id": 2,
+                "shape": "glade_room",
+                "x": 4.0,
+                "z": 0.0,
+                "elevation": 0.0,
+                "rotDeg": 0.0,
+                "pitchDeg": 0.0,
+                "rollDeg": 0.0,
+                "dynamic": false,
+                "triggerWidth": 4.0,
+                "triggerLength": 3.0,
+                "triggerHeight": 3.0,
+                "triggerAlpha": 0.8
+            },
+            {
+                "id": 3,
+                "shape": "glade_wall",
+                "x": 0.0,
+                "z": 4.0,
+                "elevation": 0.0,
+                "rotDeg": 0.0,
+                "pitchDeg": 0.0,
+                "rollDeg": 0.0,
+                "dynamic": false,
+                "triggerWidth": 1.0,
+                "triggerLength": 3.0,
+                "triggerHeight": 2.0,
+                "triggerAlpha": 0.8
+            },
+            {
+                "id": 4,
+                "shape": "glade_door",
+                "x": 0.0,
+                "z": 4.0,
+                "elevation": 0.0,
+                "rotDeg": 0.0,
+                "pitchDeg": 0.0,
+                "rollDeg": 0.0,
+                "dynamic": false
+            }
+        ],
+        "character": {
+            "x": 0.0,
+            "z": 0.0,
+            "feet": 0.0,
+            "yawDeg": 0.0
+        },
+        "camera": {
+            "targetX": 0.0,
+            "targetY": 1.0,
+            "targetZ": 0.0,
+            "yaw": 0.0,
+            "pitch": 0.3,
+            "distance": 6.0,
+            "mode": "third"
+        }
+    });
+    let snapshot: crate::session::Snapshot = serde_json::from_value(json).expect("parses");
+    let loaded = snapshot.validate().expect("validates");
+    let world = app.world_mut();
+    world.resource_scope(|world, mut editor: Mut<Editor>| {
+        world.resource_scope(|_world, mut orbit: Mut<Orbit>| {
+            let mut movers = Movers::default();
+            editor.apply_loaded(&mut orbit, &mut movers, loaded);
+        });
+    });
+    app.update();
+    app.update();
+    app.update();
+}
+
+#[test]
 fn setup_spawns_the_palette_and_toolbars() {
     let mut app = boot_app();
     app.update();
@@ -285,6 +378,17 @@ fn first_person_view_cone_is_minimap_only() {
 }
 
 #[test]
+fn xray_gizmos_render_in_front_of_geometry() {
+    let mut app = boot_app();
+    app.update();
+    let (config, _) = app
+        .world()
+        .resource::<GizmoConfigStore>()
+        .config::<XrayGizmos>();
+    assert_eq!(config.depth_bias, -1.0);
+}
+
+#[test]
 fn play_mode_with_grass_runs_without_panicking() {
     let mut app = boot_app();
     app.update();
@@ -385,5 +489,145 @@ fn full_schedule_advances_a_bridge_style_walk() {
     assert!(
         editor.walk.is_some(),
         "a 9 m route is still in progress after a few centimetres"
+    );
+}
+
+#[test]
+fn building_mode_palette_groups_follow_mode_and_selection() {
+    let mut app = boot_app();
+    app.update();
+
+    let group_display = |world: &mut World, target: PaletteGroup| -> Display {
+        let mut q = world.query::<(&PaletteGroup, &Node)>();
+        q.iter(world)
+            .find(|(g, _)| **g == target)
+            .map(|(_, n)| n.display)
+            .expect("palette group")
+    };
+
+    // 1. Default Build mode shows BuildMode and hides Building groups.
+    {
+        let world = app.world_mut();
+        assert_eq!(group_display(world, PaletteGroup::BuildMode), Display::Flex);
+        assert_eq!(group_display(world, PaletteGroup::BuildingBase), Display::None);
+        assert_eq!(group_display(world, PaletteGroup::DoorsAndWindows), Display::None);
+        assert_eq!(group_display(world, PaletteGroup::BuildingFixtures), Display::None);
+    }
+
+    // 2. Switching to Building mode with no selection shows BuildingBase only.
+    app.world_mut().resource_mut::<Editor>().mode = Mode::Building;
+    app.update();
+    {
+        let world = app.world_mut();
+        assert_eq!(group_display(world, PaletteGroup::BuildMode), Display::None);
+        assert_eq!(group_display(world, PaletteGroup::BuildingBase), Display::Flex);
+        assert_eq!(group_display(world, PaletteGroup::DoorsAndWindows), Display::None);
+        assert_eq!(group_display(world, PaletteGroup::BuildingFixtures), Display::None);
+    }
+
+    // 3. Selecting a Building Room reveals Doors & Windows and Fixtures.
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        let mut room = super::test_piece(1);
+        room.shape = model::shape_index("glade_room").unwrap();
+        editor.pieces.push(room);
+        editor.selection.set(1);
+    }
+    app.update();
+    {
+        let world = app.world_mut();
+        assert_eq!(group_display(world, PaletteGroup::DoorsAndWindows), Display::Flex);
+        assert_eq!(group_display(world, PaletteGroup::BuildingFixtures), Display::Flex);
+    }
+
+    // 4. Selecting a Floor reveals Fixtures, but keeps Doors & Windows hidden.
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        let mut floor = super::test_piece(2);
+        floor.shape = model::shape_index("floor").unwrap();
+        editor.pieces.push(floor);
+        editor.selection.set(2);
+    }
+    app.update();
+    {
+        let world = app.world_mut();
+        assert_eq!(group_display(world, PaletteGroup::DoorsAndWindows), Display::None);
+        assert_eq!(group_display(world, PaletteGroup::BuildingFixtures), Display::Flex);
+    }
+}
+
+#[test]
+fn building_door_and_window_require_clicking_a_building_wall() {
+    use bevy::ecs::system::RunSystemOnce;
+
+    let mut app = boot_app();
+    app.update();
+
+    let door_idx = model::shape_index("glade_door").unwrap();
+    let room_idx = model::shape_index("glade_room").unwrap();
+
+    // Place a room at the origin (extents ~3.2 x 2.4).
+    {
+        let mut editor = app.world_mut().resource_mut::<Editor>();
+        editor.mode = Mode::Building;
+        let mut room = super::test_piece(1);
+        room.shape = room_idx;
+        room.pos = Vec2::ZERO;
+        editor.pieces.push(room);
+        editor.tool = Some(door_idx);
+    }
+
+    // Clicking far away on empty ground must NOT place the door.
+    {
+        let world = app.world_mut();
+        {
+            let mut cursor = world.resource_mut::<Cursor>();
+            cursor.world = Some(Vec2::new(20.0, 20.0));
+            cursor.last_world = cursor.world;
+            cursor.screen = Some(Vec2::new(640.0, 360.0));
+            cursor.ray = None;
+        }
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        world.run_system_once(interact).unwrap();
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .clear_just_pressed(MouseButton::Left);
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .release(MouseButton::Left);
+    }
+
+    assert_eq!(
+        app.world().resource::<Editor>().pieces.len(),
+        1,
+        "door must not be placed on empty ground"
+    );
+    assert!(
+        app.world().resource::<Editor>().ghost.is_none(),
+        "ghost must be hidden when not hovering a building wall"
+    );
+
+    // Clicking on the room's wall snaps and places the door.
+    {
+        let world = app.world_mut();
+        {
+            let mut cursor = world.resource_mut::<Cursor>();
+            cursor.world = Some(Vec2::new(0.0, 1.2));
+            cursor.last_world = cursor.world;
+            cursor.screen = Some(Vec2::new(640.0, 360.0));
+            cursor.ray = None;
+        }
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        world.run_system_once(interact).unwrap();
+    }
+
+    assert_eq!(
+        app.world().resource::<Editor>().pieces.len(),
+        2,
+        "door should be placed when clicking on a building wall"
     );
 }

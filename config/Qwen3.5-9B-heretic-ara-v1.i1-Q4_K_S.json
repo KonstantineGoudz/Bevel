@@ -1,0 +1,9 @@
+{
+  "jinja": true,
+  "port": 8000,
+  "host": "0.0.0.0",
+  "verbose": false,
+  "contextLen": "50000",
+  "numGpuLayers": 90,
+  "mmproj": ""
+}

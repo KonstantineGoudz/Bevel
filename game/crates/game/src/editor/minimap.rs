@@ -18,7 +18,7 @@ pub(super) const MINIMAP_SIZE: f32 = 220.0;
 pub(super) const MINIMAP_RIGHT: f32 = 8.0;
 pub(super) const MINIMAP_TOP: f32 = 50.0;
 pub(super) const MINIMAP_MIN_HALF: f32 = 4.0;
-pub(super) const MINIMAP_MAX_HALF: f32 = 40.0;
+pub(super) const MINIMAP_MAX_HALF: f32 = 120.0;
 /// Camera altitude in metres; the projection is orthographic so this only
 /// needs to clear the tallest piece.
 const MINIMAP_HEIGHT: f32 = 60.0;

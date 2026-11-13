@@ -7,11 +7,15 @@
 //!   picked through the **Import .glb / .gltf** button (browser file picker on
 //!   wasm),
 //! * orbit / zoom the camera around the model,
-//! * browse every item in the file in the **Scene tree** on the right,
+//! * open a **Packaged models** panel on the left listing the `.glb` / `.gltf`
+//!   files shipped in `assets/`, so a model bundled with the game can be viewed
+//!   without picking it off disk (the web build writes `assets/models.json`,
+//!   which `viewer-bevy.html` hands to the panel),
 //! * report file name, load state, and scene stats in Bevy UI.
 //!
 //! Imports go through a `viewer://` in-memory asset source, so picked bytes
-//! never touch disk and work the same on native and wasm.
+//! never touch disk and work the same on native and wasm. Packaged files load
+//! through Bevy's normal asset server, relative to the asset root.
 //!
 //! JPEG textures only decode when Bevy's `jpeg` feature is enabled. glTF only
 //! guarantees JPEG and PNG textures, so the crate turns that feature on in
@@ -25,12 +29,13 @@ use std::sync::{Arc, Mutex};
 use bevy::asset::LoadState;
 use bevy::asset::io::memory::Dir;
 use bevy::mesh::VertexAttributeValues;
+use bevy::mesh::skinning::SkinnedMesh;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, Button};
 
 const VIEWER_TITLE: &str = "Model viewer";
 const SUPPORTED_HINT: &str =
-    "Import .glb / .gltf - drag & drop a file onto this window, or use the Import button";
+    "Import .glb / .gltf - drag & drop, use Import, or pick a packaged model on the left";
 const PANEL_BG: Color = Color::srgb_u8(0x10, 0x16, 0x1e);
 const BUTTON_BG: Color = Color::srgb_u8(0x14, 0x1c, 0x26);
 const BUTTON_BORDER: Color = Color::srgb_u8(0x24, 0x30, 0x3f);
@@ -40,6 +45,7 @@ const ROW_BG: Color = Color::srgb_u8(0x16, 0x1e, 0x29);
 const ROW_BG_SELECTED: Color = Color::srgb_u8(0x3a, 0x2c, 0x12);
 const ROW_BORDER_SELECTED: Color = Color::srgb_u8(0xf0, 0xa6, 0x3c);
 const TREE_WIDTH: f32 = 300.0;
+const PACKAGED_WIDTH: f32 = 240.0;
 /// Top offset clearing the title + buttons + status bar on the left.
 const TREE_TOP: f32 = 150.0;
 /// Never build more rows than this; huge scenes get a "+ N more" cap note.
@@ -67,6 +73,11 @@ pub enum ViewerUpload {
 /// drop on native) waiting to be inserted into [`ViewerDir`] and loaded.
 #[derive(Resource, Clone, Default)]
 pub struct PendingUploads(pub Arc<Mutex<Vec<ViewerUpload>>>);
+
+/// `.glb` / `.gltf` files shipped in the asset root (`assets/` on disk and in
+/// the web build), in display order. Used by the Packaged models panel.
+#[derive(Resource, Default)]
+struct PackagedModels(Vec<String>);
 
 #[derive(Resource)]
 struct Viewer {
@@ -124,10 +135,24 @@ enum ViewerAction {
     ToggleSpin,
     ResetView,
     Back,
+    LoadPackaged(usize),
 }
 
 #[derive(Component)]
 struct ViewerStatus;
+
+/// The teal cube shown before a model loads; removed once one is visible.
+#[derive(Component)]
+struct ViewerPlaceholder;
+
+#[derive(Component)]
+struct PackagedPanel;
+
+#[derive(Component)]
+struct PackagedList;
+
+#[derive(Component)]
+struct PackagedCount;
 
 /// UI state for the Scene tree. The hierarchy itself is read live from the
 /// spawned entities, so this only tracks what is expanded/selected plus a
@@ -187,9 +212,13 @@ impl Plugin for ViewerPlugin {
         app.init_resource::<Viewer>()
             .init_resource::<ViewerOrbit>()
             .init_resource::<PendingUploads>()
+            .init_resource::<PackagedModels>()
             .init_resource::<ViewerTree>()
             .insert_resource(crate::controls::Controls::load())
-            .add_systems(Startup, (setup_viewer, setup_wasm_picker))
+            .add_systems(
+                Startup,
+                (setup_viewer, setup_packaged_panel, setup_wasm_picker),
+            )
             .add_systems(
                 Update,
                 (
@@ -254,6 +283,7 @@ fn setup_viewer(
         Transform::from_xyz(0.0, -0.51, 0.0),
     ));
     commands.spawn((
+        ViewerPlaceholder,
         Mesh3d(meshes.add(Cuboid::new(0.6, 0.6, 0.6))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb_u8(0x3f, 0xd0, 0xb0),
@@ -423,6 +453,260 @@ fn spawn_tree_panel(commands: &mut Commands) {
         .add_children(&[header, toolbar, list, hint]);
 }
 
+// ---------------------------------------------------------------------------
+// Packaged models
+// ---------------------------------------------------------------------------
+
+/// Every `.glb` / `.gltf` file shipped in the asset root. On wasm the list
+/// comes from `assets/models.json` (written by `scripts/build-web.sh`) through
+/// a global that `viewer-bevy.html` sets before booting Bevy; on native the
+/// asset folder is read directly.
+fn packaged_models() -> Vec<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        wasm_packaged_models()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        native_packaged_models()
+    }
+}
+
+/// Normalize a manifest/file-system path to a safe asset path: forward
+/// slashes, relative to the asset root, and ending in `.glb` / `.gltf`.
+fn normalize_packaged_model(raw: &str) -> Option<String> {
+    let path = raw.trim().replace('\\', "/");
+    if path.starts_with('/') {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => continue,
+            ".." => return None,
+            other => parts.push(other),
+        }
+    }
+    let normalized = parts.join("/");
+    if normalized.is_empty() {
+        return None;
+    }
+    let lower = normalized.to_lowercase();
+    (lower.ends_with(".glb") || lower.ends_with(".gltf")).then_some(normalized)
+}
+
+/// Sort for display and drop exact duplicates. Case-insensitive so
+/// `Hero.glb` and `hero.glb` sit next to each other.
+fn finish_model_list(models: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut out: Vec<String> = models.into_iter().collect();
+    out.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    out.dedup();
+    out
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_packaged_models() -> Vec<String> {
+    let root = std::path::PathBuf::from(crate::asset_root());
+    let mut models = Vec::new();
+    collect_packaged_models(&root, &root, 0, &mut models);
+    finish_model_list(models)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn collect_packaged_models(root: &Path, dir: &Path, depth: usize, out: &mut Vec<String>) {
+    // Guard against a symlink loop in a hand-made asset folder.
+    if depth > 8 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            collect_packaged_models(root, &path, depth + 1, out);
+        } else if kind.is_file()
+            && let Ok(relative) = path.strip_prefix(root)
+            && let Some(name) = normalize_packaged_model(&relative.to_string_lossy())
+        {
+            out.push(name);
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn wasm_packaged_models() -> Vec<String> {
+    use wasm_bindgen::JsCast;
+
+    let Some(window) = web_sys::window() else {
+        return Vec::new();
+    };
+    let Ok(value) = js_sys::Reflect::get(
+        window.unchecked_ref::<wasm_bindgen::JsValue>(),
+        &wasm_bindgen::JsValue::from_str("__packagedModels"),
+    ) else {
+        return Vec::new();
+    };
+    let Ok(list) = value.dyn_into::<js_sys::Array>() else {
+        return Vec::new();
+    };
+    finish_model_list(
+        list.iter()
+            .filter_map(|item| item.as_string())
+            .filter_map(|name| normalize_packaged_model(&name)),
+    )
+}
+
+fn packaged_count_label(count: usize) -> String {
+    match count {
+        0 => "none".to_owned(),
+        1 => "1 model".to_owned(),
+        total => format!("{total} models"),
+    }
+}
+
+/// One clickable row in the Packaged models panel.
+fn packaged_button(commands: &mut Commands, index: usize, path: &str) -> Entity {
+    commands
+        .spawn((
+            Button,
+            ViewerButton(ViewerAction::LoadPackaged(index)),
+            Node {
+                width: percent(100),
+                padding: UiRect::axes(px(8), px(6)),
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(6)),
+                align_items: AlignItems::Center,
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            BackgroundColor(BUTTON_BG),
+            BorderColor::all(BUTTON_BORDER),
+            children![(
+                Text::new(path),
+                TextFont {
+                    font_size: FontSize::Px(11.0),
+                    ..default()
+                },
+                TextColor(BUTTON_TEXT),
+            )],
+        ))
+        .id()
+}
+
+/// Left-hand list of models that ship with the build. It mirrors the Scene
+/// panel on the right: a heading, a scrollable list, and a one-line hint.
+fn setup_packaged_panel(mut commands: Commands) {
+    let models = packaged_models();
+    let panel = commands
+        .spawn((
+            PackagedPanel,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(8),
+                top: px(TREE_TOP),
+                bottom: px(8),
+                width: px(PACKAGED_WIDTH),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(px(10)),
+                row_gap: px(6),
+                border: UiRect::all(px(1)),
+                ..default()
+            },
+            BackgroundColor(PANEL_BG),
+            BorderColor::all(BUTTON_BORDER),
+        ))
+        .id();
+
+    let header = commands
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Baseline,
+            justify_content: JustifyContent::SpaceBetween,
+            ..default()
+        })
+        .id();
+    let heading = commands
+        .spawn((
+            Text::new("Packaged"),
+            TextFont {
+                font_size: FontSize::Px(13.0),
+                ..default()
+            },
+            TextColor(Color::WHITE),
+        ))
+        .id();
+    let count = commands
+        .spawn((
+            PackagedCount,
+            Text::new(packaged_count_label(models.len())),
+            TextFont {
+                font_size: FontSize::Px(11.0),
+                ..default()
+            },
+            TextColor(MUTED),
+        ))
+        .id();
+    commands.entity(header).add_children(&[heading, count]);
+
+    let list = commands
+        .spawn((
+            PackagedList,
+            ScrollPosition::default(),
+            Node {
+                width: percent(100),
+                flex_grow: 1.0,
+                flex_shrink: 1.0,
+                min_height: px(0),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(2),
+                overflow: Overflow::scroll_y(),
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+        ))
+        .id();
+
+    if models.is_empty() {
+        let empty = commands
+            .spawn((
+                Text::new(
+                    "No .glb / .gltf files in assets/.\nAdd a model, then rebuild the web build.",
+                ),
+                TextFont {
+                    font_size: FontSize::Px(11.0),
+                    ..default()
+                },
+                TextColor(MUTED),
+            ))
+            .id();
+        commands.entity(list).add_child(empty);
+    } else {
+        for (index, path) in models.iter().enumerate() {
+            let row = packaged_button(&mut commands, index, path);
+            commands.entity(list).add_child(row);
+        }
+    }
+
+    let hint = commands
+        .spawn((
+            Text::new("Models shipped in assets/. Click one to view it."),
+            TextFont {
+                font_size: FontSize::Px(10.0),
+                ..default()
+            },
+            TextColor(Color::srgb_u8(0x5b, 0x6a, 0x7d)),
+            Pickable::IGNORE,
+        ))
+        .id();
+
+    commands.entity(panel).add_children(&[header, list, hint]);
+    commands.insert_resource(PackagedModels(models));
+}
+
 fn tree_action_button(commands: &mut Commands, action: TreeAction, text: &str) -> Entity {
     commands
         .spawn((
@@ -485,10 +769,14 @@ fn viewer_button(commands: &mut Commands, action: ViewerAction, text: &str) -> E
 
 fn on_viewer_button(
     event: On<Activate>,
+    mut commands: Commands,
     buttons: Query<(&ViewerButton, &Children)>,
     mut labels: Query<&mut Text>,
     mut viewer: ResMut<Viewer>,
     mut orbit: ResMut<ViewerOrbit>,
+    mut tree: ResMut<ViewerTree>,
+    packaged: Res<PackagedModels>,
+    asset_server: Res<AssetServer>,
     _uploads: Res<PendingUploads>,
 ) {
     let Ok((button, children)) = buttons.get(event.entity) else {
@@ -524,6 +812,20 @@ fn on_viewer_button(
                         .to_owned();
             }
         }
+        ViewerAction::LoadPackaged(index) => {
+            let Some(path) = packaged.0.get(index).cloned() else {
+                return;
+            };
+            show_scene(
+                &mut commands,
+                &asset_server,
+                &mut viewer,
+                &mut tree,
+                &path,
+                path.clone(),
+                format!("Loading packaged \"{path}\"..."),
+            );
+        }
     }
 }
 
@@ -546,6 +848,41 @@ fn safe_asset_name(original: &str, salt: usize) -> String {
 fn is_model_file(name: &str) -> bool {
     let lower = name.to_lowercase();
     lower.ends_with(".glb") || lower.ends_with(".gltf")
+}
+
+/// Replace the current scene with one loaded from `asset_path` (an asset-root
+/// path such as `character.glb`, or a `viewer://` import). Shared by imports
+/// and packaged models so both get the same framing, status, and tree reset.
+fn show_scene(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    viewer: &mut Viewer,
+    tree: &mut ViewerTree,
+    display_name: &str,
+    asset_path: String,
+    status: String,
+) {
+    if let Some(old) = viewer.root.take() {
+        commands.entity(old).despawn();
+    }
+    let handle: Handle<bevy::world_serialization::WorldAsset> =
+        asset_server.load(bevy::gltf::GltfAssetLabel::Scene(0).from_asset(asset_path));
+    let root = commands
+        .spawn((
+            bevy::world_serialization::WorldAssetRoot(handle.clone()),
+            Transform::IDENTITY,
+        ))
+        .id();
+    viewer.root = Some(root);
+    viewer.handle = Some(handle);
+    viewer.framed = false;
+    viewer.polls = 0;
+    viewer.file_name = Some(display_name.to_owned());
+    viewer.mesh_count = 0;
+    viewer.status = status;
+    // A new file means a new hierarchy: drop the old expansion/selection so
+    // the tree rebuilds from the fresh scene graph.
+    tree.reset();
 }
 
 /// Native drag & drop: `MessageReader<FileDragAndDrop>` fires for files
@@ -607,28 +944,15 @@ fn drain_uploads(
         *counter += 1;
         let asset_name = safe_asset_name(&name, *counter);
         dir.0.insert_asset(Path::new(&asset_name), bytes.clone());
-        let handle: Handle<bevy::world_serialization::WorldAsset> = asset_server.load(
-            bevy::gltf::GltfAssetLabel::Scene(0).from_asset(format!("viewer://{asset_name}")),
+        show_scene(
+            &mut commands,
+            &asset_server,
+            &mut viewer,
+            &mut tree,
+            &name,
+            format!("viewer://{asset_name}"),
+            format!("Loading \"{name}\" ({} bytes)...", bytes.len()),
         );
-        if let Some(old) = viewer.root.take() {
-            commands.entity(old).despawn();
-        }
-        let root = commands
-            .spawn((
-                bevy::world_serialization::WorldAssetRoot(handle.clone()),
-                Transform::IDENTITY,
-            ))
-            .id();
-        viewer.root = Some(root);
-        viewer.handle = Some(handle);
-        viewer.framed = false;
-        viewer.polls = 0;
-        viewer.file_name = Some(name.clone());
-        viewer.mesh_count = 0;
-        viewer.status = format!("Loading \"{name}\" ({} bytes)...", bytes.len());
-        // A new file means a new hierarchy: drop the old expansion/selection
-        // so the tree rebuilds from the fresh scene graph.
-        tree.reset();
     }
 }
 
@@ -640,6 +964,7 @@ fn drain_uploads(
 /// that), so the bounds come from transformed mesh vertices. Node origins are
 /// only the fallback for scenes without meshes.
 fn frame_when_ready(
+    mut commands: Commands,
     mut viewer: ResMut<Viewer>,
     asset_server: Res<AssetServer>,
     mut orbit: ResMut<ViewerOrbit>,
@@ -647,6 +972,8 @@ fn frame_when_ready(
     draws: Query<(&Mesh3d, &GlobalTransform)>,
     transforms: Query<&GlobalTransform>,
     meshes: Res<Assets<Mesh>>,
+    skinned: Query<(), With<SkinnedMesh>>,
+    placeholders: Query<Entity, With<ViewerPlaceholder>>,
 ) {
     if viewer.framed {
         return;
@@ -655,7 +982,13 @@ fn frame_when_ready(
         return;
     };
     match asset_server.load_state(&handle) {
-        LoadState::Loaded => {}
+        LoadState::Loaded => {
+            // The model is visible now; the teal stand-in cube would only
+            // sit inside it.
+            for entity in &placeholders {
+                commands.entity(entity).despawn();
+            }
+        }
         LoadState::Failed(error) => {
             let name = viewer.file_name.as_deref().unwrap_or("model").to_owned();
             // Surface the loader's actual reason: "no JPEG support" and "not a
@@ -671,7 +1004,8 @@ fn frame_when_ready(
         viewer.framed = true;
         return;
     };
-    let (from_meshes, from_nodes) = scene_bounds(root, &children, &draws, &transforms, &meshes);
+    let (from_meshes, from_nodes) =
+        scene_bounds(root, &children, &draws, &transforms, &meshes, &skinned);
     if from_meshes.is_empty() {
         // The scene spawner runs after `Update`, so meshes show up a frame or
         // two later. Only give up on them once the grace window expires.
@@ -796,6 +1130,7 @@ fn scene_bounds(
     draws: &Query<(&Mesh3d, &GlobalTransform)>,
     transforms: &Query<&GlobalTransform>,
     meshes: &Assets<Mesh>,
+    skinned: &Query<(), With<SkinnedMesh>>,
 ) -> (SceneBounds, SceneBounds) {
     let mut from_meshes = SceneBounds::default();
     let mut from_nodes = SceneBounds::default();
@@ -814,7 +1149,17 @@ fn scene_bounds(
         if let Ok((draw, global)) = draws.get(entity)
             && let Some((min, max)) = meshes.get(&draw.0).and_then(mesh_extents)
         {
-            from_meshes.add_mesh(min, max, global);
+            // A skinned mesh is drawn from its joint palette, not from this
+            // entity's transform. glTF exporters commonly put a -90° scene
+            // rotation on the node above the skin, so transforming the
+            // bind-pose AABB by it aims the camera at the character's feet.
+            // The local bind-pose bounds are the honest ones.
+            let transform = if skinned.contains(entity) {
+                GlobalTransform::IDENTITY
+            } else {
+                *global
+            };
+            from_meshes.add_mesh(min, max, &transform);
         }
         if let Ok(kids) = children.get(entity) {
             stack.extend(kids.iter());
@@ -1480,6 +1825,44 @@ mod tests {
         assert!(!is_model_file("texture.png"));
         assert!(!is_model_file("model.bin"));
         assert!(!is_model_file("no-extension"));
+    }
+
+    #[test]
+    fn packaged_model_paths_are_normalized_and_safe() {
+        assert_eq!(
+            normalize_packaged_model("character.glb").as_deref(),
+            Some("character.glb")
+        );
+        assert_eq!(
+            normalize_packaged_model("./art/hero.GLB").as_deref(),
+            Some("art/hero.GLB")
+        );
+        assert_eq!(
+            normalize_packaged_model("props\\crate.gltf").as_deref(),
+            Some("props/crate.gltf")
+        );
+        assert_eq!(normalize_packaged_model("notes.txt"), None);
+        assert_eq!(normalize_packaged_model("../escape.glb"), None);
+        assert_eq!(normalize_packaged_model("/absolute/model.glb"), None);
+        assert_eq!(normalize_packaged_model("   "), None);
+    }
+
+    #[test]
+    fn packaged_model_list_is_sorted_and_keeps_one_copy() {
+        let models = finish_model_list([
+            "Hero.glb".to_owned(),
+            "character.glb".to_owned(),
+            "Hero.glb".to_owned(),
+            "art/hero.glb".to_owned(),
+        ]);
+        assert_eq!(models, vec!["art/hero.glb", "character.glb", "Hero.glb"]);
+    }
+
+    #[test]
+    fn packaged_count_reads_like_a_list_label() {
+        assert_eq!(packaged_count_label(0), "none");
+        assert_eq!(packaged_count_label(1), "1 model");
+        assert_eq!(packaged_count_label(3), "3 models");
     }
 
     #[test]

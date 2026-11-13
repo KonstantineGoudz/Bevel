@@ -12,6 +12,8 @@ pub(super) fn spawn_piece(
     piece: &Piece,
     ghost: bool,
     movers: &Movers,
+    all_pieces: &[Piece],
+    glade_paths: &[Vec<Vec2>],
 ) -> Entity {
     let shape = shapes().get(piece.shape);
     let is_trigger = shape.is_some_and(|s| s.is_trigger);
@@ -29,7 +31,14 @@ pub(super) fn spawn_piece(
 
     if !ghost {
         let shape = &shapes()[piece.shape];
-        if let Some(collider) = piece_collider(shape) {
+        let wall_spine = movers::glade_wall_spine(piece, movers);
+        if let Some(collider) = colliders::piece_collider_for_glade(
+            piece,
+            shape,
+            all_pieces,
+            glade_paths,
+            wall_spine.as_deref(),
+        ) {
             // Rapier reads Transform directly, so only the body + collider
             // are inserted here. Dynamic bodies also get velocity and
             // impulse components up front: the shove systems write through
@@ -51,6 +60,13 @@ pub(super) fn spawn_piece(
         }
     }
     let root = root.id();
+
+    if !ghost && shape.is_some_and(|s| matches!(s.id, "glade_terrain" | "glade_path")) {
+        // The unified `WorldTerrainVisuals` renders the continuous 3D terrain
+        // surface, cliff boulders, grass, flowers, and paths across the whole
+        // meadow, so placed `glade_terrain` / `glade_path` nodes need no per-piece mesh.
+        return root;
+    }
 
     for (mesh, slot) in &kit.parts[piece.shape] {
         let material = if ghost {
@@ -109,6 +125,14 @@ pub(super) fn character_pose(character: Character) -> (Vec3, Quat, Vec3) {
     )
 }
 
+pub(super) fn collect_glade_paths(editor: &Editor, movers: &Movers) -> Vec<Vec<Vec2>> {
+    editor
+        .pieces
+        .iter()
+        .filter_map(|piece| movers::glade_path_spine(piece, movers))
+        .collect()
+}
+
 pub(super) fn sync_visuals(
     mut commands: Commands,
     editor: Res<Editor>,
@@ -121,11 +145,16 @@ pub(super) fn sync_visuals(
     mut bodies: Query<(&RigidBody, Has<Sleeping>, Option<&mut Velocity>), With<PieceVisual>>,
     mut visibilities: Query<&mut Visibility, With<CharacterVisual>>,
     mut piece_visibilities: Query<&mut Visibility, (With<PieceVisual>, Without<CharacterVisual>)>,
+    mut meshes: Option<ResMut<Assets<Mesh>>>,
     mut materials: Option<ResMut<Assets<StandardMaterial>>>,
     children_q: Query<&Children, With<PieceVisual>>,
     material_handles: Query<&MeshMaterial3d<StandardMaterial>>,
 ) {
-    let ghost_wanted = editor.tool.is_some() && editor.ghost.is_some();
+    let is_terrain_tool = editor
+        .tool
+        .and_then(|t| shapes().get(t))
+        .is_some_and(|s| s.id == "glade_terrain");
+    let ghost_wanted = editor.tool.is_some() && editor.ghost.is_some() && !is_terrain_tool;
 
     visuals.map.retain(|id, entity| {
         let keep = if *id == 0 {
@@ -138,6 +167,19 @@ pub(super) fn sync_visuals(
         }
         keep
     });
+    visuals
+        .glade_signatures
+        .retain(|id, _| editor.pieces.iter().any(|p| p.id == *id));
+
+    let has_glade = editor
+        .pieces
+        .iter()
+        .any(|p| shapes().get(p.shape).is_some_and(|s| s.is_glade()));
+    let glade_paths: Vec<Vec<Vec2>> = if has_glade {
+        collect_glade_paths(&editor, &movers)
+    } else {
+        Vec::new()
+    };
 
     for piece in &editor.pieces {
         match visuals.map.get(&piece.id) {
@@ -215,6 +257,79 @@ pub(super) fn sync_visuals(
                         }
                     }
                 }
+                // Live procedural mesh regeneration for Tiny Glade–style buildings:
+                // rebuilds walls, roofs, windows, and path archways whenever the
+                // piece, an overlapping neighbour, or a path changes.
+                if let Some(shape) = shapes().get(piece.shape)
+                    && shape.is_glade()
+                {
+                    let wall_spine = movers::glade_wall_spine(piece, &movers);
+                    let sig = crate::glade::compute_piece_signature_with_spine(
+                        piece,
+                        shape,
+                        &editor.pieces,
+                        &glade_paths,
+                        wall_spine.as_deref(),
+                    );
+                    if visuals.glade_signatures.get(&piece.id) != Some(&sig)
+                        && let (Some(meshes), Some(materials)) =
+                            (meshes.as_mut(), materials.as_mut())
+                    {
+                        visuals.glade_signatures.insert(piece.id, sig);
+                        if let Ok(children) = children_q.get(entity) {
+                            for child in children.iter() {
+                                commands.entity(child).despawn();
+                            }
+                        }
+                        if !matches!(shape.id, "glade_terrain" | "glade_path") {
+                            let parts = crate::glade::build_glade_meshes_with_spine(
+                                piece,
+                                shape,
+                                &editor.pieces,
+                                &glade_paths,
+                                wall_spine.as_deref(),
+                            );
+                            let stone_child = commands
+                                .spawn((
+                                    Mesh3d(meshes.add(parts.stone)),
+                                    MeshMaterial3d(kit.mats[piece.shape].clone()),
+                                ))
+                                .id();
+                            commands.entity(entity).add_child(stone_child);
+
+                            let glass_child = commands
+                                .spawn((
+                                    Mesh3d(meshes.add(parts.glass)),
+                                    MeshMaterial3d(kit.glass.clone()),
+                                ))
+                                .id();
+                            commands.entity(entity).add_child(glass_child);
+
+                            let roof_mat = materials.add(StandardMaterial {
+                                base_color: crate::glade::roof_color(piece),
+                                perceptual_roughness: 0.82,
+                                metallic: 0.04,
+                                double_sided: true,
+                                cull_mode: None,
+                                ..default()
+                            });
+                            let roof_child = commands
+                                .spawn((Mesh3d(meshes.add(parts.roof)), MeshMaterial3d(roof_mat)))
+                                .id();
+                            commands.entity(entity).add_child(roof_child);
+                        }
+
+                        if let Some(collider) = colliders::piece_collider_for_glade(
+                            piece,
+                            shape,
+                            &editor.pieces,
+                            &glade_paths,
+                            wall_spine.as_deref(),
+                        ) {
+                            commands.entity(entity).insert(collider);
+                        }
+                    }
+                }
                 if piece.dynamic {
                     // Physics owns this transform. `sync_dynamic_pieces` copies
                     // the simulated pose back into the editor state.
@@ -228,13 +343,23 @@ pub(super) fn sync_visuals(
                 }
             }
             None => {
-                let entity = spawn_piece(&mut commands, &kit, piece, false, &movers);
+                let entity = spawn_piece(
+                    &mut commands,
+                    &kit,
+                    piece,
+                    false,
+                    &movers,
+                    &editor.pieces,
+                    &glade_paths,
+                );
                 visuals.map.insert(piece.id, entity);
             }
         }
     }
 
-    if let (Some(tool), Some(ghost)) = (editor.tool, editor.ghost) {
+    if ghost_wanted
+        && let (Some(tool), Some(ghost)) = (editor.tool, editor.ghost)
+    {
         let piece = Piece {
             id: 0,
             shape: tool,
@@ -242,7 +367,7 @@ pub(super) fn sync_visuals(
             rot: ghost.rot,
             pitch: 0.0,
             roll: 0.0,
-            elevation: 0.0,
+            elevation: ghost.elevation,
             dynamic: false,
             trigger: crate::model::Trigger::harmless(),
             trigger_size: crate::model::TRIGGER_DEFAULT_SIZE,
@@ -255,7 +380,7 @@ pub(super) fn sync_visuals(
         match visuals.map.get(&0) {
             Some(&entity) => {
                 if let Ok(mut transform) = transforms.get_mut(entity) {
-                    transform.translation = Vec3::new(piece.pos.x, 0.0, piece.pos.y);
+                    transform.translation = Vec3::new(piece.pos.x, ghost.elevation, piece.pos.y);
                     transform.rotation = model::piece_quat(&piece);
                     if let Some(shape) = shapes().get(piece.shape)
                         && shape.is_trigger
@@ -268,7 +393,15 @@ pub(super) fn sync_visuals(
                 }
             }
             None => {
-                let entity = spawn_piece(&mut commands, &kit, &piece, true, &movers);
+                let entity = spawn_piece(
+                    &mut commands,
+                    &kit,
+                    &piece,
+                    true,
+                    &movers,
+                    &editor.pieces,
+                    &glade_paths,
+                );
                 visuals.map.insert(0, entity);
             }
         }
@@ -357,4 +490,213 @@ pub(super) fn sync_dynamic_pieces(
     if moved {
         editor.soft_dirty = true;
     }
+}
+
+/// Marker for the continuous 3D Tiny Glade world terrain root entity.
+#[derive(Component)]
+pub(super) struct WorldTerrainRoot;
+
+/// Cached entities and materials for the continuous 3D world terrain,
+/// cliff boulders, 3D grass blades, clover, wildflowers, and paths/stairs.
+#[derive(Resource, Default)]
+pub(super) struct WorldTerrainVisuals {
+    pub(super) root: Option<Entity>,
+    pub(super) signature: Option<u64>,
+    pub(super) turf: Option<Handle<StandardMaterial>>,
+    pub(super) rock_light: Option<Handle<StandardMaterial>>,
+    pub(super) rock_dark: Option<Handle<StandardMaterial>>,
+    pub(super) grass_sun: Option<Handle<crate::grass_material::GrassMaterial>>,
+    pub(super) grass_lush: Option<Handle<crate::grass_material::GrassMaterial>>,
+    pub(super) grass_clover: Option<Handle<StandardMaterial>>,
+    pub(super) flower_yellow: Option<Handle<StandardMaterial>>,
+    pub(super) flower_white: Option<Handle<StandardMaterial>>,
+    pub(super) path_sand: Option<Handle<StandardMaterial>>,
+}
+
+pub(super) fn sync_world_terrain(
+    mut commands: Commands,
+    editor: Res<Editor>,
+    movers: Res<Movers>,
+    mut world_terrain: ResMut<WorldTerrainVisuals>,
+    mut meshes: Option<ResMut<Assets<Mesh>>>,
+    mut materials: Option<ResMut<Assets<StandardMaterial>>>,
+    mut grass_materials: Option<ResMut<Assets<crate::grass_material::GrassMaterial>>>,
+) {
+    let (Some(meshes), Some(materials), Some(grass_materials)) = (
+        meshes.as_mut(),
+        materials.as_mut(),
+        grass_materials.as_mut(),
+    ) else {
+        return;
+    };
+    let glade_paths = collect_glade_paths(&editor, &movers);
+    let sig = crate::glade::compute_world_terrain_signature(&editor.pieces, &glade_paths);
+    if world_terrain.signature == Some(sig) && world_terrain.root.is_some() {
+        return;
+    }
+    world_terrain.signature = Some(sig);
+
+    if let Some(old_root) = world_terrain.root.take() {
+        commands.entity(old_root).despawn();
+    }
+
+    let turf_mat = world_terrain
+        .turf
+        .get_or_insert_with(|| {
+            materials.add(StandardMaterial {
+                base_color: Color::srgb_u8(0x78, 0x9b, 0x3b),
+                perceptual_roughness: 0.92,
+                metallic: 0.01,
+                double_sided: true,
+                cull_mode: None,
+                ..default()
+            })
+        })
+        .clone();
+    let rock_light_mat = world_terrain
+        .rock_light
+        .get_or_insert_with(|| {
+            materials.add(StandardMaterial {
+                base_color: Color::srgb_u8(0x8e, 0x85, 0x71),
+                perceptual_roughness: 0.88,
+                metallic: 0.02,
+                ..default()
+            })
+        })
+        .clone();
+    let rock_dark_mat = world_terrain
+        .rock_dark
+        .get_or_insert_with(|| {
+            materials.add(StandardMaterial {
+                base_color: Color::srgb_u8(0x6e, 0x67, 0x58),
+                perceptual_roughness: 0.92,
+                metallic: 0.02,
+                ..default()
+            })
+        })
+        .clone();
+    let grass_sun_mat = world_terrain
+        .grass_sun
+        .get_or_insert_with(|| {
+            grass_materials.add(crate::grass_material::GrassMaterial {
+                base: StandardMaterial {
+                    base_color: Color::srgb_u8(0x98, 0xb8, 0x42),
+                    perceptual_roughness: 0.84,
+                    metallic: 0.01,
+                    double_sided: true,
+                    cull_mode: None,
+                    ..default()
+                },
+                extension: crate::grass_material::GrassExt::meadow_sun(),
+            })
+        })
+        .clone();
+    let grass_lush_mat = world_terrain
+        .grass_lush
+        .get_or_insert_with(|| {
+            grass_materials.add(crate::grass_material::GrassMaterial {
+                base: StandardMaterial {
+                    base_color: Color::srgb_u8(0x6b, 0x94, 0x34),
+                    perceptual_roughness: 0.86,
+                    metallic: 0.01,
+                    double_sided: true,
+                    cull_mode: None,
+                    ..default()
+                },
+                extension: crate::grass_material::GrassExt::meadow_lush(),
+            })
+        })
+        .clone();
+    let grass_clover_mat = world_terrain
+        .grass_clover
+        .get_or_insert_with(|| {
+            materials.add(StandardMaterial {
+                base_color: Color::srgb_u8(0x4d, 0x75, 0x2b),
+                perceptual_roughness: 0.88,
+                metallic: 0.01,
+                double_sided: true,
+                cull_mode: None,
+                ..default()
+            })
+        })
+        .clone();
+    let flower_yellow_mat = world_terrain
+        .flower_yellow
+        .get_or_insert_with(|| {
+            materials.add(StandardMaterial {
+                base_color: Color::srgb_u8(0xf4, 0xc8, 0x38),
+                perceptual_roughness: 0.72,
+                metallic: 0.02,
+                double_sided: true,
+                cull_mode: None,
+                ..default()
+            })
+        })
+        .clone();
+    let flower_white_mat = world_terrain
+        .flower_white
+        .get_or_insert_with(|| {
+            materials.add(StandardMaterial {
+                base_color: Color::srgb_u8(0xf7, 0xf3, 0xe3),
+                perceptual_roughness: 0.72,
+                metallic: 0.02,
+                double_sided: true,
+                cull_mode: None,
+                ..default()
+            })
+        })
+        .clone();
+    let path_sand_mat = world_terrain
+        .path_sand
+        .get_or_insert_with(|| {
+            materials.add(StandardMaterial {
+                base_color: Color::srgb_u8(0xd9, 0xbe, 0x80),
+                perceptual_roughness: 0.94,
+                metallic: 0.01,
+                double_sided: true,
+                cull_mode: None,
+                ..default()
+            })
+        })
+        .clone();
+
+    let parts = crate::glade::build_world_terrain_meshes(&editor.pieces, &glade_paths);
+    let mut root_cmd = commands.spawn((
+        WorldTerrainRoot,
+        Transform::default(),
+        Visibility::Visible,
+    ));
+    let (verts, tris) = crate::glade::world_terrain_elevated_collider(&editor.pieces);
+    if !tris.is_empty()
+        && let Ok(collider) = Collider::trimesh(verts, tris)
+    {
+        root_cmd.insert((RigidBody::Fixed, collider));
+    }
+    let root = root_cmd.id();
+
+    for (mesh, mat) in [
+        (parts.turf, turf_mat),
+        (parts.rock_light, rock_light_mat),
+        (parts.rock_dark, rock_dark_mat),
+        (parts.grass_clover, grass_clover_mat),
+        (parts.flower_yellow, flower_yellow_mat),
+        (parts.flower_white, flower_white_mat),
+        (parts.path_sand, path_sand_mat),
+    ] {
+        let child = commands
+            .spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(mat)))
+            .id();
+        commands.entity(root).add_child(child);
+    }
+    for (mesh, mat) in [
+        (parts.grass_sun, grass_sun_mat),
+        (parts.grass_lush, grass_lush_mat),
+    ] {
+        let child = commands
+            .spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(mat)))
+            .id();
+        commands.entity(root).add_child(child);
+    }
+
+    world_terrain.root = Some(root);
 }
