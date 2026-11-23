@@ -107,9 +107,9 @@ pub(super) fn on_palette_activate(
             editor.tool = None;
             if editor.actor_tool == Some(ActorTool::Grass) {
                 editor.note = if editor.grass_erase {
-                    "grass brush: drag to erase, Erase toggles back to paint"
+                    "grass eraser: drag to erase, [ / ] resizes, Shift flips"
                 } else {
-                    "grass brush: drag to paint, Shift is not needed"
+                    "grass brush: drag to paint, [ / ] resizes, Shift erases"
                 };
             }
         }
@@ -121,6 +121,66 @@ pub(super) fn on_palette_activate(
                 "grass eraser on"
             } else {
                 "grass brush on"
+            };
+            return;
+        }
+        PaletteAction::GrassSize => {
+            editor.grass_brush_radius =
+                (editor.grass_brush_radius + 1) % (GRASS_BRUSH_MAX_RADIUS + 1);
+            editor.note = match editor.grass_brush_radius {
+                0 => "grass brush size: S (1 hex)",
+                1 => "grass brush size: M (7 hexes)",
+                2 => "grass brush size: L (19 hexes)",
+                _ => "grass brush size: XL (37 hexes)",
+            };
+            return;
+        }
+        PaletteAction::GrassDensity => {
+            editor.grass_brush_strength = match editor.grass_brush_strength {
+                1 => 2,
+                2 => GRASS_MAX,
+                _ => 1,
+            };
+            editor.note = match editor.grass_brush_strength {
+                1 => "grass brush strength: light (+1)",
+                2 => "grass brush strength: medium (+2)",
+                _ => "grass brush strength: full (fill)",
+            };
+            return;
+        }
+        PaletteAction::GrassClear => {
+            if !editor.grass.is_empty() {
+                editor.commit();
+                editor.grass.clear();
+                editor.grass_rev = editor.grass_rev.wrapping_add(1);
+                editor.hard_dirty = true;
+                editor.note = "cleared all painted grass";
+            } else {
+                editor.note = "no painted grass to clear";
+            }
+            return;
+        }
+        PaletteAction::Vine => {
+            editor.actor_tool = if editor.actor_tool == Some(ActorTool::Vine) {
+                None
+            } else {
+                Some(ActorTool::Vine)
+            };
+            editor.tool = None;
+            if editor.actor_tool == Some(ActorTool::Vine) {
+                editor.note = if editor.vine_erase {
+                    "vine brush: drag on any surface to erase, Shift toggles paint"
+                } else {
+                    "vine brush: drag on walls, roofs, or ground to paint vines"
+                };
+            }
+        }
+        PaletteAction::VineErase => {
+            editor.vine_erase = !editor.vine_erase;
+            editor.note = if editor.vine_erase {
+                "vine eraser on"
+            } else {
+                "vine brush on"
             };
             return;
         }
@@ -153,7 +213,7 @@ pub(super) fn on_palette_activate(
             }
         }
         PaletteAction::Smooth => {
-            if editor.actor_tool == Some(ActorTool::Platform)
+            if mover_editing_active(&editor)
                 && let Some(id) = editor.selection.primary()
                 && let Some(mover) = movers.map.get_mut(&id)
             {
@@ -354,6 +414,7 @@ pub(super) fn interact(
     nav: Res<Nav>,
     gates: MenuHome,
     right_panel: Res<RightPanelState>,
+    left_panel: Res<LeftPanelState>,
     camera: Single<(&Camera, &Transform), Without<MinimapCamera>>,
     rapier: ReadRapierContext,
     player: Query<Entity, With<CharacterVisual>>,
@@ -392,7 +453,11 @@ pub(super) fn interact(
     // Blender-style G/R owns the keyboard and pointer until confirm or cancel.
     let allow_transform =
         !capture.grabbed && orbit.mode != ViewMode::First && !gesture.0.dragging();
-    let over_palette = !touch.enabled && cursor.screen.is_some_and(|p| p.x <= PANEL_WIDTH);
+    // A collapsed palette gives its strip back to the viewport; only its
+    // re-open tab still counts as palette.
+    let over_palette = cursor
+        .screen
+        .is_some_and(|p| over_left_panel(p, &left_panel, &touch));
     if keyboard_transform(
         &mut editor,
         &input.controls,
@@ -465,10 +530,8 @@ pub(super) fn interact(
     }
 
     if !playing && input.just_pressed(Action::DeletePiece) {
-        // Motion waypoints win while the Motion tool is armed; otherwise the
-        // whole piece goes.
-        if editor.actor_tool == Some(ActorTool::Platform)
-            && delete_selected_mover_waypoint(&mut editor, &mut movers)
+        // Motion/curve waypoints win while active; otherwise the whole piece goes.
+        if mover_editing_active(&editor) && delete_selected_mover_waypoint(&mut editor, &mut movers)
         {
             // Waypoint removed; the piece survives.
         } else {
@@ -491,7 +554,7 @@ pub(super) fn interact(
         editor.redo();
     }
 
-    // Manual S-key saving lives in `save_shortcut` (same chain) so `interact`
+    // Manual S-key export lives beside `interact` (same chain) so `interact`
     // stays under Bevy's system-parameter limit while saves still see movers.
 
     // Captured first-person look owns the mouse: clicks must not place,
@@ -500,10 +563,10 @@ pub(super) fn interact(
         return;
     }
 
-    // Clicks on the palette are handled by the widget observers; ignore them
-    // here. The palette is hidden in touch mode and in Play, so the whole
-    // screen is canvas there.
-    if !playing && !touch.enabled && screen.x <= PANEL_WIDTH {
+    // Clicks on the palette (or its re-open tab) are handled by the widget
+    // observers; ignore them here. The palette is hidden in touch mode, in Play,
+    // and while collapsed, so the whole screen is canvas then.
+    if !playing && over_left_panel(screen, &left_panel, &touch) {
         return;
     }
     if !playing && over_right_panel(screen, cursor.screen_size, &right_panel, &touch) {
@@ -546,7 +609,7 @@ pub(super) fn interact(
 
     if let Some(drag) = editor.gizmo_drag.clone() {
         if input.pressed(Action::PrimaryClick) {
-            apply_gizmo_drag(&mut editor, drag, cursor.ray);
+            apply_gizmo_drag_with_movers(&mut editor, &mut movers, drag, cursor.ray);
         }
         if input.just_released(Action::PrimaryClick) {
             // `commit` ran when the drag started, before the pointer moved. Mark
@@ -579,6 +642,8 @@ pub(super) fn interact(
         };
         let default_color = if shape.id == "glade_terrain" {
             crate::glade::DEFAULT_TERRAIN_COLOR
+        } else if shape.id == "glade_tree" {
+            crate::glade::DEFAULT_TREE_COLOR
         } else if shape.is_glade() {
             crate::glade::GLADE_DEFAULT_ROOF_COLOR
         } else {
@@ -603,35 +668,47 @@ pub(super) fn interact(
         };
         let (snap, snap_elevation) =
             if matches!(shape.id, "glade_door" | "glade_window" | "door" | "gate") {
-            let wall_spines: Vec<(u32, Vec<Vec2>)> = editor
-                .pieces
-                .iter()
-                .filter_map(|p| movers::glade_wall_spine(p, &movers).map(|pts| (p.id, pts)))
-                .collect();
-            if let Some((pos, rot, wall_elev)) =
-                crate::glade::snap_door_to_glade_wall_with_elevation(
-                    &raw,
-                    &editor.pieces,
-                    cursor.ray,
-                    &wall_spines,
-                )
-            {
-                (
-                    model::Snap {
-                        pos,
-                        rot,
-                        kind: SnapKind::Anchor,
-                    },
-                    wall_elev,
-                )
-            } else if matches!(shape.id, "glade_door" | "glade_window") {
-                // Building doors and windows must attach to a building wall;
-                // do not show a ground ghost or allow placing them in open space.
-                editor.ghost = None;
-                if clicked {
-                    editor.note = "click on a building wall to place a door or window";
+                let wall_spines: Vec<(u32, Vec<Vec2>)> = editor
+                    .pieces
+                    .iter()
+                    .filter_map(|p| movers::glade_wall_spine(p, &movers).map(|pts| (p.id, pts)))
+                    .collect();
+                if let Some((pos, rot, wall_elev)) =
+                    crate::glade::snap_door_to_glade_wall_with_elevation(
+                        &raw,
+                        &editor.pieces,
+                        cursor.ray,
+                        &wall_spines,
+                    )
+                {
+                    (
+                        model::Snap {
+                            pos,
+                            rot,
+                            kind: SnapKind::Anchor,
+                        },
+                        wall_elev,
+                    )
+                } else if matches!(shape.id, "glade_door" | "glade_window") {
+                    // Building doors and windows must attach to a building wall;
+                    // do not show a ground ghost or allow placing them in open space.
+                    editor.ghost = None;
+                    if clicked {
+                        editor.note = "click on a building wall to place a door or window";
+                    }
+                    return;
+                } else {
+                    let s = model::snap_piece(
+                        &raw,
+                        shape,
+                        &editor.pieces,
+                        editor.snap,
+                        editor.snap,
+                        SNAP_THRESHOLD,
+                    );
+                    let h = crate::glade::world_terrain_height_at(s.pos, &editor.pieces);
+                    (s, h)
                 }
-                return;
             } else {
                 let s = model::snap_piece(
                     &raw,
@@ -641,25 +718,13 @@ pub(super) fn interact(
                     editor.snap,
                     SNAP_THRESHOLD,
                 );
-                let h = crate::glade::world_terrain_height_at(s.pos, &editor.pieces);
+                let h = if shape.id == "glade_terrain" {
+                    0.0
+                } else {
+                    crate::glade::world_terrain_height_at(s.pos, &editor.pieces)
+                };
                 (s, h)
-            }
-        } else {
-            let s = model::snap_piece(
-                &raw,
-                shape,
-                &editor.pieces,
-                editor.snap,
-                editor.snap,
-                SNAP_THRESHOLD,
-            );
-            let h = if shape.id == "glade_terrain" {
-                0.0
-            } else {
-                crate::glade::world_terrain_height_at(s.pos, &editor.pieces)
             };
-            (s, h)
-        };
         editor.ghost = Some(Ghost {
             pos: snap.pos,
             rot: snap.rot,
@@ -760,13 +825,13 @@ pub(super) fn interact(
             // Chained path-wall drawing: when stamping a `glade_wall` with Shift or
             // mobile `Add` while an existing `glade_wall` is selected, append the clicked
             // point to that wall's curved path spine instead of spawning a separate piece!
-            if shape.id == "glade_wall"
+            if matches!(shape.id, "glade_wall" | "glade_stairs")
                 && keep_stamping
                 && let Some(sel_id) = editor.selection.primary()
                 && let Some(sel_piece) = editor.pieces.iter().find(|p| p.id == sel_id).copied()
                 && shapes()
                     .get(sel_piece.shape)
-                    .is_some_and(|s| s.id == "glade_wall")
+                    .is_some_and(|s| s.id == shape.id)
                 && snap.pos.distance(sel_piece.pos) > 0.15
             {
                 editor.commit();
@@ -832,6 +897,8 @@ pub(super) fn interact(
                 mover.waypoints = plan_wps;
                 mover.rebuild();
                 followed_plan = true;
+            } else if matches!(shape.id, "glade_wall" | "glade_stairs") {
+                movers::ensure_glade_wall_mover(&placed, &mut movers);
             }
 
             editor.note = if followed_plan {
@@ -943,6 +1010,26 @@ pub(super) fn interact(
     }
 
     if editor.actor_tool == Some(ActorTool::Grass) {
+        if !cursor.text_focus {
+            if input.keys.just_pressed(KeyCode::BracketLeft) {
+                editor.grass_brush_radius = editor.grass_brush_radius.saturating_sub(1);
+                editor.note = match editor.grass_brush_radius {
+                    0 => "grass brush size: S (1 hex)",
+                    1 => "grass brush size: M (7 hexes)",
+                    2 => "grass brush size: L (19 hexes)",
+                    _ => "grass brush size: XL (37 hexes)",
+                };
+            } else if input.keys.just_pressed(KeyCode::BracketRight) {
+                editor.grass_brush_radius =
+                    (editor.grass_brush_radius + 1).min(GRASS_BRUSH_MAX_RADIUS);
+                editor.note = match editor.grass_brush_radius {
+                    0 => "grass brush size: S (1 hex)",
+                    1 => "grass brush size: M (7 hexes)",
+                    2 => "grass brush size: L (19 hexes)",
+                    _ => "grass brush size: XL (37 hexes)",
+                };
+            }
+        }
         // Click or hold-drag paints one stroke; the stroke commits once on
         // press and pops the undo entry on release when nothing changed.
         let held = input.pressed(Action::PrimaryClick);
@@ -953,15 +1040,30 @@ pub(super) fn interact(
                 editor.grass_stroke_dirty = false;
                 editor.grass_dab = None;
             }
-            let hex = model::pixel_to_hex(world);
+            let (target, _) = surface_target(&cursor, &rapier_ctx, surface_filter, world);
+            let hex = model::pixel_to_hex(target);
             if editor.grass_dab != Some(hex) {
+                let shift = input.keys.pressed(KeyCode::ShiftLeft)
+                    || input.keys.pressed(KeyCode::ShiftRight);
+                let erase = editor.grass_erase ^ shift;
+                let radius = editor.grass_brush_radius;
+                let strength = editor.grass_brush_strength;
+                let line = match editor.grass_dab {
+                    Some(prev) => hex_line(prev, hex),
+                    None => vec![hex],
+                };
                 editor.grass_dab = Some(hex);
-                let erase = editor.grass_erase;
-                if apply_dab(&mut editor.grass, hex, erase) {
+                let mut any_changed = false;
+                for dab_hex in line {
+                    if apply_dab_with_brush(&mut editor.grass, dab_hex, radius, strength, erase) {
+                        any_changed = true;
+                    }
+                }
+                if any_changed {
                     editor.grass_stroke_dirty = true;
                     editor.grass_rev = editor.grass_rev.wrapping_add(1);
                     editor.hard_dirty = true;
-                    editor.note = if editor.grass_erase {
+                    editor.note = if erase {
                         "erased grass"
                     } else {
                         "painted grass"
@@ -976,6 +1078,63 @@ pub(super) fn interact(
         }
         if input.just_released(Action::PrimaryClick) && editor.grass_stroke {
             finish_grass_stroke(&mut editor, &nav, &rapier_ctx, surface_filter);
+        }
+        return;
+    }
+
+    if editor.actor_tool == Some(ActorTool::Vine) {
+        let held = input.pressed(Action::PrimaryClick);
+        if clicked || held {
+            if !editor.vine_stroke {
+                editor.commit();
+                editor.vine_stroke = true;
+                editor.vine_stroke_dirty = false;
+                editor.vine_last_pos = None;
+            }
+            let (hit_pos, hit_normal) = cursor
+                .ray
+                .and_then(|ray| {
+                    rapier_ctx
+                        .cast_ray_and_get_normal(
+                            ray.origin,
+                            ray.direction.into(),
+                            80.0,
+                            true,
+                            surface_filter,
+                        )
+                        .map(|(_, hit)| (hit.point, hit.normal))
+                })
+                .unwrap_or((Vec3::new(world.x, 0.0, world.y), Vec3::Y));
+
+            let shift =
+                input.keys.pressed(KeyCode::ShiftLeft) || input.keys.pressed(KeyCode::ShiftRight);
+            let erase = editor.vine_erase ^ shift;
+
+            if erase {
+                if erase_vines_near(&mut editor.vines, hit_pos, VINE_ERASE_RADIUS) {
+                    editor.vine_stroke_dirty = true;
+                    editor.vine_rev = editor.vine_rev.wrapping_add(1);
+                    editor.hard_dirty = true;
+                    editor.note = "erased vines";
+                }
+            } else {
+                let far_enough = editor.vine_last_pos.is_none_or(|prev| {
+                    prev.distance_squared(hit_pos) >= VINE_PAINT_SPACING.powi(2)
+                });
+                if far_enough && paint_vine_dab(&mut editor.vines, hit_pos, hit_normal) {
+                    editor.vine_last_pos = Some(hit_pos);
+                    editor.vine_stroke_dirty = true;
+                    editor.vine_rev = editor.vine_rev.wrapping_add(1);
+                    editor.hard_dirty = true;
+                    editor.note = "painted vines";
+                }
+            }
+            if !held {
+                finish_vine_stroke(&mut editor);
+            }
+        }
+        if input.just_released(Action::PrimaryClick) && editor.vine_stroke {
+            finish_vine_stroke(&mut editor);
         }
         return;
     }
@@ -1001,10 +1160,14 @@ pub(super) fn interact(
                 _ => {
                     // No valid selection: a click on a piece selects it so
                     // the following clicks can lay down its path.
-                    if let Some(hit) = cursor
-                        .ray
-                        .and_then(|ray| pick_unlocked(&editor.pieces, ray, &editor.outline.locked))
-                    {
+                    if let Some(hit) = cursor.ray.and_then(|ray| {
+                        pick_unlocked_with_movers(
+                            &editor.pieces,
+                            &movers,
+                            ray,
+                            &editor.outline.locked,
+                        )
+                    }) {
                         editor.selection.set(hit);
                         editor.note = "motion: piece selected, click to add path points";
                     } else {
@@ -1019,9 +1182,21 @@ pub(super) fn interact(
     }
 
     if clicked {
-        let hit = cursor
-            .ray
-            .and_then(|ray| pick_unlocked(&editor.pieces, ray, &editor.outline.locked));
+        if mover_editing_active(&editor)
+            && select_mover_handle(
+                &mut editor,
+                &mut movers,
+                camera,
+                &camera_global,
+                screen,
+                touch.enabled,
+            )
+        {
+            return;
+        }
+        let hit = cursor.ray.and_then(|ray| {
+            pick_unlocked_with_movers(&editor.pieces, &movers, ray, &editor.outline.locked)
+        });
 
         // Play routes the capsule with plain clicks, including clicks on a
         // block or ramp (their tops are the surface the user means). Build
@@ -1211,14 +1386,7 @@ pub(super) fn apply_body_drag(editor: &mut Editor, drag: Drag, base: Vec2) {
         )
     } else {
         (
-            model::snap_piece(
-                &raw,
-                shape,
-                &candidates,
-                editor.snap,
-                false,
-                SNAP_THRESHOLD,
-            ),
+            model::snap_piece(&raw, shape, &candidates, editor.snap, false, SNAP_THRESHOLD),
             None,
         )
     };
@@ -1336,11 +1504,9 @@ pub(super) fn apply_terrain_brush_dab(editor: &mut Editor, pos: Vec2, lower: boo
         // If carving into the built-in hillside or perimeter hills, spawn or
         // deepen a negative-elevation carve node at `pos`.
         if crate::glade::base_meadow_height_at(pos) > 0.15 {
-            if let Some(carve) = editor
-                .pieces
-                .iter_mut()
-                .find(|p| p.shape == terrain_idx && p.elevation < -0.05 && p.pos.distance(pos) <= 3.0)
-            {
+            if let Some(carve) = editor.pieces.iter_mut().find(|p| {
+                p.shape == terrain_idx && p.elevation < -0.05 && p.pos.distance(pos) <= 3.0
+            }) {
                 carve.trigger_size.y =
                     (carve.trigger_size.y + 1.2).min(crate::glade::TERRAIN_MAX_HEIGHT);
                 changed = true;

@@ -2,7 +2,10 @@
 //! catch startup/schedule panics (e.g. bad Single queries) and missing UI.
 
 use super::*;
+#[cfg(not(target_os = "android"))]
 use bevy::clipboard::Clipboard;
+#[cfg(target_os = "android")]
+use crate::android_clipboard::Clipboard;
 use bevy::gizmos::prelude::{
     AppGizmoBuilder, DefaultGizmoConfigGroup, GizmoAsset, GizmoConfigStore,
 };
@@ -20,6 +23,8 @@ fn boot_app() -> App {
     app.init_asset::<Mesh>();
     app.init_asset::<StandardMaterial>();
     app.init_asset::<GizmoAsset>();
+    app.init_asset::<bevy_grass::prelude::GrassStyle>();
+    app.init_asset::<bevy::image::Image>();
     // Resources/messages DefaultPlugins would normally provide.
     app.init_resource::<ButtonInput<KeyCode>>();
     app.init_resource::<ButtonInput<MouseButton>>();
@@ -417,7 +422,7 @@ fn play_mode_with_grass_runs_without_panicking() {
     app.update();
     app.update();
     let world = app.world_mut();
-    // The minimap camera woke up with a viewport; grass grew tufts.
+    // The minimap camera woke up with a viewport.
     let (minimap_active, has_viewport) = {
         let minimap = world
             .query_filtered::<&Camera, With<MinimapCamera>>()
@@ -427,10 +432,6 @@ fn play_mode_with_grass_runs_without_panicking() {
     };
     assert!(minimap_active, "minimap is active in Play");
     assert!(has_viewport, "minimap owns its corner viewport");
-    assert!(
-        world.query::<&GrassTuft>().iter(world).count() > 0,
-        "tufts render for painted hexes"
-    );
 }
 
 #[test]
@@ -509,9 +510,18 @@ fn building_mode_palette_groups_follow_mode_and_selection() {
     {
         let world = app.world_mut();
         assert_eq!(group_display(world, PaletteGroup::BuildMode), Display::Flex);
-        assert_eq!(group_display(world, PaletteGroup::BuildingBase), Display::None);
-        assert_eq!(group_display(world, PaletteGroup::DoorsAndWindows), Display::None);
-        assert_eq!(group_display(world, PaletteGroup::BuildingFixtures), Display::None);
+        assert_eq!(
+            group_display(world, PaletteGroup::BuildingBase),
+            Display::None
+        );
+        assert_eq!(
+            group_display(world, PaletteGroup::DoorsAndWindows),
+            Display::None
+        );
+        assert_eq!(
+            group_display(world, PaletteGroup::BuildingFixtures),
+            Display::None
+        );
     }
 
     // 2. Switching to Building mode with no selection shows BuildingBase only.
@@ -520,9 +530,18 @@ fn building_mode_palette_groups_follow_mode_and_selection() {
     {
         let world = app.world_mut();
         assert_eq!(group_display(world, PaletteGroup::BuildMode), Display::None);
-        assert_eq!(group_display(world, PaletteGroup::BuildingBase), Display::Flex);
-        assert_eq!(group_display(world, PaletteGroup::DoorsAndWindows), Display::None);
-        assert_eq!(group_display(world, PaletteGroup::BuildingFixtures), Display::None);
+        assert_eq!(
+            group_display(world, PaletteGroup::BuildingBase),
+            Display::Flex
+        );
+        assert_eq!(
+            group_display(world, PaletteGroup::DoorsAndWindows),
+            Display::None
+        );
+        assert_eq!(
+            group_display(world, PaletteGroup::BuildingFixtures),
+            Display::None
+        );
     }
 
     // 3. Selecting a Building Room reveals Doors & Windows and Fixtures.
@@ -536,8 +555,14 @@ fn building_mode_palette_groups_follow_mode_and_selection() {
     app.update();
     {
         let world = app.world_mut();
-        assert_eq!(group_display(world, PaletteGroup::DoorsAndWindows), Display::Flex);
-        assert_eq!(group_display(world, PaletteGroup::BuildingFixtures), Display::Flex);
+        assert_eq!(
+            group_display(world, PaletteGroup::DoorsAndWindows),
+            Display::Flex
+        );
+        assert_eq!(
+            group_display(world, PaletteGroup::BuildingFixtures),
+            Display::Flex
+        );
     }
 
     // 4. Selecting a Floor reveals Fixtures, but keeps Doors & Windows hidden.
@@ -551,8 +576,14 @@ fn building_mode_palette_groups_follow_mode_and_selection() {
     app.update();
     {
         let world = app.world_mut();
-        assert_eq!(group_display(world, PaletteGroup::DoorsAndWindows), Display::None);
-        assert_eq!(group_display(world, PaletteGroup::BuildingFixtures), Display::Flex);
+        assert_eq!(
+            group_display(world, PaletteGroup::DoorsAndWindows),
+            Display::None
+        );
+        assert_eq!(
+            group_display(world, PaletteGroup::BuildingFixtures),
+            Display::Flex
+        );
     }
 }
 

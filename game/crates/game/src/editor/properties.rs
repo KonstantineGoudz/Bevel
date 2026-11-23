@@ -123,6 +123,12 @@ pub(super) struct PhysicsToggleLabel;
 pub(super) struct TriggerShapeButton;
 
 #[derive(Component)]
+pub(super) struct CurveAddPointButton;
+
+#[derive(Component)]
+pub(super) struct CurveRemovePointButton;
+
+#[derive(Component)]
 pub(super) struct TriggerShapeLabel;
 
 #[derive(Component)]
@@ -422,7 +428,9 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) -> Entity {
             },
         ))
         .id();
-    commands.entity(scroll_body).add_children(&[empty_label, body]);
+    commands
+        .entity(scroll_body)
+        .add_children(&[empty_label, body]);
 
     let position_label = section_label(commands, "POSITION");
     commands.entity(body).add_child(position_label);
@@ -754,6 +762,33 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) -> Entity {
     );
     commands.entity(clear).observe(on_platform_clear);
     commands.entity(motion).add_child(clear);
+
+    let curve_row = commands
+        .spawn(Node {
+            width: percent(100),
+            flex_direction: FlexDirection::Row,
+            column_gap: px(4),
+            margin: UiRect::top(px(4)),
+            ..default()
+        })
+        .id();
+    let add_pt = platform_button(
+        commands,
+        CurveAddPointButton,
+        PlatformStaticLabel,
+        "+ Point",
+    );
+    commands.entity(add_pt).observe(on_curve_add_point);
+    let rem_pt = platform_button(
+        commands,
+        CurveRemovePointButton,
+        PlatformStaticLabel,
+        "- Point",
+    );
+    commands.entity(rem_pt).observe(on_curve_remove_point);
+    commands.entity(curve_row).add_children(&[add_pt, rem_pt]);
+    commands.entity(motion).add_child(curve_row);
+
     commands.entity(body).add_child(motion);
 
     // Interact section: what happens when the player presses E / Interact
@@ -765,6 +800,57 @@ pub(super) fn spawn_properties_panel(commands: &mut Commands) -> Entity {
     commands.entity(body).add_child(interact);
     commands.entity(panel).add_child(scroll_body);
     panel
+}
+
+fn on_curve_add_point(
+    event: On<Activate>,
+    buttons: Query<&CurveAddPointButton>,
+    mut editor: ResMut<Editor>,
+    mut movers: ResMut<Movers>,
+) {
+    if buttons.get(event.entity).is_err() {
+        return;
+    }
+    let Some(id) = editor.selection.primary() else {
+        return;
+    };
+    if let Some(piece) = editor.pieces.iter().find(|p| p.id == id).cloned() {
+        super::movers::ensure_glade_wall_mover(&piece, &mut movers);
+    }
+    let Some(mover) = movers.map.get(&id) else {
+        return;
+    };
+    if mover.waypoints.len() < 2 {
+        return;
+    }
+    let max_seg = mover.waypoints.len().saturating_sub(2);
+    let seg = mover.selected.map_or(max_seg, |s| s.min(max_seg));
+    editor.commit();
+    super::movers::insert_mover_waypoint(&mut editor, &mut movers, seg);
+}
+
+fn on_curve_remove_point(
+    event: On<Activate>,
+    buttons: Query<&CurveRemovePointButton>,
+    mut editor: ResMut<Editor>,
+    mut movers: ResMut<Movers>,
+) {
+    if buttons.get(event.entity).is_err() {
+        return;
+    }
+    let Some(id) = editor.selection.primary() else {
+        return;
+    };
+    let Some(mover) = movers.map.get_mut(&id) else {
+        return;
+    };
+    if mover.selected.is_none() && mover.waypoints.len() > 2 {
+        mover.selected = Some(mover.waypoints.len() - 2);
+    }
+    editor.commit();
+    if !super::movers::delete_selected_mover_waypoint(&mut editor, &mut movers) {
+        editor.note = "minimum 2 curve points required";
+    }
 }
 
 pub(super) fn on_properties_collapse(
@@ -978,6 +1064,8 @@ pub(super) fn on_trigger_shape(
         editor.hard_dirty = true;
         editor.note = if shape_opt.is_some_and(|s| s.id == "glade_terrain") {
             "terrain profile updated"
+        } else if shape_opt.is_some_and(|s| s.id == "glade_tree") {
+            "tree species updated"
         } else {
             "roof style updated"
         };
@@ -1294,7 +1382,10 @@ pub(super) fn apply_property_edits(
     }
     let old_piece = editor.pieces[index];
     field.set(&mut editor.pieces[index], value);
-    if matches!(field, PropertyField::TriggerWidth | PropertyField::TriggerLength) {
+    if matches!(
+        field,
+        PropertyField::TriggerWidth | PropertyField::TriggerLength
+    ) {
         let new_piece = editor.pieces[index];
         crate::glade::pin_doors_on_glade_resize(&old_piece, &new_piece, &mut editor.pieces);
     }
@@ -1501,7 +1592,11 @@ pub(super) fn sync_properties_panel(
     } else {
         format!("Interact: {}", piece.interact.label())
     };
-    if let Some(mover) = editor.selection.primary().and_then(|id| movers.map.get(&id)) {
+    if let Some(mover) = editor
+        .selection
+        .primary()
+        .and_then(|id| movers.map.get(&id))
+    {
         mode_label.0 = format!(
             "Mode: {} ({} wp)",
             mover.mode.label(),
@@ -1527,6 +1622,9 @@ pub(super) fn sync_properties_panel(
             if shape.id == "glade_terrain" {
                 let style = crate::glade::terrain_style(&piece);
                 trigger_shape_label.0 = format!("Terrain: {}", style.label());
+            } else if shape.id == "glade_tree" {
+                let style = crate::glade::tree_style(&piece);
+                trigger_shape_label.0 = format!("Tree: {}", style.label());
             } else {
                 let style = crate::glade::roof_style(&piece, shape);
                 trigger_shape_label.0 = format!("Roof: {}", style.label());

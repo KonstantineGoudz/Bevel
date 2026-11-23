@@ -43,12 +43,100 @@
     </style>
   </head>
   <body>
-    <div id="loading">Loading map…</div>
+    <div id="loading">Loading the shared world…</div>
     <canvas id="bevy"></canvas>
     <pre id="error"></pre>
-    <a id="back" href="./" hidden>Back to maps</a>
+    <a id="back" href="./" hidden>Back</a>
     <script type="module">
-      import init from "./pkg/party_dungeon.js";
+      // Build stamp and package location — the cache key for the wasm bundle.
+      //
+      // `scripts/build-web.sh` publishes one directory per build
+      // (`pkg/<stamp>/party_dungeon.js` + `.wasm`) and points `pkg/build.json`
+      // at the live one. The manifest is fetched with `no-store`, so this page
+      // always learns the current build; the package directory is served
+      // `immutable` (web/nginx.conf), so a reload of an unchanged build
+      // transfers nothing, and a new build is a new URL — the module is
+      // downloaded exactly once, and can never be mixed with an old JS glue or
+      // a half-finished deploy. The same stamp is compiled into the wasm
+      // (`CLIENT_BUILD`, printed in the in-game HUD), so a screenshot names the
+      // build the browser is actually running.
+      const readBuildStamp = async () => {
+        try {
+          const response = await fetch("./pkg/build.json", { cache: "no-store" });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const manifest = await response.json();
+          if (typeof manifest?.build === "string" && manifest.build.length > 0) {
+            return manifest.build;
+          }
+          throw new Error("build.json has no build stamp");
+        } catch (error) {
+          // Hand-copied pkg or an older layout: fall back to the flat paths with
+          // a unique query so a stale cache can never be served. Costs a
+          // re-download, which is the safe direction.
+          console.warn("pkg/build.json unavailable; falling back to uncached paths.", error);
+          return null;
+        }
+      };
+
+      const BUILD = await readBuildStamp();
+      window.DUNGEON_BUILD = BUILD;
+      const PKG = BUILD ? `./pkg/${encodeURIComponent(BUILD)}` : "./pkg";
+      const VERSION = BUILD ? "" : `?v=dev-${Date.now()}`;
+      const { default: init } = await import(`${PKG}/party_dungeon.js${VERSION}`);
+
+      // Signaling endpoint. Browsers have no env vars, so derive it from the
+      // page host: `/party-dungeon` is proxied to the sim's signaling server
+      // (:6536) on the same origin, which avoids mixed-content and CORS. The
+      // path is the matchbox room id and MUST match the host's URL
+      // (`ws://sim:6536/party-dungeon`), or host and clients sit in different
+      // rooms. Override with `?signal=wss://host:port/party-dungeon`.
+      {
+        const override = new URLSearchParams(window.location.search).get("signal");
+        const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const host = window.location.hostname;
+        // Served from localhost? `serve-web.py` is a static file server, not a
+        // WebSocket proxy, so the same-origin path would 404. Point straight at
+        // the sim's signaling port instead (the compose stack publishes 6536).
+        const local =
+          host === "localhost" ||
+          host === "127.0.0.1" ||
+          host === "[::1]" ||
+          host === "::1";
+        window.DUNGEON_SIGNAL_URL =
+          override ||
+          (local
+            ? `${proto}//${host}:6536/party-dungeon`
+            : `${proto}//${window.location.host}/party-dungeon`);
+
+        // Same story for the auth API (login/signup/refresh): same origin in
+        // production, the sim's own port on a dev box. `?auth=` overrides both.
+        const authOverride = new URLSearchParams(window.location.search).get("auth");
+        window.DUNGEON_AUTH_API_URL =
+          authOverride ||
+          (local ? `http://${host}:6565` : window.location.origin);
+
+        // Optional WebRTC relay configuration (JSON array of
+        // `{urls, username, credential}`), the browser `RTCConfiguration`
+        // shape. The built-in STUN servers cannot cross a carrier-grade NAT
+        // (mobile data) or a strict firewall; a TURN relay can. Set this — or
+        // pass `?ice=...` — when the HUD reports that the world server was
+        // found but the direct link could not be established. The sim host
+        // needs the same list in its `DUNGEON_ICE_SERVERS` environment.
+        // See docs/multiplayer-connectivity.md.
+        const iceOverride = new URLSearchParams(window.location.search).get("ice");
+        // This deployment's relays (coturn on the play host): the public one
+        // (`:3478` on the WAN address) for mobile data, and a LAN-only one
+        // (`:3479`, advertised as the LAN address) for devices on the same
+        // Wi-Fi — the router does not hairpin public addresses back inside the
+        // LAN, so the public relay is unreachable from a LAN client. Both are
+        // the same static TURN user; credentials are client-visible by design,
+        // rotate them on the coturn containers and here together. `?ice=...`
+        // overrides for debugging.
+        const defaultIceServers =
+          '[{"urls":["stun:stun.l.google.com:19302"]},{"urls":["turn:173.56.238.138:3478?transport=udp","turn:173.56.238.138:3478?transport=tcp","turn:192.168.0.143:3479?transport=udp"],"username":"party","credential":"e25350bef60b35d76dbdc80571c702d3"}]';
+        window.DUNGEON_ICE_SERVERS =
+          iceOverride || window.DUNGEON_ICE_SERVERS || defaultIceServers;
+      }
 
       const showError = (message) => {
         const box = document.getElementById("error");
@@ -73,40 +161,33 @@
         showError(`Failed to start:\n\n${event?.reason}`);
       });
 
-      const id = new URLSearchParams(window.location.search).get("session");
-      if (!id) {
-        showError("Choose a map from the maps page before opening the editor.");
-      } else {
-        let hasSession;
-        try {
-          hasSession = localStorage.getItem(`party-dungeon.session.${id}.v1`) !== null;
-        } catch (error) {
-          showError("Browser storage is unavailable; the map cannot be opened.");
-          console.error("Could not read the saved map from browser storage.", error);
+      init(`${PKG}/party_dungeon_bg.wasm${VERSION}`)
+        .then(() => {
+          document.getElementById("loading")?.setAttribute("hidden", "");
+        })
+        .catch((err) => {
+          showError(`Failed to start the wasm build:\n\n${err}`);
+          console.error(err);
+        });
+      // The back/forward cache restores this page — and the wasm it already
+      // loaded — exactly as it was, even after a new build shipped. Re-check the
+      // stamp on a restore and reload only when the deployed build changed.
+      window.addEventListener("pageshow", (event) => {
+        if (!event.persisted) return;
+        readBuildStamp().then((latest) => {
+          if (latest && latest !== BUILD) window.location.reload();
+        });
+      });
+      // Slow connections and phones can take a while to fetch and compile
+      // the wasm module. Say so instead of going black: once the app
+      // boots it hides the overlay itself.
+      setTimeout(() => {
+        const loading = document.getElementById("loading");
+        if (loading && !loading.hasAttribute("hidden")) {
+          loading.textContent =
+            "Still loading — fetching and compiling the game (up to a minute on slow connections)…";
         }
-        if (hasSession === false) {
-          showError("This map is not available in browser storage.");
-        } else if (hasSession === true) {
-          init()
-            .then(() => {
-              document.getElementById("loading")?.setAttribute("hidden", "");
-            })
-            .catch((err) => {
-              showError(`Failed to start the wasm build:\n\n${err}`);
-              console.error(err);
-            });
-          // Slow connections and phones can take a while to fetch and compile
-          // the wasm module. Say so instead of going black: once the app
-          // boots it hides the overlay itself.
-          setTimeout(() => {
-            const loading = document.getElementById("loading");
-            if (loading && !loading.hasAttribute("hidden")) {
-              loading.textContent =
-                "Still loading — fetching and compiling the game (up to a minute on slow connections)…";
-            }
-          }, 12000);
-        }
-      }
+      }, 12000);
     </script>
   </body>
 </html>

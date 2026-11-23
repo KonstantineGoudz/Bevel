@@ -6,7 +6,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+#[cfg(not(target_os = "android"))]
 use bevy::clipboard::Clipboard;
+#[cfg(target_os = "android")]
+use crate::android_clipboard::Clipboard;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::input::touch::Touches;
 use bevy::input_focus::InputFocus;
@@ -17,7 +20,7 @@ use bevy::picking::events::{
 use bevy::picking::pointer::{PointerButton, PointerId};
 use bevy::prelude::*;
 use bevy::shape::InfinitePlane3d;
-use bevy::ui_widgets::{Activate, Button};
+use bevy::ui_widgets::{Activate, ActivateOnPress, Button};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 use bevy_rapier3d::prelude::*;
 
@@ -33,6 +36,8 @@ use crate::path::Hex;
 use crate::path_edit::{self, PathDrag, PathHandle, Plan, TangentSide};
 use crate::session;
 use crate::statuses::Health;
+
+use party_dungeon_net::PlayerState;
 
 use selection::Selection;
 
@@ -75,15 +80,24 @@ const ELEVATION_SNAP: f32 = 0.2;
 const PILL_COLOR: Color = Color::srgb_u8(0x3f, 0xd0, 0xb0);
 const BAR_BG: Color = Color::srgba(0.04, 0.05, 0.07, 0.82);
 /// Eye height and capsule dimensions, in metres.
+///
+/// Public for the headless server simulation, which builds the same capsule.
 const EYE_HEIGHT: f32 = 1.55;
-const PILL_RADIUS: f32 = 0.32;
-const PILL_CYLINDER: f32 = 1.1;
-const PILL_HALF: f32 = PILL_CYLINDER * 0.5 + PILL_RADIUS;
+pub const PILL_RADIUS: f32 = 0.32;
+pub const PILL_CYLINDER: f32 = 1.1;
+pub const PILL_HALF: f32 = PILL_CYLINDER * 0.5 + PILL_RADIUS;
 /// Walking pace, in metres per second.
-const WALK_SPEED: f32 = 2.2;
+///
+/// Public for the headless server simulation (shared tuning).
+pub const WALK_SPEED: f32 = 2.2;
 /// Gravity, in m/s^2. A little above earth so the character does not float.
-const GRAVITY: f32 = 18.0;
-const JUMP_SPEED: f32 = 7.0;
+///
+/// Public for the headless server simulation (shared tuning).
+pub const GRAVITY: f32 = 18.0;
+/// Takeoff velocity, in m/s.
+///
+/// Public for the headless server simulation (shared tuning).
+pub const JUMP_SPEED: f32 = 7.0;
 /// Touch stick geometry, in logical pixels.
 const STICK_BASE: f32 = 132.0;
 const STICK_MARGIN: f32 = 20.0;
@@ -98,18 +112,21 @@ pub struct EditorPlugin;
 
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(crate::grass_material::GrassShaderPlugin)
-            .init_resource::<Editor>()
+        app            .init_resource::<Editor>()
+            // Android builds have no system clipboard (arboard has no
+            // Android backend), so the stub resource is provided here; on
+            // other platforms Bevy already inserted the real one and this
+            // is a no-op.
+            .init_resource::<Clipboard>()
             .init_resource::<Cursor>()
             .init_resource::<Orbit>()
-            .init_resource::<LastSaved>()
-            .init_resource::<SaveClock>()
             .init_resource::<PointerCapture>()
             .init_resource::<Visuals>()
             // One UI unit per logical pixel unless a phone display scales it
             // down; a zero scale would put the stick centre off screen.
             .insert_resource(TouchState {
                 ui_scale: 1.0,
+                enabled: cfg!(target_os = "android"),
                 ..Default::default()
             })
             .init_resource::<PathGesture>()
@@ -118,28 +135,37 @@ impl Plugin for EditorPlugin {
             .init_resource::<PropertyEditState>()
             .init_resource::<DamageClock>()
             .init_resource::<Movers>()
+            .init_resource::<world_sync::WorldSync>()
+            // Authoritative world edits staged for the net layer (also
+            // initialized there; headless editor tests have no net plugin).
+            .init_resource::<crate::net_client::PendingWorldEdits>()
             .init_resource::<AddMenu>()
             .init_resource::<Minimap>()
-            .init_resource::<GrassVisuals>()
+            .init_resource::<VineVisuals>()
             .init_resource::<WorldTerrainVisuals>()
             .init_resource::<OutlinerState>()
             .init_resource::<OutlinerEdit>()
             .init_resource::<PropertiesPanelState>()
             .init_resource::<RightPanelState>()
+            .init_resource::<LeftPanelState>()
             .init_resource::<HomeMenu>()
+            // Ordering anchors for the net layer's authoritative-pose
+            // correction (see `PlayController`/`CameraFollow`): it must run
+            // after the play controller and before the camera follows.
+            .configure_sets(Update, (PlayController, CameraFollow))
             // Remappable controls, loaded from browser storage on web.
             .insert_resource(crate::controls::Controls::load())
             .add_systems(
                 Startup,
                 (
                     character::load_character_model,
-                    load_session,
                     setup,
                     setup_wasm_text_input,
                     setup_bridge,
                 )
                     .chain(),
             )
+            .add_systems(Update, sync_selected_glade_wall_mover.after(prune_movers))
             .add_systems(
                 Update,
                 (
@@ -154,18 +180,19 @@ impl Plugin for EditorPlugin {
                     flush_platform_requests,
                     prune_movers,
                     move_movers,
-                    character_move,
+                    character_move.in_set(PlayController),
                     hazard_damage,
                     handle_interact,
                     respawn_on_death,
                     manage_capture,
-                    camera_control,
+                    camera_control.in_set(CameraFollow),
                     path_drag,
                     rebuild_nav,
                     refresh_route,
                 )
                     .chain(),
             )
+            .add_systems(Update, sync_selected_glade_wall_mover.after(prune_movers))
             // The second half is ordered after `refresh_route` rather than in
             // the same tuple: Bevy's tuple system sets top out before this many
             // systems.
@@ -181,7 +208,6 @@ impl Plugin for EditorPlugin {
                     touch_gizmo_fallback,
                     sync_wasm_text_input,
                     update_add_menu,
-                    save_shortcut,
                     interact,
                     apply_property_edits,
                     sync_visuals,
@@ -194,6 +220,18 @@ impl Plugin for EditorPlugin {
                     .after(refresh_route),
             )
             .add_systems(Update, camera_occlusion.after(camera_control))
+            // Streamed worlds (single unified MMO world): runs rarely, on its
+            // own so tuple limits elsewhere are untouched. The edit diff runs
+            // right after, so an apply reconciles net outcomes and stages the
+            // editor's state before composing.
+            .add_systems(
+                Update,
+                (
+                    world_sync::apply_world_chunks,
+                    world_sync::sync_world_edits,
+                )
+                    .chain(),
+            )
             // Character model + animation. Its own chain so the editor's
             // tuples stay under Bevy's limit; it runs after `sync_visuals` has
             // spawned or despawned the capsule root.
@@ -239,6 +277,7 @@ impl Plugin for EditorPlugin {
                     sync_properties_chrome,
                     sync_properties_panel,
                     sync_right_panel,
+                    sync_left_panel,
                     properties_scroll,
                     sync_transparency_slider,
                     sync_trigger_color_buttons,
@@ -251,24 +290,18 @@ impl Plugin for EditorPlugin {
                     update_status,
                     update_touch_status,
                     update_character_status,
-                    sync_grass,
                     draw,
                     draw_view_cone,
-                    autosave_session,
                 )
                     .chain()
                     .after(sync_visuals),
             )
-            // Native home screen (maps + controls). Its own chain so the
+            .add_systems(Update, sync_bezier_control_meshes.after(draw))
+            // Native home screen (controls). Its own chain so the
             // editor chains stay under Bevy's tuple limit.
             .add_systems(
                 Update,
-                (
-                    sync_world_terrain,
-                    sync_grass_shader_uniforms,
-                    sync_home_menu,
-                    sync_home_name_field,
-                )
+                (sync_world_terrain, sync_vine_actions, sync_vines, sync_home_menu)
                     .chain()
                     .after(sync_visuals),
             )
@@ -276,14 +309,24 @@ impl Plugin for EditorPlugin {
             // the editor, then publish the fresh snapshot.
             .add_systems(
                 Update,
-                (bridge_drain, bridge_publish)
-                    .chain()
-                    .after(autosave_session),
+                (bridge_drain, bridge_publish).chain(),
             )
             .add_observer(on_palette_activate)
             .add_observer(on_touch_button)
             .add_observer(on_add_menu_item)
             .add_observer(on_home_button);
+
+        // Replicon path: pull the local body toward the replicated player pose,
+        // in the same slot as the legacy `net_pose_correction` (after the local
+        // controller, before the camera follows it). Registered here because it
+        // needs the editor's `Editor`/`Orbit` resources.
+        #[cfg(feature = "replicon")]
+        app.add_systems(
+            Update,
+            replicon_pose_correction
+                .after(PlayController)
+                .before(CameraFollow),
+        );
 
         gizmo::configure_xray_gizmos(app);
         minimap::configure_minimap_gizmos(app);
@@ -295,12 +338,7 @@ impl Plugin for EditorPlugin {
 // ---------------------------------------------------------------------------
 
 #[derive(Resource)]
-struct Editor {
-    session: Option<String>,
-    /// Native level name (file stem in the levels dir) and the file it was
-    /// loaded from. Wasm leaves both `None` and uses `session` instead.
-    level_name: Option<String>,
-    level_path: Option<std::path::PathBuf>,
+pub(crate) struct Editor {
     pieces: Vec<Piece>,
     /// User labels, groups, and group membership layered over the pieces.
     outline: SceneOutline,
@@ -345,6 +383,10 @@ struct Editor {
     grass_slows: bool,
     /// The grass brush removes instead of paints while set.
     grass_erase: bool,
+    /// Hex radius of the grass brush (`0` = 1 hex, `1` = 7 hexes, `2` = 19, `3` = 37).
+    grass_brush_radius: u8,
+    /// Density step added/removed per grass brush dab (`1..=GRASS_MAX`).
+    grass_brush_strength: u8,
     /// Bumped on every grass change so the tuft visuals rebuild.
     grass_rev: u64,
     /// An open paint stroke: set while the brush is down. The stroke commits
@@ -354,6 +396,18 @@ struct Editor {
     grass_stroke_dirty: bool,
     /// Last dabbed hex this stroke, so holding still does not repaint.
     grass_dab: Option<Hex>,
+    /// Painted procedural 3D vines anchored to surfaces.
+    vines: Vec<VineNode>,
+    /// The vine brush removes instead of paints while set.
+    vine_erase: bool,
+    /// Bumped on every vine change so the batched vine meshes rebuild.
+    vine_rev: u64,
+    /// An open vine paint/erase stroke.
+    vine_stroke: bool,
+    /// Whether the open vine stroke changed anything yet.
+    vine_stroke_dirty: bool,
+    /// Last painted vine dab world position in the current stroke.
+    vine_last_pos: Option<Vec3>,
     /// Active continuous Tiny Glade terrain brush stroke.
     terrain_stroke: bool,
     /// Whether the open terrain brush stroke modified any terrain yet.
@@ -366,37 +420,28 @@ struct Editor {
     platform_request: Option<(u32, Vec2)>,
 }
 
+/// One painted procedural vine anchor on a 3D surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VineNode {
+    pub pos: Vec3,
+    pub normal: Vec3,
+    pub seed: u32,
+}
+
 /// One undo step: the level geometry plus its authoring metadata, so grouping
-/// and labels undo alongside placement, transforms and deletes. Grass rides
-/// along so one undo step removes one paint stroke.
+/// and labels undo alongside placement, transforms and deletes. Grass and vines
+/// ride along so one undo step removes one paint stroke.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct LevelState {
     pub(crate) pieces: Vec<Piece>,
     pub(crate) outline: SceneOutline,
     pub(crate) grass: HashMap<Hex, u8>,
-}
-
-#[derive(Clone, PartialEq)]
-struct Seen {
-    orbit: Orbit,
-    character: Option<Character>,
-}
-
-#[derive(Resource, Default)]
-struct LastSaved(Option<Seen>);
-
-#[derive(Resource, Default)]
-struct SaveClock {
-    last_save: f64,
-    retry_at: f64,
+    pub(crate) vines: Vec<VineNode>,
 }
 
 impl Default for Editor {
     fn default() -> Self {
         Self {
-            session: None,
-            level_name: None,
-            level_path: None,
             pieces: Vec::new(),
             outline: SceneOutline::default(),
             tool: None,
@@ -426,10 +471,18 @@ impl Default for Editor {
             grass: HashMap::new(),
             grass_slows: false,
             grass_erase: false,
+            grass_brush_radius: 1,
+            grass_brush_strength: 1,
             grass_rev: 0,
             grass_stroke: false,
             grass_stroke_dirty: false,
             grass_dab: None,
+            vines: Vec::new(),
+            vine_erase: false,
+            vine_rev: 0,
+            vine_stroke: false,
+            vine_stroke_dirty: false,
+            vine_last_pos: None,
             terrain_stroke: false,
             terrain_stroke_dirty: false,
             terrain_stroke_target_h: 2.5,
@@ -448,6 +501,7 @@ enum ActorTool {
     Plan,
     Platform,
     Grass,
+    Vine,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -901,9 +955,16 @@ impl Editor {
                 .collect(),
             grass,
             grass_slows: self.grass_slows,
+            vines: self.vines.iter().map(session::SavedVine::from).collect(),
         }
     }
 
+    /// Replace the whole local world from a validated snapshot.
+    ///
+    /// The live world arrives as streamed cells (`editor/world_sync.rs`), which
+    /// installs incrementally and preserves session state; this wholesale form
+    /// is what level seeding and the editor tests use.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn apply_loaded(&mut self, orbit: &mut Orbit, movers: &mut Movers, loaded: session::Loaded) {
         self.pieces = loaded.pieces;
         self.outline = loaded.outline;
@@ -915,6 +976,8 @@ impl Editor {
         self.grass = loaded.grass;
         self.grass_slows = loaded.grass_slows;
         self.grass_rev = self.grass_rev.wrapping_add(1);
+        self.vines = loaded.vines;
+        self.vine_rev = self.vine_rev.wrapping_add(1);
         if let Some(camera) = loaded.camera {
             *orbit = camera;
         }
@@ -963,6 +1026,8 @@ impl Editor {
         self.redo.clear();
         self.grass.clear();
         self.grass_rev = self.grass_rev.wrapping_add(1);
+        self.vines.clear();
+        self.vine_rev = self.vine_rev.wrapping_add(1);
         self.hard_dirty = true;
         self.note = "course: walk straight, up the ramp, over the block, drop";
     }
@@ -972,6 +1037,7 @@ impl Editor {
             pieces: self.pieces.clone(),
             outline: self.outline.clone(),
             grass: self.grass.clone(),
+            vines: self.vines.clone(),
         }
     }
 
@@ -995,6 +1061,8 @@ impl Editor {
             self.outline = prev.outline;
             self.grass = prev.grass;
             self.grass_rev = self.grass_rev.wrapping_add(1);
+            self.vines = prev.vines;
+            self.vine_rev = self.vine_rev.wrapping_add(1);
             // Keep the UI's rebuild counter monotonic across history moves.
             self.outline.revision = revision.wrapping_add(1);
             self.selection.clear();
@@ -1013,6 +1081,8 @@ impl Editor {
             self.outline = next.outline;
             self.grass = next.grass;
             self.grass_rev = self.grass_rev.wrapping_add(1);
+            self.vines = next.vines;
+            self.vine_rev = self.vine_rev.wrapping_add(1);
             self.outline.revision = revision.wrapping_add(1);
             self.selection.clear();
             self.hard_dirty = true;
@@ -1092,6 +1162,10 @@ struct PathActions;
 #[derive(Component)]
 struct GrassActions;
 
+/// Desktop vine row (erase toggle), shown while Vine is armed.
+#[derive(Component)]
+struct VineActions;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PaletteAction {
     Build,
@@ -1107,6 +1181,11 @@ enum PaletteAction {
     Grass,
     GrassErase,
     GrassSlow,
+    GrassSize,
+    GrassDensity,
+    GrassClear,
+    Vine,
+    VineErase,
     Course,
     /// Copy the level JSON for debugging. This is not a level edit.
     CopyJson,
@@ -1126,7 +1205,7 @@ struct CharacterVisual;
 
 /// Marker for the main 3D camera (as opposed to the minimap camera).
 #[derive(Component)]
-struct MainCamera;
+pub(crate) struct MainCamera;
 
 /// Marks a UI root as belonging to the desktop or the touch layer.
 #[derive(Component)]
@@ -1219,27 +1298,170 @@ struct Kit {
     cone: Handle<Mesh>,
     cone_mat: Handle<StandardMaterial>,
     character_collider: Collider,
-    /// Baked grass tuft cluster, shared by every grassy hex.
-    grass: Handle<Mesh>,
-    /// Two green tints, picked per hex so the sward varies.
-    grass_mats: [Handle<crate::grass_material::GrassMaterial>; 2],
+    /// Woody bark material for painted procedural vine stems.
+    vine_stem_mat: Handle<StandardMaterial>,
+    /// Ivy leaf material for painted procedural vines.
+    vine_leaf_mat: Handle<StandardMaterial>,
+}
+
+// ---------------------------------------------------------------------------
+// Networked local pose
+// ---------------------------------------------------------------------------
+
+/// The free play controller's Update system (`character_move`).
+///
+/// A system set rather than a bare system name so the net layer can order its
+/// authoritative-pose correction after the local controller without naming an
+/// editor-private system: the correction must run *after* the local collision
+/// step it pulls back, and *before* the camera follows the result.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct PlayController;
+
+/// The camera-follow system (`camera_control`).
+///
+/// Anything that moves the local character must land before this so the camera
+/// sees the frame's final pose (see [`PlayController`]).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct CameraFollow;
+
+/// Apply one authoritative self state (from a snapshot) to the local camera and
+/// character.
+///
+/// Returns the correction that was applied, or `None` when the pose is not
+/// network-driven right now:
+/// * only [`Mode::Play`] — authoring modes keep their purely local body,
+/// * never while walking an authored route ([`Editor::walk`]) — that controller
+///   owns the capsule and its camera,
+/// * nothing to correct without a placed character.
+///
+/// The local controller still runs first every frame and keeps its collision
+/// feel; this only pulls its result back toward the state every other client
+/// sees (small errors blended, teleports snapped — see
+/// [`crate::net_client::correct_character_pose`]).
+pub(crate) fn apply_authoritative_pose(
+    editor: &mut Editor,
+    orbit: &mut Orbit,
+    state: &PlayerState,
+    dt: f32,
+) -> Option<crate::net_client::PoseCorrection> {
+    if editor.mode != Mode::Play || editor.walk.is_some() {
+        return None;
+    }
+    let character = editor.character.as_mut()?;
+    let before = character.pos;
+    let correction = crate::net_client::correct_character_pose(character, state, dt);
+    let after = character.pos;
+    // Follow the correction with the orbit centre so the third-person camera
+    // moves with the body instead of the world sliding under it — the same
+    // delta-follow `character_move` uses for movement it did not steer. First
+    // person derives its eye from `character.pos` directly, and top-down keeps
+    // the camera put (the pill visibly moves across the map), so only third
+    // person takes the delta.
+    if orbit.mode == ViewMode::Third {
+        let delta = after - before;
+        if delta != Vec2::ZERO {
+            orbit.target.x += delta.x;
+            orbit.target.z += delta.y;
+        }
+    }
+    Some(correction)
+}
+
+// The two world-sync systems are registered by [`EditorPlugin`] but the
+// replicon client adapter (a sibling module) must order itself around them:
+// it mirrors replicated piece entities into `WorldChunks` before the apply and
+// sends the staged edit queue right after the diff.
+// Only the replicon adapter orders itself around the streamed-world systems and
+// (in its tests) drives the compose/diff directly.
+#[cfg(feature = "replicon")]
+pub(crate) use world_sync::{
+    apply_world_chunks as apply_streamed_world, sync_world_edits as sync_streamed_edits,
+};
+// The replicon adapter's tests build a `WorldSync` to check the entity-to-editor
+// mapping; the plugin itself only orders around the systems above.
+#[cfg(all(feature = "replicon", test))]
+pub(crate) use world_sync::WorldSync;
+
+/// Replicated authoritative local pose (cargo feature `replicon`).
+///
+/// The replicon path has no snapshot feed: the server replicates the local
+/// player as an entity (`PlayerSub` + `PlayerPose`). `repl_client` decodes it
+/// into a [`party_dungeon_net::PlayerState`] stored in
+/// [`crate::repl_client::ReplicatedSelfPose`]; this system feeds that into the
+/// shared [`apply_authoritative_pose`] path, so the pose maths, snap threshold
+/// and third-person camera delta-follow are identical on both transports.
+///
+/// Registered by `repl_client::ReplClientPlugin` after [`PlayController`] (the
+/// local controller) and before [`CameraFollow`], exactly like the legacy
+/// `net_client::net_pose_correction`.
+#[cfg(feature = "replicon")]
+pub(crate) fn replicon_pose_correction(
+    mut editor: ResMut<Editor>,
+    mut orbit: ResMut<Orbit>,
+    pose: Option<Res<crate::repl_client::ReplicatedSelfPose>>,
+    client_state: Option<Res<State<bevy_replicon::prelude::ClientState>>>,
+    auth_state: Option<Res<crate::auth::AuthState>>,
+    time: Res<Time>,
+    mut last_snap_log: Local<f64>,
+) {
+    let signed_in = !crate::auth::auth_required()
+        || auth_state
+            .as_deref()
+            .is_some_and(|state| *state == crate::auth::AuthState::SignedIn);
+    if !signed_in {
+        return;
+    }
+    // Only a live replicated session has authoritative state; while
+    // connecting/disconnected the local controller owns the pose.
+    let connected = client_state
+        .as_deref()
+        .is_some_and(|state| *state.get() == bevy_replicon::prelude::ClientState::Connected);
+    if !connected {
+        return;
+    }
+    let Some(state) = pose.as_deref().and_then(|pose| pose.state.clone()) else {
+        return;
+    };
+    let Some(correction) = apply_authoritative_pose(
+        &mut editor,
+        &mut orbit,
+        &state,
+        time.delta_secs(),
+    ) else {
+        return;
+    };
+    // One line per second for a visible pop (teleport, respawn, bad
+    // prediction), mirroring the legacy path's rate-limited log.
+    if correction.snapped {
+        let now = time.elapsed_secs_f64();
+        if now - *last_snap_log >= 1.0 {
+            *last_snap_log = now;
+            bevy::log::info!(
+                "local pose corrected by {:.2} m (snapped; client build {})",
+                correction.distance,
+                crate::net_client::CLIENT_BUILD
+            );
+        }
+    }
 }
 
 mod add_menu;
-mod bridge;
+pub(crate) mod bridge;
 mod camera;
 mod character;
-mod colliders;
+/// Public for the headless server simulation (shared collider builders).
+pub mod colliders;
 mod draw;
 mod editing;
 mod gizmo;
 mod grass;
-mod hazards;
+pub mod hazards;
 mod home;
 mod hud;
 mod input;
+mod left_panel;
 mod interacts;
-mod minimap;
+pub(crate) mod minimap;
 mod movers;
 pub(crate) mod outline;
 mod outliner;
@@ -1254,8 +1476,11 @@ mod setup;
 mod shooting;
 mod touch;
 mod transform;
+mod vines;
+mod world_sync;
 mod visuals;
-mod walking;
+/// Public for the headless server simulation (shared locomotion maths).
+pub mod walking;
 
 use add_menu::*;
 use bridge::*;
@@ -1269,6 +1494,7 @@ use hazards::*;
 use home::*;
 use hud::*;
 use input::*;
+use left_panel::*;
 use interacts::*;
 use minimap::*;
 use movers::*;
@@ -1284,8 +1510,184 @@ use setup::*;
 use shooting::*;
 use touch::*;
 use transform::*;
+use vines::*;
 use visuals::*;
 use walking::*;
 
 #[cfg(test)]
 mod tests;
+
+/// Unit tests for the authoritative local pose (`net_client`'s
+/// `net_pose_correction` calling [`apply_authoritative_pose`]). Live in this
+/// file because the gating reads `Editor`/`Mode`/`walk`, which are private to
+/// the editor module; the pose maths itself is tested in `net_client`.
+#[cfg(test)]
+mod net_pose_tests {
+    use super::*;
+
+    fn character_at(pos: Vec2) -> Character {
+        Character {
+            pos,
+            feet: 0.0,
+            yaw: 0.0,
+            vy: 0.0,
+            hv: Vec2::ZERO,
+            ride_vel: Vec2::ZERO,
+            grounded: true,
+            sliding: false,
+            health: Health::default(),
+        }
+    }
+
+    fn self_state(x: f32, y: f32, z: f32, yaw: f32) -> PlayerState {
+        PlayerState {
+            sub: "me".to_string(),
+            name: "Me".to_string(),
+            x,
+            y,
+            z,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 0.0,
+            yaw,
+            hp: 100.0,
+            max_hp: 100.0,
+            alive: true,
+            online: true,
+        }
+    }
+
+    fn play_editor(pos: Vec2) -> Editor {
+        let mut editor = Editor::default();
+        editor.mode = Mode::Play;
+        editor.character = Some(character_at(pos));
+        editor
+    }
+
+    #[test]
+    fn a_small_error_is_blended_and_the_camera_follows() {
+        let mut editor = play_editor(Vec2::ZERO);
+        let mut orbit = Orbit::default();
+        orbit.mode = ViewMode::Third;
+        orbit.target = Vec3::ZERO;
+        let state = self_state(0.4, 0.0, -0.2, 0.5);
+
+        let correction = apply_authoritative_pose(&mut editor, &mut orbit, &state, 1.0 / 60.0)
+            .expect("play mode with a character is corrected");
+
+        assert!(!correction.snapped);
+        assert!((correction.distance - 0.4f32.hypot(0.2)).abs() < 1e-5);
+        let character = editor.character.expect("character");
+        // Blended toward the snapshot, not snapped onto it.
+        assert!(
+            character.pos.x > 0.0 && character.pos.x < 0.4,
+            "pos {:?} should blend toward 0.4",
+            character.pos
+        );
+        assert!(character.pos.y < 0.0 && character.pos.y > -0.2);
+        assert_eq!(character.yaw, 0.5, "facing is applied exactly");
+        // The camera follows the same delta, so the correction does not slide
+        // the world under the camera.
+        assert!((orbit.target.x - character.pos.x).abs() < 1e-6);
+        assert!((orbit.target.z - character.pos.y).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_teleport_snaps_pose_facing_health_and_alive() {
+        let mut editor = play_editor(Vec2::new(1.0, 2.0));
+        let mut orbit = Orbit::default();
+        orbit.mode = ViewMode::Third;
+        orbit.target = Vec3::new(1.0, 0.0, 2.0);
+        let mut state = self_state(-8.0, 3.5, 4.0, -1.2);
+        state.vx = 1.5;
+        state.vz = -2.5;
+        state.vy = -3.0;
+        state.hp = 35.0;
+        state.max_hp = 80.0;
+
+        let correction = apply_authoritative_pose(&mut editor, &mut orbit, &state, 1.0 / 60.0)
+            .expect("corrected");
+
+        assert!(correction.snapped, "a 10 m jump must snap, not blend");
+        let character = editor.character.expect("character");
+        assert_eq!(character.pos, Vec2::new(-8.0, 4.0));
+        assert_eq!(character.feet, 3.5);
+        assert_eq!(character.hv, Vec2::new(1.5, -2.5));
+        assert_eq!(character.vy, -3.0);
+        assert_eq!(character.yaw, -1.2);
+        assert_eq!(character.health.current, 35.0);
+        assert_eq!(character.health.max, 80.0);
+        assert!(character.health.is_alive());
+        assert_eq!(
+            orbit.target,
+            Vec3::new(-8.0, 0.0, 4.0),
+            "the camera follows the snapped pose"
+        );
+    }
+
+    #[test]
+    fn a_dead_authoritative_state_kills_the_local_body() {
+        let mut editor = play_editor(Vec2::new(2.0, 2.0));
+        let mut orbit = Orbit::default();
+        let mut state = self_state(2.0, 0.0, 2.0, 0.0);
+        state.hp = 0.0;
+        state.alive = false;
+
+        apply_authoritative_pose(&mut editor, &mut orbit, &state, 1.0 / 60.0).expect("corrected");
+
+        let character = editor.character.expect("character");
+        assert_eq!(character.health.current, 0.0);
+        assert!(character.health.is_dead());
+    }
+
+    #[test]
+    fn authoring_modes_and_route_walking_are_left_alone() {
+        let state = self_state(9.0, 0.0, -3.0, 0.3);
+        let mut orbit = Orbit::default();
+
+        // Build mode: the capsule belongs to the editor, never to the net.
+        let mut editor = Editor::default();
+        editor.character = Some(character_at(Vec2::ZERO));
+        assert!(apply_authoritative_pose(&mut editor, &mut orbit, &state, 1.0 / 60.0).is_none());
+        assert_eq!(editor.character.expect("character").pos, Vec2::ZERO);
+
+        // Play, but the authored route owns the capsule and camera.
+        editor.mode = Mode::Play;
+        editor.walk = Some(Walk {
+            distance: 2.0,
+            stuck: 0.0,
+        });
+        assert!(apply_authoritative_pose(&mut editor, &mut orbit, &state, 1.0 / 60.0).is_none());
+        assert_eq!(editor.character.expect("character").pos, Vec2::ZERO);
+
+        // Play without a placed character: nothing to correct.
+        editor.walk = None;
+        editor.character = None;
+        assert!(apply_authoritative_pose(&mut editor, &mut orbit, &state, 1.0 / 60.0).is_none());
+    }
+
+    #[test]
+    fn the_pose_system_is_inert_without_a_net_client() {
+        let mut app = App::new();
+        app.init_resource::<Editor>();
+        app.init_resource::<Orbit>();
+        app.init_resource::<Time>();
+        app.init_resource::<crate::auth::AuthState>();
+        app.add_systems(Update, crate::net_client::net_pose_correction);
+        {
+            let mut editor = app.world_mut().resource_mut::<Editor>();
+            editor.mode = Mode::Play;
+            editor.character = Some(character_at(Vec2::new(3.0, -1.0)));
+        }
+
+        app.update();
+
+        // Without the net plugin there is no NetClient: the local pose is not
+        // touched even in Play mode.
+        let editor = app.world().resource::<Editor>();
+        assert_eq!(
+            editor.character.expect("character").pos,
+            Vec2::new(3.0, -1.0)
+        );
+    }
+}

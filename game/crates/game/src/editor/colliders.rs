@@ -40,25 +40,22 @@ fn wall_segment_collider_boxes(
         Vec2::ZERO
     };
 
-    let push_sub_box = |parts: &mut Vec<(Vec3, Quat, Collider)>,
-                        u0: f32,
-                        u1: f32,
-                        y0: f32,
-                        y1: f32| {
-        let sub_len = u1 - u0;
-        let sub_h = y1 - y0;
-        if sub_len < 0.04 || sub_h < 0.04 {
-            return;
-        }
-        let mid_u = (u0 + u1) * 0.5;
-        let center_2d = seg.p0 + tangent * mid_u + offset_2d;
-        let mid_y = (y0 + y1) * 0.5;
-        parts.push((
-            Vec3::new(center_2d.x, mid_y, center_2d.y),
-            rot,
-            Collider::cuboid(sub_len * 0.5, sub_h * 0.5, wall_depth * 0.5),
-        ));
-    };
+    let push_sub_box =
+        |parts: &mut Vec<(Vec3, Quat, Collider)>, u0: f32, u1: f32, y0: f32, y1: f32| {
+            let sub_len = u1 - u0;
+            let sub_h = y1 - y0;
+            if sub_len < 0.04 || sub_h < 0.04 {
+                return;
+            }
+            let mid_u = (u0 + u1) * 0.5;
+            let center_2d = seg.p0 + tangent * mid_u + offset_2d;
+            let mid_y = (y0 + y1) * 0.5;
+            parts.push((
+                Vec3::new(center_2d.x, mid_y, center_2d.y),
+                rot,
+                Collider::cuboid(sub_len * 0.5, sub_h * 0.5, wall_depth * 0.5),
+            ));
+        };
 
     if openings.is_empty() {
         push_sub_box(parts, 0.0, seg_len, seg.base_y, seg.top_y);
@@ -162,7 +159,11 @@ pub fn piece_collider_for_glade(
                 let offset_x = clear_w * 0.5 + jamb_w * 0.5;
                 let jamb = Collider::cuboid(jamb_w * 0.5, height * 0.5, ext.z * 0.5);
                 let mut parts = vec![
-                    (Vec3::new(-offset_x, mid, 0.0), Quat::default(), jamb.clone()),
+                    (
+                        Vec3::new(-offset_x, mid, 0.0),
+                        Quat::default(),
+                        jamb.clone(),
+                    ),
                     (Vec3::new(offset_x, mid, 0.0), Quat::default(), jamb),
                 ];
                 if height > 1.95 {
@@ -186,6 +187,8 @@ pub fn piece_collider_for_glade(
             Some(crate::glade::GladeKind::Wall) => {
                 let mut parts = Vec::new();
                 if let Some(spine) = wall_spine.filter(|pts| pts.len() >= 2) {
+                    let follows =
+                        crate::glade::wall_follows_terrain(piece, effective_pieces, spine);
                     for pair in spine.windows(2) {
                         let p0 = crate::glade::world_to_local_2d(piece, pair[0]);
                         let p1 = crate::glade::world_to_local_2d(piece, pair[1]);
@@ -194,14 +197,27 @@ pub fn piece_collider_for_glade(
                         if len < 0.05 {
                             continue;
                         }
+                        let y0 = if follows {
+                            crate::glade::world_terrain_height_at(pair[0], effective_pieces)
+                                - piece.elevation
+                        } else {
+                            0.0
+                        };
+                        let y1 = if follows {
+                            crate::glade::world_terrain_height_at(pair[1], effective_pieces)
+                                - piece.elevation
+                        } else {
+                            0.0
+                        };
+                        let mid_y = (y0 + y1) * 0.5;
                         let tangent = d / len;
                         let normal = Vec2::new(-tangent.y, tangent.x);
                         let seg = crate::glade::ExposedWallSegment {
                             p0,
                             p1,
                             normal,
-                            base_y: 0.0,
-                            top_y: height,
+                            base_y: mid_y,
+                            top_y: mid_y + height,
                             corner_start: false,
                             corner_end: false,
                             seam_start: false,
@@ -242,6 +258,55 @@ pub fn piece_collider_for_glade(
                         Quat::default(),
                         Collider::cuboid(ext.x * 0.5, height * 0.5, ext.z * 0.5),
                     )]));
+                }
+                return Some(Collider::compound(parts));
+            }
+            Some(crate::glade::GladeKind::Stairs) => {
+                let local_points: Vec<Vec2> =
+                    if let Some(spine) = wall_spine.filter(|pts| pts.len() >= 2) {
+                        spine
+                            .iter()
+                            .map(|&wp| crate::glade::world_to_local_2d(piece, wp))
+                            .collect()
+                    } else {
+                        let hl = ext.x * 0.5;
+                        vec![Vec2::new(-hl, 0.0), Vec2::new(hl, 0.0)]
+                    };
+                let mut cum = Vec::with_capacity(local_points.len());
+                cum.push(0.0_f32);
+                for pair in local_points.windows(2) {
+                    let prev = *cum.last().unwrap();
+                    cum.push(prev + pair[0].distance(pair[1]));
+                }
+                let total_len = (*cum.last().unwrap_or(&0.0)).max(0.05);
+                let half_w = ext.z * 0.5;
+                let slab_half_h = 0.14_f32;
+                let mut parts = Vec::new();
+                for (i, pair) in local_points.windows(2).enumerate() {
+                    let p0 = pair[0];
+                    let p1 = pair[1];
+                    let d = p1 - p0;
+                    let seg_len = d.length();
+                    if seg_len < 0.05 {
+                        continue;
+                    }
+                    let y0 = height * (cum[i] / total_len);
+                    let y1 = height * (cum[i + 1] / total_len);
+                    let dy = y1 - y0;
+                    let slope_len = (seg_len * seg_len + dy * dy).sqrt();
+                    let yaw = (-d.y).atan2(d.x);
+                    let pitch = dy.atan2(seg_len);
+                    let rot = Quat::from_rotation_y(yaw) * Quat::from_rotation_z(pitch);
+                    let mid_xz = (p0 + p1) * 0.5;
+                    let mid_y = (y0 + y1) * 0.5 - slab_half_h;
+                    parts.push((
+                        Vec3::new(mid_xz.x, mid_y, mid_xz.y),
+                        rot,
+                        Collider::cuboid(slope_len * 0.5 + 0.04, slab_half_h, half_w),
+                    ));
+                }
+                if parts.is_empty() {
+                    return Some(Collider::cuboid(ext.x * 0.5, height * 0.5, ext.z * 0.5));
                 }
                 return Some(Collider::compound(parts));
             }
@@ -324,7 +389,11 @@ pub fn piece_collider(shape: &model::Shape) -> Option<Collider> {
         let offset_x = clear_w * 0.5 + jamb_w * 0.5;
         let jamb = Collider::cuboid(jamb_w * 0.5, height * 0.5, thick * 0.5);
         let mut parts = vec![
-            (Vec3::new(-offset_x, mid, 0.0), Quat::default(), jamb.clone()),
+            (
+                Vec3::new(-offset_x, mid, 0.0),
+                Quat::default(),
+                jamb.clone(),
+            ),
             (Vec3::new(offset_x, mid, 0.0), Quat::default(), jamb),
         ];
         if height > 1.95 {

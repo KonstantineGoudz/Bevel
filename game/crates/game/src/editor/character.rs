@@ -369,11 +369,15 @@ pub(super) fn load_character_model(
     asset_server: Res<AssetServer>,
     gltf_assets: Option<Res<Assets<Gltf>>>,
 ) {
+    #[cfg(target_os = "android")]
+    let model_path = crate::android_assets::character_model_path();
+    #[cfg(not(target_os = "android"))]
+    let model_path = CHARACTER_MODEL_PATH;
     let model = if gltf_assets.is_some() {
         CharacterModel {
-            gltf: Some(asset_server.load(CHARACTER_MODEL_PATH)),
+            gltf: Some(asset_server.load(model_path.clone())),
             scene: Some(
-                asset_server.load(GltfAssetLabel::Scene(0).from_asset(CHARACTER_MODEL_PATH)),
+                asset_server.load(GltfAssetLabel::Scene(0).from_asset(model_path)),
             ),
             ..default()
         }
@@ -806,8 +810,8 @@ mod tests {
             pill_mat: Handle::default(),
             cone: Handle::default(),
             cone_mat: Handle::default(),
-            grass: Handle::default(),
-            grass_mats: [Handle::default(), Handle::default()],
+            vine_stem_mat: Handle::default(),
+            vine_leaf_mat: Handle::default(),
             character_collider: Collider::capsule_y(PILL_CYLINDER * 0.5, PILL_RADIUS),
         });
         app.insert_resource(CharacterModel::default());

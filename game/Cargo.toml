@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/game", "crates/mcp-server"]
+members = ["crates/game", "crates/mcp-server", "crates/server", "crates/server/clients/rust", "crates/net", "crates/sim", "crates/replication", "crates/repl_matchbox"]
 resolver = "3"
 
 [workspace.package]
@@ -30,3 +30,9 @@ inherits = "release"
 opt-level = "s"
 lto = true
 codegen-units = 1
+
+[patch.crates-io]
+wgpu-hal = { path = "crates/wgpu-hal" }
+# TEMPORARY (Adreno-840 grass diagnosis): local bevy_grass with a debug shader.
+bevy_grass = { path = "vendor/bevy_grass" }
+

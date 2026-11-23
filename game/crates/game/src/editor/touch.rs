@@ -227,8 +227,10 @@ pub(super) fn touch_gizmo_fallback(
     time: Res<Time>,
     window: Single<&Window, With<PrimaryWindow>>,
     camera: Single<(&Camera, &Transform), Without<MinimapCamera>>,
+    orbit: Res<Orbit>,
     capture: Res<PointerCapture>,
     mut editor: ResMut<Editor>,
+    mut movers: ResMut<Movers>,
     mut gesture: ResMut<PathGesture>,
     mut touch: ResMut<TouchState>,
     focus: Res<InputFocus>,
@@ -254,8 +256,8 @@ pub(super) fn touch_gizmo_fallback(
     let now = time.elapsed_secs_f64();
     for pressed in touches.iter_just_pressed() {
         // The observer path may already own this press.
-        if editor.gizmo_drag.is_some() {
-            return;
+        if editor.gizmo_drag.is_some() || gesture.0.dragging() {
+            break;
         }
         let id = pressed.id();
         let pos = pressed.position();
@@ -263,8 +265,28 @@ pub(super) fn touch_gizmo_fallback(
             || over_controls(pos, size, s)
             || over_pad_cluster(pos, size, s)
             || (editor.mode == Mode::Play && minimap_hit(pos, size, s))
-            || (object_editing_allowed(editor.mode) && over_right_panel(pos, size, &right_panel, &touch))
+            || (object_editing_allowed(editor.mode)
+                && over_right_panel(pos, size, &right_panel, &touch))
         {
+            continue;
+        }
+        if try_grab_path_handle(
+            &mut editor,
+            &mut movers,
+            &mut gesture,
+            &mut touch,
+            &orbit,
+            camera,
+            &global,
+            PointerId::Touch(id),
+            pos,
+            now,
+            true,
+            false,
+        ) {
+            if let Some(track) = touch.tracks.get_mut(&id) {
+                track.control = true;
+            }
             continue;
         }
         if !gizmo_grab_allowed(&editor, gesture.0.dragging()) {
@@ -308,6 +330,21 @@ pub(super) fn touch_gizmo_fallback(
             // end the drag here so it can never stick and block selection
             // and the camera.
             release_gizmo_drag(&mut editor, &mut touch, PointerId::Touch(id), now);
+        }
+    }
+    if let Some(PointerId::Touch(id)) = gesture.0.drag_pointer() {
+        if let Some(track) = touch.tracks.get_mut(&id) {
+            track.control = true;
+            let prev = gesture.0.screen().unwrap_or(track.last);
+            let delta = track.last - prev;
+            if delta != Vec2::ZERO {
+                gesture.0.drag(PointerId::Touch(id), track.last, delta);
+            }
+        } else {
+            gesture.0.release(PointerId::Touch(id), now);
+            touch.path_drag_active = gesture.0.dragging();
+            touch.suppress_until = now + 0.08;
+            touch.tap = None;
         }
     }
 }
@@ -455,6 +492,7 @@ pub(super) fn update_touch_status(
         Some(ActorTool::Place) => "char",
         Some(ActorTool::Platform) => "motion",
         Some(ActorTool::Grass) => "grass",
+        Some(ActorTool::Vine) => "vine",
         None => editor
             .tool
             .map(|shape| shapes()[shape].name)
@@ -741,6 +779,76 @@ pub(super) fn on_canvas_release(event: On<PointerRelease>, mut touch: ResMut<Tou
     }
 }
 
+/// Try to grab a path/curve handle at `pos` for `pointer`. Returns `true` when
+/// a handle was hit and a drag started. When `record_press` is `true` (the
+/// canvas observer path for mouse), misses are still forwarded to
+/// `gesture.0.press` so tap/multi-touch state stays intact.
+#[allow(clippy::too_many_arguments)]
+fn try_grab_path_handle(
+    editor: &mut Editor,
+    movers: &mut Movers,
+    gesture: &mut PathGesture,
+    touch: &mut TouchState,
+    orbit: &Orbit,
+    camera: &Camera,
+    global: &GlobalTransform,
+    pointer: PointerId,
+    pos: Vec2,
+    now: f64,
+    touch_hit: bool,
+    record_press: bool,
+) -> bool {
+    let mut handle = path_handle_at(editor, movers, camera, global, pos, touch_hit, orbit);
+    let mut committed = false;
+    if let Some(PathHandle::Insert { segment }) = handle
+        && mover_editing_active(editor)
+    {
+        editor.commit();
+        committed = true;
+        handle = insert_mover_waypoint(editor, movers, segment)
+            .map(|idx| PathHandle::Waypoint(idx as u32));
+    }
+    if handle.is_none() && !record_press {
+        return false;
+    }
+    let Some(drag) = gesture.0.press(pointer, pos, now, handle) else {
+        return false;
+    };
+    if mover_editing_active(editor) {
+        if !committed {
+            editor.commit();
+        }
+        // A motion/curve handle belongs to the selected piece's path; record
+        // the waypoint so Delete and the panel know what is active.
+        let index = match drag.handle {
+            PathHandle::Waypoint(id) => Some(id as usize),
+            PathHandle::Tangent { waypoint, .. } => Some(waypoint as usize),
+            PathHandle::Insert { .. } => None,
+        };
+        if let Some(index) = index
+            && let Some(id) = editor.selection.primary()
+            && let Some(mover) = movers.map.get_mut(&id)
+        {
+            mover.selected = Some(index);
+        }
+    } else {
+        let waypoint = match drag.handle {
+            PathHandle::Waypoint(id) => Some(id),
+            PathHandle::Tangent { waypoint, .. } => Some(waypoint),
+            PathHandle::Insert { .. } => None,
+        };
+        if let Some(waypoint) = waypoint
+            && let Some(plan) = editor.plan.as_mut()
+        {
+            plan.select(Some(waypoint));
+        }
+    }
+    touch.path_drag_active = true;
+    touch.suppress_until = now + 0.08;
+    touch.tap = None;
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn on_path_press(
     event: On<PointerPress>,
@@ -771,7 +879,9 @@ pub(super) fn on_path_press(
         touch.multi = true;
     }
     let pos = event.pointer.position;
-    if object_editing_allowed(editor.mode) && over_right_panel(pos, window.size(), &right_panel, &touch) {
+    if object_editing_allowed(editor.mode)
+        && over_right_panel(pos, window.size(), &right_panel, &touch)
+    {
         return;
     }
     // The Play minimap owns its corner; its own observers route the press.
@@ -791,11 +901,32 @@ pub(super) fn on_path_press(
     let (camera, transform) = *camera;
     let global = GlobalTransform::from(*transform);
     let now = time.elapsed_secs_f64();
-    // Gizmo handles take priority over path handles and selection, on
-    // touch just as on desktop. The desktop mouse path lives in
-    // `interact`; this branch only serves non-mouse pointers (fingers,
-    // pens) so the two can never double-grab the same press. Touch uses
-    // the fingertip hit tolerance.
+    // Curve/path handles take first refusal on touch just as on desktop (where
+    // `on_path_press` runs in PreUpdate before `interact`'s `gizmo_grab`),
+    // so Glade wall/path gizmo orbs cannot steal taps on spline controls.
+    let touch_hit = touch.enabled || event.pointer.id != PointerId::Mouse;
+    if editor.gizmo_drag.is_none()
+        && try_grab_path_handle(
+            &mut editor,
+            &mut movers,
+            &mut gesture,
+            &mut touch,
+            &orbit,
+            camera,
+            &global,
+            event.pointer.id,
+            pos,
+            now,
+            touch_hit,
+            event.pointer.id == PointerId::Mouse,
+        )
+    {
+        return;
+    }
+    // Gizmo handles take priority over selection on touch just as on desktop.
+    // The desktop mouse path lives in `interact`; this branch only serves
+    // non-mouse pointers (fingers, pens) so the two can never double-grab
+    // the same press. Touch uses the fingertip hit tolerance.
     if event.pointer.id != PointerId::Mouse
         && gizmo_grab_allowed(&editor, gesture.0.dragging())
         && let Ok(ray) = camera.viewport_to_world(&global, pos)
@@ -822,41 +953,8 @@ pub(super) fn on_path_press(
     if editor.gizmo_drag.is_some() {
         return;
     }
-    let handle = path_handle_at(
-        &editor,
-        &movers,
-        camera,
-        &global,
-        pos,
-        touch.enabled,
-        &orbit,
-    );
-    let drag = gesture.0.press(event.pointer.id, pos, now, handle);
-    if let Some(drag) = drag {
-        if editor.actor_tool == Some(ActorTool::Platform) {
-            // A motion handle belongs to the selected piece's path; record
-            // the waypoint so Delete and the panel know what is active.
-            let index = match drag.handle {
-                PathHandle::Waypoint(id) => id as usize,
-                PathHandle::Tangent { waypoint, .. } => waypoint as usize,
-            };
-            if let Some(id) = editor.selection.primary() {
-                if let Some(mover) = movers.map.get_mut(&id) {
-                    mover.selected = Some(index);
-                }
-            }
-        } else {
-            let waypoint = match drag.handle {
-                PathHandle::Waypoint(id) => id,
-                PathHandle::Tangent { waypoint, .. } => waypoint,
-            };
-            if let Some(plan) = editor.plan.as_mut() {
-                plan.select(Some(waypoint));
-            }
-        }
-        touch.path_drag_active = true;
-        touch.suppress_until = now + 0.08;
-        touch.tap = None;
+    if event.pointer.id != PointerId::Mouse {
+        gesture.0.press(event.pointer.id, pos, now, None);
     }
 }
 
@@ -998,7 +1096,7 @@ pub(super) fn path_drag(
         let (camera, transform) = *camera;
         let global = GlobalTransform::from(*transform);
         let ray = camera.viewport_to_world(&global, drag.screen).ok();
-        apply_gizmo_drag(&mut editor, drag, ray);
+        apply_gizmo_drag_with_movers(&mut editor, &mut movers, drag, ray);
     }
     // Play never edits objects, even if a handle drag was in flight when the
     // mode switched. The gesture still releases normally.
@@ -1010,8 +1108,8 @@ pub(super) fn path_drag(
     };
     let (camera, transform) = *camera;
     let global = GlobalTransform::from(*transform);
-    // Motion handles edit the selected piece's path, not the character plan.
-    if editor.actor_tool == Some(ActorTool::Platform) {
+    // Motion / curve handles edit the selected piece's path, not the character plan.
+    if mover_editing_active(&editor) {
         apply_mover_drag(&mut editor, &mut movers, drag, screen, camera, &global);
         return;
     }

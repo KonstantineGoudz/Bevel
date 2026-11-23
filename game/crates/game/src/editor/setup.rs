@@ -27,81 +27,13 @@ pub(super) fn setup_ui_scale(
     }
 }
 
-pub(super) fn load_session(
-    boot: Option<Res<session::Boot>>,
-    mut editor: ResMut<Editor>,
-    mut orbit: ResMut<Orbit>,
-    mut movers: ResMut<Movers>,
-    mut home: ResMut<HomeMenu>,
-) {
-    let Some(boot) = boot else {
-        return;
-    };
-    // Native `--level` boots carry a map but no browser-session id; apply
-    // whenever a map was loaded.
-    if let Some(loaded) = boot.loaded.clone() {
-        let had_camera = loaded.camera.is_some();
-        editor.session = boot.id.clone();
-        editor.level_name = boot.level_name.clone();
-        editor.level_path = boot.level_path.clone();
-        editor.apply_loaded(&mut orbit, &mut movers, loaded);
-        // If the saved camera was missing or looks at empty space, frame the
-        // level so a newly opened map doesn't start on a black void. The user
-        // described a black screen that only cleared after a right-drag, which
-        // matches an orbit target far from any piece.
-        if !had_camera || editor.pieces.is_empty() {
-            // No correction needed; default orbit already looks at origin.
-        } else {
-            let target2 = Vec2::new(orbit.target.x, orbit.target.z);
-            let mut closest = f32::MAX;
-            let mut sum = Vec2::ZERO;
-            for piece in &editor.pieces {
-                let d = piece.pos.distance(target2);
-                if d < closest {
-                    closest = d;
-                }
-                sum += piece.pos;
-            }
-            // If the saved target is more than ~2× the viewing distance away
-            // from every piece, it likely points at void (e.g. an older save
-            // or a map moved in the index). Frame the content instead.
-            if closest > orbit.distance * 2.0 + 10.0 {
-                if let Some(character) = editor.character {
-                    orbit.target = Vec3::new(character.pos.x, 0.0, character.pos.y);
-                    orbit.yaw = character.yaw;
-                } else {
-                    let center = sum / editor.pieces.len() as f32;
-                    orbit.target = Vec3::new(center.x, 0.0, center.y);
-                }
-                // Pull back enough to see a scattered map.
-                orbit.distance = orbit.distance.max(12.0).min(30.0);
-            }
-        }
-    }
-    // Native boots without `--level` land on the home screen so maps and
-    // settings are reachable. A `--level` boot goes straight into the editor.
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        if boot.loaded.is_none() {
-            home.open = true;
-            home.status = "pick a map, or create one".to_owned();
-            home.pending_name = String::new();
-            home.dirty = home.dirty.wrapping_add(1);
-        } else if let Some(name) = editor.level_name.clone() {
-            home.pending_name = name;
-        }
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = &mut home;
-    }
-}
+// NOTE: worlds arrive from the sim (see `world_sync`), never from files:
+// there is a single unified MMO world, so there is nothing to load here.
 
 pub(super) fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut grass_materials: ResMut<Assets<crate::grass_material::GrassMaterial>>,
     orbit: Res<Orbit>,
 ) {
     let eye = orbit.target
@@ -217,34 +149,21 @@ pub(super) fn setup(
         perceptual_roughness: 0.4,
         ..default()
     });
-    // Grass tufts: one baked blade cluster plus two green tints; per-hex
-    // yaw and scale supply the variety. Double-sided so blades read from
-    // every angle.
-    let grass = meshes.add(grass_tuft_mesh());
-    let grass_mats = [
-        grass_materials.add(crate::grass_material::GrassMaterial {
-            base: StandardMaterial {
-                base_color: Color::srgb_u8(0x4b, 0xaa, 0x45),
-                perceptual_roughness: 0.85,
-                metallic: 0.0,
-                double_sided: true,
-                cull_mode: None,
-                ..default()
-            },
-            extension: crate::grass_material::GrassExt::painted_tuft(false),
-        }),
-        grass_materials.add(crate::grass_material::GrassMaterial {
-            base: StandardMaterial {
-                base_color: Color::srgb_u8(0x68, 0xc2, 0x3c),
-                perceptual_roughness: 0.85,
-                metallic: 0.0,
-                double_sided: true,
-                cull_mode: None,
-                ..default()
-            },
-            extension: crate::grass_material::GrassExt::painted_tuft(true),
-        }),
-    ];
+    let vine_stem_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb_u8(0x46, 0x38, 0x26),
+        perceptual_roughness: 0.92,
+        reflectance: 0.04,
+        metallic: 0.0,
+        ..default()
+    });
+    let vine_leaf_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb_u8(0x4d, 0x75, 0x2b),
+        perceptual_roughness: 0.88,
+        metallic: 0.01,
+        double_sided: true,
+        cull_mode: None,
+        ..default()
+    });
     commands.insert_resource(Kit {
         parts,
         mats,
@@ -256,17 +175,15 @@ pub(super) fn setup(
         cone_mat,
         // `capsule_y` takes the half height first, radius second.
         character_collider: Collider::capsule_y(PILL_CYLINDER * 0.5, PILL_RADIUS),
-        grass,
-        grass_mats,
+        vine_stem_mat,
+        vine_leaf_mat,
     });
 
+    // The palette root carries no `ModeUi`/`InputLayer`: `sync_left_panel`
+    // folds the desktop/build/collapsed conditions into one `display` write.
     let panel = commands
         .spawn((
-            InputLayer { desktop: true },
-            ModeUi {
-                desktop: true,
-                play: false,
-            },
+            LeftPanelRoot,
             Node {
                 position_type: PositionType::Absolute,
                 left: px(0),
@@ -337,9 +254,12 @@ pub(super) fn setup(
         .id();
     let build_tab = palette_compact_button(&mut commands, PaletteAction::Build, "Build");
     let building_tab = palette_compact_button(&mut commands, PaletteAction::Building, "Building");
+    // Collapse chevron: folds the palette to a slim edge tab so the viewport
+    // gets the full width. Re-opened from that tab (see `left_panel.rs`).
+    let collapse = spawn_left_panel_toggle(&mut commands);
     commands
         .entity(mode_tabs)
-        .add_children(&[build_tab, building_tab]);
+        .add_children(&[build_tab, building_tab, collapse]);
     children.push(mode_tabs);
 
     let spawn_category = |commands: &mut Commands, category: &str, out: &mut Vec<Entity>| {
@@ -390,6 +310,7 @@ pub(super) fn setup(
         palette_compact_button(&mut commands, PaletteAction::Path, "Path"),
         palette_compact_button(&mut commands, PaletteAction::Plan, "Plan"),
         palette_compact_button(&mut commands, PaletteAction::Grass, "Grass"),
+        palette_compact_button(&mut commands, PaletteAction::Vine, "Vine"),
         palette_compact_button(&mut commands, PaletteAction::Course, "Course"),
         palette_compact_button(&mut commands, PaletteAction::CopyJson, "JSON"),
     ];
@@ -415,10 +336,35 @@ pub(super) fn setup(
     commands.entity(path_actions).add_children(&path_buttons);
     build_children.push(path_actions);
 
-    // Grass brush options: erase toggle plus the optional navigation toll.
+    // Grass brush options: erase toggle, size/strength cyclers, slow toggle, clear.
     let grass_actions = commands
         .spawn((
             GrassActions,
+            Node {
+                width: percent(100),
+                flex_direction: FlexDirection::Row,
+                flex_wrap: FlexWrap::Wrap,
+                column_gap: px(4),
+                row_gap: px(4),
+                display: Display::None,
+                ..default()
+            },
+        ))
+        .id();
+    let grass_buttons = [
+        palette_compact_button(&mut commands, PaletteAction::GrassErase, "Erase"),
+        palette_compact_button(&mut commands, PaletteAction::GrassSize, "Size"),
+        palette_compact_button(&mut commands, PaletteAction::GrassDensity, "Power"),
+        palette_compact_button(&mut commands, PaletteAction::GrassSlow, "Slow"),
+        palette_compact_button(&mut commands, PaletteAction::GrassClear, "Clear"),
+    ];
+    commands.entity(grass_actions).add_children(&grass_buttons);
+    build_children.push(grass_actions);
+
+    // Vine brush options: erase toggle.
+    let vine_actions = commands
+        .spawn((
+            VineActions,
             Node {
                 width: percent(100),
                 flex_direction: FlexDirection::Row,
@@ -428,12 +374,14 @@ pub(super) fn setup(
             },
         ))
         .id();
-    let grass_buttons = [
-        palette_compact_button(&mut commands, PaletteAction::GrassErase, "Erase"),
-        palette_compact_button(&mut commands, PaletteAction::GrassSlow, "Slow"),
-    ];
-    commands.entity(grass_actions).add_children(&grass_buttons);
-    build_children.push(grass_actions);
+    let vine_buttons = [palette_compact_button(
+        &mut commands,
+        PaletteAction::VineErase,
+        "Erase",
+    )];
+    commands.entity(vine_actions).add_children(&vine_buttons);
+    build_children.push(vine_actions);
+
     commands.entity(build_group).add_children(&build_children);
     children.push(build_group);
 
@@ -490,10 +438,8 @@ pub(super) fn setup(
         ))
         .id();
     let mut fixtures_children = vec![palette_label(&mut commands, "FIXTURES")];
-    if let Some((brazier_idx, brazier)) = shapes()
-        .iter()
-        .enumerate()
-        .find(|(_, s)| s.id == "brazier")
+    if let Some((brazier_idx, brazier)) =
+        shapes().iter().enumerate().find(|(_, s)| s.id == "brazier")
     {
         fixtures_children.push(palette_button(
             &mut commands,
@@ -545,9 +491,14 @@ pub(super) fn setup(
     let status_bar = commands
         .spawn((
             InputLayer { desktop: true },
+            // Slides left when the palette collapses (bottom-left corner).
+            LeftPanelOffsetBar {
+                open: PANEL_WIDTH + LEFT_PANEL_BAR_GAP,
+                closed: LEFT_PANEL_BAR_GAP,
+            },
             Node {
                 position_type: PositionType::Absolute,
-                left: px(PANEL_WIDTH + 4.0),
+                left: px(PANEL_WIDTH + LEFT_PANEL_BAR_GAP),
                 bottom: px(4.0),
                 padding: UiRect::axes(px(10), px(5)),
                 border_radius: BorderRadius::all(px(5)),
@@ -576,9 +527,15 @@ pub(super) fn setup(
                 desktop: true,
                 play: false,
             },
+            // Top-left strip: clears the collapsed palette's re-open tab so the
+            // two never overlap.
+            LeftPanelOffsetBar {
+                open: PANEL_WIDTH + LEFT_PANEL_BAR_GAP,
+                closed: LEFT_PANEL_TAB_WIDTH + LEFT_PANEL_BAR_GAP,
+            },
             Node {
                 position_type: PositionType::Absolute,
-                left: px(PANEL_WIDTH + 4.0),
+                left: px(PANEL_WIDTH + LEFT_PANEL_BAR_GAP),
                 top: px(4.0),
                 padding: UiRect::axes(px(10), px(4)),
                 border_radius: BorderRadius::all(px(5)),
@@ -628,6 +585,8 @@ pub(super) fn setup(
     spawn_touch_ui(&mut commands);
     spawn_minimap(&mut commands);
     spawn_right_panel(&mut commands);
+    // Re-open tab for the collapsible left palette.
+    spawn_left_panel_edge_tab(&mut commands);
     spawn_character_status(&mut commands);
     spawn_add_menu(&mut commands);
     spawn_home_menu(&mut commands);
@@ -856,6 +815,7 @@ pub(super) fn spawn_touch_ui(commands: &mut Commands) {
         commands
             .spawn((
                 Button,
+                ActivateOnPress,
                 TouchButton(action),
                 Node {
                     position_type: PositionType::Absolute,
@@ -978,6 +938,7 @@ pub(super) fn touch_button(commands: &mut Commands, action: TouchAction, text: &
     commands
         .spawn((
             Button,
+            ActivateOnPress,
             TouchButton(action),
             Node {
                 flex_grow: 1.0,

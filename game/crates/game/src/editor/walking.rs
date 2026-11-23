@@ -11,21 +11,21 @@ use bevy_rapier3d::parry::query::ShapeCastOptions;
 /// character is standing on something; in the air it is ignored. The jump
 /// itself is a vertical impulse: horizontal momentum (`hv`) is untouched, so
 /// a sprint carries into the leap.
-pub(super) fn jump_velocity(vy: f32, grounded: bool, jump: bool) -> f32 {
+pub fn jump_velocity(vy: f32, grounded: bool, jump: bool) -> f32 {
     if jump && grounded { JUMP_SPEED } else { vy }
 }
 
 /// Ground acceleration toward the wish velocity, in m/s^2. High enough to
 /// feel responsive, low enough to leave a short physical slide on
 /// landing/turns instead of teleporting the velocity.
-pub(super) const GROUND_ACCEL: f32 = 30.0;
+pub const GROUND_ACCEL: f32 = 30.0;
 /// Airborne steering acceleration, in m/s^2. Deliberately small: inertia
 /// carries the jump and the stick can only strafe a little.
-pub(super) const AIR_ACCEL: f32 = 8.0;
+pub const AIR_ACCEL: f32 = 8.0;
 
 /// Move `current` toward `target` by at most `GROUND_ACCEL * dt`.
 /// Pure helper so the ground feel stays unit-testable without a window.
-pub(super) fn ground_step(current: Vec2, target: Vec2, dt: f32) -> Vec2 {
+pub fn ground_step(current: Vec2, target: Vec2, dt: f32) -> Vec2 {
     if dt <= 0.0 {
         return current;
     }
@@ -44,7 +44,7 @@ pub(super) fn ground_step(current: Vec2, target: Vec2, dt: f32) -> Vec2 {
 /// wish speed, then the total is capped at the faster of the entry speed and
 /// the wish speed — so you can nudge a jump sideways but never instantly
 /// reverse or gain speed in mid-air.
-pub(super) fn air_step(current: Vec2, wish_dir: Vec2, wish_speed: f32, dt: f32) -> Vec2 {
+pub fn air_step(current: Vec2, wish_dir: Vec2, wish_speed: f32, dt: f32) -> Vec2 {
     if dt <= 0.0 || wish_speed <= 0.0 || wish_dir == Vec2::ZERO {
         return current;
     }
@@ -73,23 +73,23 @@ pub(super) fn air_step(current: Vec2, wish_dir: Vec2, wish_speed: f32, dt: f32) 
 /// Slide friction, in m/s^2. Far below `GROUND_ACCEL`, so a landing slide
 /// keeps most of its entry momentum and coasts for a second or more instead
 /// of scrubbing to the wish speed in a few frames.
-pub(super) const SLIDE_FRICTION: f32 = 2.4;
+pub const SLIDE_FRICTION: f32 = 2.4;
 /// How hard steering can bend a slide's direction, in m/s^2. Steering may
 /// turn the slide but never adds speed: the desired velocity is always the
 /// (already decayed) slide speed pointed along the wish direction.
-pub(super) const SLIDE_STEER: f32 = 8.0;
+pub const SLIDE_STEER: f32 = 8.0;
 /// Slowest horizontal landing speed that can enter a slide, in m/s. A
 /// standing hop lands below this and simply stands up again.
-pub(super) const SLIDE_MIN_ENTRY_SPEED: f32 = 1.5;
+pub const SLIDE_MIN_ENTRY_SPEED: f32 = 1.5;
 /// Speed at which a slide ends and normal ground control resumes, in m/s.
-pub(super) const SLIDE_END_SPEED: f32 = 0.85;
+pub const SLIDE_END_SPEED: f32 = 0.85;
 
 /// One slide step: decay the speed by `SLIDE_FRICTION`, then bend the
 /// remaining velocity toward `wish_dir` by at most `SLIDE_STEER * dt`
 /// without ever increasing its magnitude. With no steering the slide is
 /// pure momentum: direction untouched, speed bleeding off slowly.
 /// Pure helper so the slide feel stays unit-testable without a window.
-pub(super) fn slide_step(current: Vec2, wish_dir: Vec2, dt: f32) -> Vec2 {
+pub fn slide_step(current: Vec2, wish_dir: Vec2, dt: f32) -> Vec2 {
     if dt <= 0.0 {
         return current;
     }
@@ -127,7 +127,7 @@ pub(super) fn slide_step(current: Vec2, wish_dir: Vec2, dt: f32) -> Vec2 {
 /// while already running on the ground never starts one. An ongoing slide
 /// survives while Ctrl stays held, the capsule stays grounded, and it is
 /// still moving faster than `SLIDE_END_SPEED`.
-pub(super) fn next_sliding(
+pub fn next_sliding(
     was_sliding: bool,
     landed: bool,
     slide_held: bool,
@@ -142,28 +142,28 @@ pub(super) fn next_sliding(
 
 /// A slope pushes the character upward while it climbs, so a small positive
 /// vertical speed still counts as ground. A real jump rises much faster.
-pub(super) const MAX_GROUNDED_RISE: f32 = JUMP_SPEED * 0.5;
+pub const MAX_GROUNDED_RISE: f32 = JUMP_SPEED * 0.5;
 
 /// How far below the feet a surface may sit and still count as the ground
 /// while walking down a slope. A descending character leaves the surface
 /// faster than gravity can pull it back, so contact-only support flickers and
 /// jump presses are silently dropped on most frames.
-pub(super) const STEP_DOWN: f32 = 0.35;
+pub const STEP_DOWN: f32 = 0.35;
 /// Highest terrain rise the grounded walk mounts in one move, in metres.
 /// The surface sampled at the destination may sit at most this far above
 /// the feet: tile seams and slightly raised ramp bases are walked over,
 /// while anything taller is a wall (the wall rays above this height say
 /// so first). A ramp's slope never presents a single rise anywhere near
 /// this — it is climbed continuously, a few centimetres per frame.
-pub(super) const STEP_UP: f32 = 0.4;
+pub const STEP_UP: f32 = 0.4;
 /// Surfaces steeper than this are walls, not ground.
-pub(super) const MIN_GROUND_NORMAL: f32 = 0.4;
+pub const MIN_GROUND_NORMAL: f32 = 0.4;
 
 /// Ground support from a contact gap, as `(grounded, drop_to_contact)`. A
 /// negative gap means the capsule is touching or slightly penetrating; it is
 /// never moved up, the physics resolves that. Positive gaps up to `STEP_DOWN`
 /// are followed when already walking, so a descent does not free-fall.
-pub(super) fn ground_support(gap: f32, can_snap: bool, uphill: bool) -> (bool, Option<f32>) {
+pub fn ground_support(gap: f32, can_snap: bool, uphill: bool) -> (bool, Option<f32>) {
     if gap <= 0.0 {
         (gap >= -0.2, None)
     } else if gap <= 0.13 {
@@ -179,7 +179,7 @@ pub(super) fn ground_support(gap: f32, can_snap: bool, uphill: bool) -> (bool, O
 /// centre. A capsule touches a slope along the surface normal, not at its
 /// lowest point, so a plain vertical chord overstates the gap on an ascent and
 /// snapping by it would fight the climb.
-pub(super) fn contact_gap(ray_distance: f32, normal_y: f32) -> f32 {
+pub fn contact_gap(ray_distance: f32, normal_y: f32) -> f32 {
     ray_distance - PILL_RADIUS / normal_y.max(0.01)
 }
 
@@ -551,10 +551,10 @@ fn step_motion(
 /// How much of the character's inward speed a shoved body picks up. Below 1.0
 /// so a pushed crate trails the player instead of sticking to the capsule and
 /// jittering.
-pub(super) const PUSH_FACTOR: f32 = 0.85;
+pub const PUSH_FACTOR: f32 = 0.85;
 /// Minimum inward speed before a shove counts, in m/s. Filters contact jitter
 /// when the capsule rests against a prop.
-pub(super) const PUSH_MIN_SPEED: f32 = 0.15;
+pub const PUSH_MIN_SPEED: f32 = 0.15;
 
 /// One recorded character-vs-prop contact. Collected inside the move-and-slide
 /// callback (which can only return a response, not touch other queries) and
@@ -881,7 +881,10 @@ pub(super) fn character_move(
     let slow = grass_speed_factor(
         editor.grass_slows,
         &editor.grass,
-        editor.character.map(|character| character.pos).unwrap_or(Vec2::ZERO),
+        editor
+            .character
+            .map(|character| character.pos)
+            .unwrap_or(Vec2::ZERO),
     );
     let Some(character) = editor.character.as_mut() else {
         return;

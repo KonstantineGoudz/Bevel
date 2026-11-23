@@ -28,5 +28,12 @@ game/web/assets/
 .idea/
 .vscode/
 
+# Secrets — NEVER commit these (production passwords, API keys, JWT secrets)
+.env
+*.env
+!*.env.example
+rauthy.cfg
+!rauthy.cfg.example
+
 # Superpowers scratch
 .superpowers/

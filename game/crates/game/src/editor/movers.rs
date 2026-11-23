@@ -78,6 +78,10 @@ impl Mover {
     pub(super) fn controls(&self) -> Vec<crate::path::AnchorControls> {
         platforms::platform_controls(&self.waypoints, self.mode == PlatformMode::Loop)
     }
+
+    pub(super) fn midpoints(&self) -> Vec<Vec2> {
+        platforms::segment_midpoints(&self.waypoints, self.mode == PlatformMode::Loop)
+    }
 }
 
 #[derive(Resource, Default)]
@@ -182,9 +186,20 @@ pub(super) fn delete_selected_mover_waypoint(editor: &mut Editor, movers: &mut M
     let Some(id) = editor.selection.primary() else {
         return false;
     };
+    let is_glade_curve = editor
+        .pieces
+        .iter()
+        .find(|p| p.id == id)
+        .is_some_and(is_glade_curve_piece);
     let Some(mover) = movers.map.get_mut(&id) else {
         return false;
     };
+    if editor.actor_tool != Some(ActorTool::Platform)
+        && is_glade_curve
+        && mover.waypoints.len() <= 2
+    {
+        return false;
+    }
     let Some(index) = mover.selected else {
         return false;
     };
@@ -195,9 +210,61 @@ pub(super) fn delete_selected_mover_waypoint(editor: &mut Editor, movers: &mut M
     mover.waypoints.remove(index);
     mover.selected = None;
     mover.rebuild();
+    if is_glade_curve {
+        sync_glade_curve_piece_pos(editor, id, mover);
+    }
     editor.hard_dirty = true;
-    editor.note = "motion waypoint deleted";
+    editor.note = if is_glade_curve {
+        "curve point deleted"
+    } else {
+        "motion waypoint deleted"
+    };
     true
+}
+
+/// Insert a new control point at the midpoint of `segment` on the primary
+/// selected piece's mover curve. Returns the new waypoint index.
+pub(super) fn insert_mover_waypoint(
+    editor: &mut Editor,
+    movers: &mut Movers,
+    segment: usize,
+) -> Option<usize> {
+    let id = editor.selection.primary()?;
+    let is_glade_curve = editor
+        .pieces
+        .iter()
+        .find(|p| p.id == id)
+        .is_some_and(is_glade_curve_piece);
+    let mover = movers.map.get_mut(&id)?;
+    let closed = mover.mode == PlatformMode::Loop;
+    let midpoint = platforms::segment_midpoint(&mover.waypoints, closed, segment)?;
+    let insert_at = (segment + 1).min(mover.waypoints.len());
+    mover
+        .waypoints
+        .insert(insert_at, PlatformWaypoint::new(midpoint));
+    mover.selected = Some(insert_at);
+    mover.rebuild();
+    if is_glade_curve {
+        sync_glade_curve_piece_pos(editor, id, mover);
+    }
+    editor.hard_dirty = true;
+    editor.note = "curve point inserted";
+    Some(insert_at)
+}
+
+fn sync_glade_curve_piece_pos(editor: &mut Editor, id: u32, mover: &Mover) {
+    let center = if let Some(track) = mover.track.as_ref()
+        && track.total() > 0.01
+    {
+        track.at(track.total() * 0.5).0
+    } else if mover.waypoints.len() >= 2 {
+        (mover.waypoints[0].pos + mover.waypoints[mover.waypoints.len() - 1].pos) * 0.5
+    } else {
+        return;
+    };
+    if let Some(piece) = editor.pieces.iter_mut().find(|p| p.id == id) {
+        piece.pos = center;
+    }
 }
 
 /// Apply one pointer update to a mover handle: drag the waypoint itself, or
@@ -214,21 +281,52 @@ pub(super) fn apply_mover_drag(
     let Some(id) = editor.selection.primary() else {
         return false;
     };
-    let Some(mover) = movers.map.get_mut(&id) else {
-        return false;
-    };
-    let plane_y = editor
+    let is_glade_curve = editor
         .pieces
         .iter()
         .find(|p| p.id == id)
-        .map_or(0.0, |p| p.elevation);
+        .is_some_and(is_glade_curve_piece);
+    let Some(mover) = movers.map.get_mut(&id) else {
+        return false;
+    };
+    let piece = editor.pieces.iter().find(|p| p.id == id);
+    let is_glade_wall =
+        piece.is_some_and(|p| shapes().get(p.shape).is_some_and(|s| s.id == "glade_wall"));
+    let plane_y = if is_glade_wall
+        && let Some(p) = piece
+        && let Some(shape) = shapes().get(p.shape)
+    {
+        let ext = crate::glade::piece_extents(p, shape);
+        let spine = mover_spine(mover, true);
+        let handle_xz = match drag.handle {
+            PathHandle::Waypoint(raw) => mover.waypoints.get(raw as usize).map_or(p.pos, |w| w.pos),
+            PathHandle::Tangent { waypoint, side } => mover
+                .waypoints
+                .get(waypoint as usize)
+                .and_then(|w| match side {
+                    TangentSide::Incoming => w.incoming,
+                    TangentSide::Outgoing => w.outgoing,
+                })
+                .unwrap_or_else(|| {
+                    mover
+                        .waypoints
+                        .get(waypoint as usize)
+                        .map_or(p.pos, |w| w.pos)
+                }),
+            PathHandle::Insert { .. } => p.pos,
+        };
+        crate::glade::wall_surface_y_at(p, handle_xz, &editor.pieces, spine.as_deref())
+            + ext.y
+            + 0.06
+    } else {
+        piece.map_or(0.0, |p| p.elevation)
+    };
     let Ok(ray) = camera.viewport_to_world(camera_transform, screen) else {
         return false;
     };
-    let Some(point) = ray.plane_intersection_point(
-        Vec3::new(0.0, plane_y, 0.0),
-        InfinitePlane3d::new(Vec3::Y),
-    ) else {
+    let Some(point) =
+        ray.plane_intersection_point(Vec3::new(0.0, plane_y, 0.0), InfinitePlane3d::new(Vec3::Y))
+    else {
         return false;
     };
     let pos = Vec2::new(point.x, point.z);
@@ -252,8 +350,12 @@ pub(super) fn apply_mover_drag(
             }
             mover.selected = Some(index);
         }
+        PathHandle::Insert { .. } => return false,
     }
     mover.rebuild();
+    if is_glade_curve {
+        sync_glade_curve_piece_pos(editor, id, mover);
+    }
     editor.hard_dirty = true;
     true
 }
@@ -323,14 +425,64 @@ fn mover_spine(mover: &Mover, always_sample_track: bool) -> Option<Vec<Vec2>> {
     Some(pts)
 }
 
-/// Return the world-space 2D polyline spine for a path-following `glade_wall`,
-/// if the wall has 2 or more waypoints in `movers`.
+pub(crate) fn is_glade_curve_shape(shape: &model::Shape) -> bool {
+    matches!(shape.id, "glade_wall" | "glade_stairs" | "glade_path")
+}
+
+pub(crate) fn is_glade_curve_piece(piece: &Piece) -> bool {
+    shapes().get(piece.shape).is_some_and(is_glade_curve_shape)
+}
+
+/// Ensure a `glade_wall` or `glade_stairs` piece has at least a 2-point curve
+/// spine in `movers` so its endpoints, tangents, and midpoint-insert handles are always live.
+pub(crate) fn ensure_glade_wall_mover(piece: &Piece, movers: &mut Movers) {
+    let Some(shape) = shapes().get(piece.shape) else {
+        return;
+    };
+    if !matches!(shape.id, "glade_wall" | "glade_stairs") {
+        return;
+    }
+    if movers
+        .map
+        .get(&piece.id)
+        .is_some_and(|m| m.waypoints.len() >= 2)
+    {
+        return;
+    }
+    let ext = crate::glade::piece_extents(piece, shape);
+    let half_len = ext.x * 0.5;
+    let axis = model::piece_quat(piece) * Vec3::X;
+    let dir = Vec2::new(axis.x, axis.z).normalize_or(Vec2::X);
+    let p0 = piece.pos - dir * half_len;
+    let p1 = piece.pos + dir * half_len;
+    let mover = movers.mover_mut(piece.id, p0);
+    mover.waypoints = vec![PlatformWaypoint::new(p0), PlatformWaypoint::new(p1)];
+    mover.rebuild();
+}
+
+/// Materialize a 2-point curve spine whenever a `glade_wall` is selected in
+/// an authoring mode so loaded/legacy straight walls immediately expose curve controls.
+pub(super) fn sync_selected_glade_wall_mover(editor: Res<Editor>, mut movers: ResMut<Movers>) {
+    if !object_editing_allowed(editor.mode) {
+        return;
+    }
+    let Some(id) = editor.selection.primary() else {
+        return;
+    };
+    let Some(piece) = editor.pieces.iter().find(|p| p.id == id) else {
+        return;
+    };
+    ensure_glade_wall_mover(piece, &mut movers);
+}
+
+/// Return the world-space 2D polyline spine for a path-following `glade_wall`
+/// or `glade_stairs` piece, if it has 2 or more waypoints in `movers`.
 pub(crate) fn glade_wall_spine(piece: &Piece, movers: &Movers) -> Option<Vec<Vec2>> {
     let shape = shapes().get(piece.shape)?;
-    if shape.id != "glade_wall" {
+    if !matches!(shape.id, "glade_wall" | "glade_stairs") {
         return None;
     }
-    mover_spine(movers.map.get(&piece.id)?, false)
+    mover_spine(movers.map.get(&piece.id)?, true)
 }
 
 /// Return the world-space 2D polyline spine for a `glade_path` piece,
@@ -354,7 +506,7 @@ pub(super) fn piece_body(piece: &Piece, movers: &Movers) -> RigidBody {
         RigidBody::Dynamic
     } else if shapes()
         .get(piece.shape)
-        .is_some_and(|s| matches!(s.id, "glade_wall" | "glade_path"))
+        .is_some_and(|s| matches!(s.id, "glade_wall" | "glade_stairs" | "glade_path"))
     {
         // Static Glade walls and terrain paths use their Mover path as a geometry spine rather than moving.
         RigidBody::Fixed
@@ -530,7 +682,7 @@ pub(super) fn move_movers(
         // Glade walls and terrain paths use their Mover waypoints as a geometry spine rather than moving.
         if shapes()
             .get(piece.shape)
-            .is_some_and(|s| matches!(s.id, "glade_wall" | "glade_path"))
+            .is_some_and(|s| matches!(s.id, "glade_wall" | "glade_stairs" | "glade_path"))
         {
             continue;
         }

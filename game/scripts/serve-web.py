@@ -14,7 +14,7 @@ import sys
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web")
-PORT = int(os.environ.get("PORT", "8082"))
+PORT = int(os.environ.get("PORT", "6082"))
 
 
 class NoCacheHandler(SimpleHTTPRequestHandler):
@@ -37,11 +37,26 @@ class NoCacheHandler(SimpleHTTPRequestHandler):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
 
+class QuietThreadingHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer without the traceback for a browser that hung up.
+
+    `ConnectionResetError`/`BrokenPipeError` are normal here: reloads, closing
+    a tab, and a wasm panic all drop the socket mid-response. Python prints a
+    full traceback for each, which looks like a server bug in the terminal.
+    """
+
+    def handle_error(self, request, client_address) -> None:
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def main() -> None:
     handler = lambda *args, **kwargs: NoCacheHandler(  # noqa: E731
         *args, directory=ROOT, **kwargs
     )
-    server = ThreadingHTTPServer(("", PORT), handler)
+    server = QuietThreadingHTTPServer(("", PORT), handler)
     print(f"Serving {os.path.normpath(ROOT)} on http://localhost:{PORT}/", flush=True)
     try:
         server.serve_forever()

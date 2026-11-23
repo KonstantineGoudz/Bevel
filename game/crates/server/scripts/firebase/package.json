@@ -1,0 +1,11 @@
+{
+  "name": "party-dungeon-firebase-claims",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "One-off Admin SDK helper: stamp SurrealDB routing claims onto Firebase users.",
+  "license": "MIT",
+  "dependencies": {
+    "firebase-admin": "^13"
+  }
+}

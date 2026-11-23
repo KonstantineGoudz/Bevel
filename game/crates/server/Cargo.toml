@@ -1,0 +1,24 @@
+[package]
+name = "party-dungeon-server"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Authoritative backend for Party Dungeon on SurrealDB: schema, typed commands, live subscriptions."
+
+[lib]
+name = "party_dungeon_server"
+crate-type = ["lib"]
+
+[dependencies]
+surrealdb = "4.0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+[dev-dependencies]
+# Mint HS256 test tokens for the row-rule tests (tests/rules.rs).
+jsonwebtoken = "9"
+# Conformance: the generated client must behave like the backend.
+party-dungeon-client = { path = "clients/rust" }

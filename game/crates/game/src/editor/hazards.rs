@@ -40,7 +40,10 @@ pub(super) fn damage_ready(now: f64, last: f64) -> bool {
 /// The check is generous by the capsule radius: the physics collider stops
 /// the character at the piece's edge, so an exact-centre test would never
 /// fire while walking into it.
-pub(crate) fn trigger_at(pos: Vec2, feet: f32, pieces: &[Piece]) -> Option<model::Trigger> {
+///
+/// Public for the headless server simulation, which runs the identical
+/// hazard query against its own replica of the dungeon.
+pub fn trigger_at(pos: Vec2, feet: f32, pieces: &[Piece]) -> Option<model::Trigger> {
     let head = feet + CHARACTER_HEIGHT;
     for piece in pieces {
         let Some(shape) = shapes().get(piece.shape) else {

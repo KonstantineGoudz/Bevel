@@ -131,21 +131,34 @@ fn play_keeps_first_person_capture_and_build_releases_it() {
 fn the_palette_is_not_the_viewport_but_all_of_play_is() {
     let mut editor = Editor::default();
     let mut touch = TouchState::default();
+    let mut left = LeftPanelState::default();
     let on_palette = Some(Vec2::new(10.0, 10.0));
     let on_view = Some(Vec2::new(PANEL_WIDTH + 1.0, 10.0));
 
-    assert!(!over_viewport(&editor, &touch, on_palette));
-    assert!(over_viewport(&editor, &touch, on_view));
-    assert!(!over_viewport(&editor, &touch, None));
+    assert!(!over_viewport(&editor, &touch, &left, on_palette));
+    assert!(over_viewport(&editor, &touch, &left, on_view));
+    assert!(!over_viewport(&editor, &touch, &left, None));
+
+    // A collapsed palette is viewport apart from its re-open tab.
+    left.open = false;
+    assert!(!over_viewport(&editor, &touch, &left, on_palette));
+    assert!(over_viewport(&editor, &touch, &left, on_view));
+    assert!(!over_viewport(
+        &editor,
+        &touch,
+        &left,
+        Some(Vec2::new(10.0, LEFT_PANEL_TAB_TOP + 10.0))
+    ));
+    left.open = true;
 
     // Play hides the palette, so the whole screen can be looked through.
     editor.mode = Mode::Play;
-    assert!(over_viewport(&editor, &touch, on_palette));
+    assert!(over_viewport(&editor, &touch, &left, on_palette));
 
     // Touch has no captured pointer.
     editor.mode = Mode::Build;
     touch.enabled = true;
-    assert!(!over_viewport(&editor, &touch, on_view));
+    assert!(!over_viewport(&editor, &touch, &left, on_view));
 }
 
 #[test]

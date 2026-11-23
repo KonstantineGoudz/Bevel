@@ -1,0 +1,117 @@
+name: party-dungeon
+
+# Full game stack: SurrealDB (system-of-record) + Rauthy (self-hosted OIDC)
+# + authoritative sim (60Hz, WebRTC host). Clients connect directly to SurrealDB
+# (row rules) and to the sim via WebRTC; the sim is the physics authority.
+#
+#   cp crates/server/.env.example crates/server/.env  # edit DUNGEON_* if needed
+#   docker compose -f game/docker-compose.yml up --build -d
+#   docker compose -f game/crates/server/docker-compose.yml exec surrealdb surreal is-ready -e http://localhost:6000
+#   ./game/crates/server/scripts/bootstrap.sh          # renders schema for the configured provider
+#   # create a rauthy user + client (see RAUTHY.md)
+#   cargo run -p party-dungeon -- --connect ws://localhost:6536/party-dungeon
+
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v4.0.1
+    command: ["start", "surrealkv:///data/db", "--bind", "0.0.0.0:6000", "--user", "${SURREAL_ROOT_USER:-root}", "--password", "${SURREAL_ROOT_PASS:?set SURREAL_ROOT_PASS}"]
+    ports: ["${SURREAL_PORT:-6000}:6000"]
+    volumes: ["surreal-data:/data", "./crates/server/backups:/backups"]
+    env_file: ["./crates/server/.env"]
+    restart: unless-stopped
+    # Exec form (no shell in the image) + absolute binary path (/surreal,
+    # not on PATH). CMD-SHELL can never work here.
+    healthcheck:
+      test: ["CMD", "/surreal", "is-ready", "-e", "http://localhost:6000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rauthy:
+    # Self-hosted OIDC — swap without code change via DUNGEON_AUTH_PROVIDER=rauthy.
+    # See crates/server/src/auth.rs for the env table.
+    image: ghcr.io/sebadob/rauthy:0.30.0
+    ports: ["6080:6080"]
+    volumes:
+      - rauthy-data:/data
+      - ./crates/server/rauthy.cfg:/app/rauthy.cfg:ro
+      # 0.30+ reads config.toml — mount the same file under both names.
+      - ./crates/server/rauthy.cfg:/app/config.toml:ro
+    env_file: ["./crates/server/.env"]
+    environment:
+      # 0.30 config: PUB_URL is host-only (scheme from LISTEN_SCHEME+PROXY_MODE).
+      # File at ./crates/server/rauthy.cfg carries the same values as fallback.
+      PUB_URL: "${RAUTHY_PUB_URL}"
+      LISTEN_ADDRESS: "0.0.0.0"
+      LISTEN_PORT_HTTP: "6080"
+      LISTEN_SCHEME: "http"
+      PROXY_MODE: "true"
+      TRUSTED_PROXIES: "10.0.0.0/8\n172.16.0.0/12\n192.168.0.0/16"
+      ENC_KEYS: "${RAUTHY_ENC_KEYS}"
+      ENC_KEY_ACTIVE: "${RAUTHY_ENC_KEY_ACTIVE}"
+      RP_ID: "${RAUTHY_RP_ID}"
+      RP_ORIGIN: "${RAUTHY_RP_ORIGIN}"
+      HQL_SECRET_RAFT: "${RAUTHY_HQL_SECRET_RAFT}"
+      HQL_SECRET_API: "${RAUTHY_HQL_SECRET_API}"
+      HQL_DATA_DIR: "/data"
+      # Bootstrap admin (applies ONLY to an empty DB on first boot).
+      # These were missing here before (only server compose had them),
+      # so Rauthy generated a random password — check logs on first boot.
+      BOOTSTRAP_ADMIN_EMAIL: "${RAUTHY_ADMIN_EMAIL:-admin@conman.biz}"
+      BOOTSTRAP_ADMIN_PASSWORD_PLAIN: "${RAUTHY_ADMIN_PASSWORD_PLAIN:?set RAUTHY_ADMIN_PASSWORD_PLAIN in .env}"
+    restart: unless-stopped
+    # No in-container healthcheck: distroless image has no shell/wget/curl,
+    # so CMD-SHELL probes always fail. Check from the host instead:
+    #   curl -s http://localhost:6080/auth/v1/health
+    # sim waits on service_started for rauthy (see below).
+
+  sim:
+    build:
+      context: .
+      dockerfile: crates/sim/Dockerfile
+      args:
+        # Cargo features for the authoritative sim. The replicon migration is
+        # opted in per deployment: DUNGEON_SIM_FEATURES=replicon (and
+        # DUNGEON_REPLICON=1) switches to bevy_replicon; empty keeps the
+        # legacy matchbox HostNet path.
+        CARGO_FEATURES: "${DUNGEON_SIM_FEATURES:-}"
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+      rauthy:
+        condition: service_started
+    ports: ["6536:6536", "6565:6565"] # signaling + in-game signup (NPM: play/.../signup -> :6565)
+    volumes:
+      - ./crates/server/backups:/backups:ro
+    env_file: ["./crates/server/.env"]
+    environment:
+      DUNGEON_SURREAL_URL: "surrealdb:6000"
+      DUNGEON_SIGNAL_ADDR: "0.0.0.0:6536"
+      DUNGEON_SIGNAL_URL: "ws://sim:6536/party-dungeon"
+      # Auth — rauthy self-hosted is the default in this compose. Override in .env to use
+      # Firebase or another OIDC.
+      DUNGEON_AUTH_PROVIDER: "${DUNGEON_AUTH_PROVIDER}"
+      DUNGEON_RAUTHY_URL: "${DUNGEON_RAUTHY_URL}"
+      DUNGEON_RAUTHY_ISSUER: "${DUNGEON_RAUTHY_ISSUER}"
+      DUNGEON_RAUTHY_AUDIENCE: "${DUNGEON_RAUTHY_AUDIENCE}"
+      DUNGEON_RAUTHY_JWKS_URL: "${DUNGEON_RAUTHY_JWKS_URL}"
+      # In-game signup: Rauthy admin API key (`name$secret`, Users create+update),
+      # internal Rauthy base, optional invite gate. Empty key = signup disabled.
+      # Secrets come through `env_file` only, never `${...}` interpolation:
+      # Rauthy API keys look like `name$secret`, and compose would eat the
+      # `$secret` half. (env_file passes values through literally.)
+      #   RAUTHY_API_KEY, RAUTHY_CLIENT_SECRET, DUNGEON_RAUTHY_CLIENT_ID,
+      #   DUNGEON_SIGNUP_CODE, DUNGEON_RAUTHY_INTERNAL
+      DUNGEON_RAUTHY_INTERNAL: "http://rauthy:6080"
+      DUNGEON_SIGNUP_ADDR: "0.0.0.0:6565"
+      # Network path: 1 = bevy_replicon matchbox backend (needs
+      # DUNGEON_SIM_FEATURES=replicon at build time), 0 = legacy HostNet.
+      DUNGEON_REPLICON: "${DUNGEON_REPLICON:-0}"
+      DUNGEON_WORLD_RADIUS: "${DUNGEON_WORLD_RADIUS:-128}"
+      DUNGEON_PLAYER_RADIUS: "${DUNGEON_PLAYER_RADIUS:-96}"
+      RUST_LOG: "${RUST_LOG:-info}"
+    restart: unless-stopped
+
+volumes:
+  surreal-data:
+  rauthy-data:

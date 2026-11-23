@@ -613,8 +613,8 @@ impl Editor {
             if other.id == id {
                 continue;
             }
-            let same_group = host_group.is_some()
-                && self.outline.piece_parent(other.id) == host_group;
+            let same_group =
+                host_group.is_some() && self.outline.piece_parent(other.id) == host_group;
             if same_group || crate::glade::is_attached_to_building(other, building) {
                 mates.push(other.id);
             }

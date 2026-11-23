@@ -9,16 +9,22 @@ use super::*;
 /// How long a web pointer-lock request may take before it counts as refused.
 pub(super) const LOCK_GRACE: f32 = 0.5;
 
-/// Whether the pointer is over the 3D view rather than the desktop palette.
-/// Play hides the palette, so the whole screen is viewport there.
-pub(super) fn over_viewport(editor: &Editor, touch: &TouchState, cursor: Option<Vec2>) -> bool {
+/// Whether the pointer is over the 3D view rather than the desktop palette
+/// (or the palette's re-open tab while it is collapsed). Play hides the
+/// palette, so the whole screen is viewport there.
+pub(super) fn over_viewport(
+    editor: &Editor,
+    touch: &TouchState,
+    left_panel: &LeftPanelState,
+    cursor: Option<Vec2>,
+) -> bool {
     if touch.enabled {
         return false;
     }
     let Some(cursor) = cursor else {
         return false;
     };
-    !object_editing_allowed(editor.mode) || cursor.x > PANEL_WIDTH
+    !object_editing_allowed(editor.mode) || !over_left_panel(cursor, left_panel, touch)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -42,6 +48,7 @@ pub(super) fn manage_capture(
     orbit: Res<Orbit>,
     touch: Res<TouchState>,
     input: PlayerInput,
+    left_panel: Res<LeftPanelState>,
     window: Single<&Window, With<PrimaryWindow>>,
     mut cursor_options: Single<&mut CursorOptions, With<PrimaryWindow>>,
     mut focus: MessageReader<WindowFocused>,
@@ -56,7 +63,7 @@ pub(super) fn manage_capture(
         mode: editor.mode,
         view: orbit.mode,
         first_person,
-        over_viewport: over_viewport(&editor, &touch, window.cursor_position()),
+        over_viewport: over_viewport(&editor, &touch, &left_panel, window.cursor_position()),
         tab: input.just_pressed(Action::CaptureToggle)
             && editor.keyboard_transform.is_none()
             && input_focus.get().is_none(),
@@ -119,6 +126,7 @@ pub(super) fn camera_control(
     input_focus: Res<InputFocus>,
     gates: MenuHome,
     right_panel: Res<RightPanelState>,
+    left_panel: Res<LeftPanelState>,
 ) {
     // The native home screen owns the camera while open.
     if home_modal_open(gates.home) {
@@ -169,7 +177,9 @@ pub(super) fn camera_control(
         raw_scroll
     };
     let over_panel = object_editing_allowed(editor.mode)
-        && window.cursor_position().is_some_and(|p| p.x <= PANEL_WIDTH);
+        && window
+            .cursor_position()
+            .is_some_and(|p| over_left_panel(p, &left_panel, &touch));
 
     // The Add menu owns single-letter shortcuts while open: typing "v" or "f"
     // in the search must not cycle the view or refocus it. (Chords are

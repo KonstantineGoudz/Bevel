@@ -9,7 +9,7 @@ use bevy::prelude::Resource;
 
 use crate::{
     editor::{
-        Character, LevelState, Orbit, ViewMode,
+        Character, LevelState, Orbit, ViewMode, VineNode,
         outline::{Group, SceneOutline, clean_label},
     },
     model::{self, Piece},
@@ -18,19 +18,7 @@ use crate::{
 
 pub const SNAPSHOT_VERSION: u32 = 1;
 pub const MAX_HISTORY: usize = 60;
-pub(crate) const INDEX_KEY: &str = "party-dungeon.index.v1";
-pub(crate) const SESSION_PREFIX: &str = "party-dungeon.session.";
-pub(crate) const SOFT_SAVE_INTERVAL: f64 = 1.0;
 
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn now_ms() -> f64 {
-    js_sys::Date::now()
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn now_ms() -> f64 {
-    0.0
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadError {
@@ -70,6 +58,9 @@ pub struct Snapshot {
     /// Whether grass slows movement and routes. Missing means decoration.
     #[serde(default)]
     pub grass_slows: bool,
+    /// Painted procedural 3D vines. Missing on older saves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vines: Vec<SavedVine>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -106,6 +97,7 @@ fn parse_saved_level(value: serde_json::Value) -> Option<SavedLevel> {
                 pieces,
                 groups: Vec::new(),
                 grass: Vec::new(),
+                vines: Vec::new(),
             })
     } else {
         serde_json::from_value::<SavedLevel>(value).ok()
@@ -195,8 +187,35 @@ pub struct SavedGrass {
     pub density: u8,
 }
 
+/// One painted procedural vine anchor on a 3D surface.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedVine {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub nx: f32,
+    pub ny: f32,
+    pub nz: f32,
+    pub seed: u32,
+}
+
+impl From<&VineNode> for SavedVine {
+    fn from(node: &VineNode) -> Self {
+        Self {
+            x: node.pos.x,
+            y: node.pos.y,
+            z: node.pos.z,
+            nx: node.normal.x,
+            ny: node.normal.y,
+            nz: node.normal.z,
+            seed: node.seed,
+        }
+    }
+}
+
 /// One undo step. The object shape (rather than a bare array) lets groups,
-/// labels and grass travel with the pieces they describe.
+/// labels, grass and vines travel with the pieces they describe.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedLevel {
@@ -207,6 +226,9 @@ pub struct SavedLevel {
     /// Grass at this history step. Missing on older saves, which grew none.
     #[serde(default)]
     pub grass: Vec<SavedGrass>,
+    /// Vines at this history step. Missing on older saves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vines: Vec<SavedVine>,
 }
 
 impl From<&Group> for SavedGroup {
@@ -236,6 +258,7 @@ impl From<&LevelState> for SavedLevel {
                 .collect(),
             groups: state.outline.groups.iter().map(SavedGroup::from).collect(),
             grass,
+            vines: state.vines.iter().map(SavedVine::from).collect(),
         }
     }
 }
@@ -250,6 +273,28 @@ fn validate_grass(saved: &[SavedGrass]) -> std::collections::HashMap<(i32, i32),
         grass.insert((cell.q, cell.r), cell.density.clamp(1, 4));
     }
     grass
+}
+
+/// Validate saved vine anchors: drop non-finite coordinates and normalize normals.
+fn validate_vines(saved: &[SavedVine]) -> Vec<VineNode> {
+    saved
+        .iter()
+        .filter_map(|v| {
+            let finite = [v.x, v.y, v.z, v.nx, v.ny, v.nz]
+                .iter()
+                .all(|f| f.is_finite());
+            if !finite {
+                return None;
+            }
+            let n = Vec3::new(v.nx, v.ny, v.nz).normalize_or_zero();
+            let normal = if n.length_squared() < 0.5 { Vec3::Y } else { n };
+            Some(VineNode {
+                pos: Vec3::new(v.x, v.y, v.z),
+                normal,
+                seed: v.seed,
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -591,59 +636,14 @@ impl Snapshot {
             platforms,
             grass: validate_grass(&self.grass),
             grass_slows: self.grass_slows,
+            vines: validate_vines(&self.vines),
         })
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StorageError {
-    QuotaExceeded,
-    Unavailable,
-    IndexMissing,
-}
-
-pub(crate) trait Store {
-    fn get(&self, key: &str) -> Option<String>;
-    fn set(&mut self, key: &str, value: &str) -> Result<(), StorageError>;
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct Meta {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) created_at: f64,
-    pub(crate) updated_at: f64,
-    pub(crate) piece_count: usize,
-}
-
-pub(crate) fn session_key(id: &str) -> String {
-    format!("{SESSION_PREFIX}{id}.v1")
-}
-
-/// Directory holding native level files. Mirrors the MCP server: explicit
-/// `PARTY_DUNGEON_LEVELS_DIR`, else `game/levels` / `levels` under the cwd,
-/// else `game/levels` (created on save).
-#[cfg(not(target_arch = "wasm32"))]
-pub fn levels_dir() -> std::path::PathBuf {
-    if let Ok(value) = std::env::var("PARTY_DUNGEON_LEVELS_DIR") {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return std::path::PathBuf::from(trimmed);
-        }
-    }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    for candidate in ["game/levels", "levels"] {
-        if cwd.join(candidate).is_dir() {
-            return cwd.join(candidate);
-        }
-    }
-    cwd.join("game/levels")
-}
-
-/// Where native control bindings live. Explicit `PARTY_DUNGEON_CONTROLS wins;
-/// otherwise a `controls.json` next to the levels dir (so a `game/levels`
-/// layout yields `game/controls.json`), falling back to the cwd.
+/// Where native control bindings live. Explicit `PARTY_DUNGEON_CONTROLS` wins;
+/// otherwise `game/controls.json` when the checkout layout is visible,
+/// falling back to `./controls.json`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn native_controls_path() -> std::path::PathBuf {
     if let Ok(value) = std::env::var("PARTY_DUNGEON_CONTROLS") {
@@ -652,157 +652,13 @@ pub fn native_controls_path() -> std::path::PathBuf {
             return std::path::PathBuf::from(trimmed);
         }
     }
-    let dir = levels_dir();
-    if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
-        parent.join("controls.json")
-    } else {
-        std::path::PathBuf::from("controls.json")
+    // Single world: no levels dir anymore. Prefer `game/controls.json` when the
+    // checkout layout is visible so existing bindings keep loading.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    if cwd.join("game").is_dir() {
+        return cwd.join("game").join("controls.json");
     }
-}
-
-/// A level name is a safe file stem: letters, digits, `-`, `_`, `.`.
-pub fn sanitize_level_name(name: &str) -> Option<String> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if !trimmed
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-    {
-        return None;
-    }
-    if trimmed == "." || trimmed == ".." || trimmed.contains("..") {
-        return None;
-    }
-    Some(trimmed.to_owned())
-}
-
-/// Resolve a level name to its snapshot file. `None` means the default level.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn level_path_for(name: Option<&str>) -> Result<std::path::PathBuf, String> {
-    let default_name = std::env::var("PARTY_DUNGEON_LEVEL")
-        .ok()
-        .filter(|value| {
-            let trimmed = value.trim();
-            !trimmed.is_empty()
-                && !trimmed.ends_with(".json")
-                && !trimmed.contains('/')
-                && !trimmed.contains('\\')
-        })
-        .unwrap_or_else(|| "level".to_owned());
-    let name = name
-        .map(sanitize_level_name)
-        .unwrap_or_else(|| sanitize_level_name(&default_name).or(Some("level".into())))
-        .ok_or_else(|| "invalid level name (use a-z, 0-9, '-', '_')".to_owned())?;
-    let mut file = name;
-    if !file.ends_with(".json") {
-        file.push_str(".json");
-    }
-    Ok(levels_dir().join(file))
-}
-
-/// One row for the native home screen / maps dialog.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(not(target_arch = "wasm32"))]
-pub struct NativeLevel {
-    pub name: String,
-    pub pieces: usize,
-    pub has_character: bool,
-    pub unreadable: bool,
-}
-
-/// List snapshot files in the levels dir, sorted by name. Missing dir reads
-/// as empty; `.bak` files are skipped.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn list_native_levels() -> Vec<NativeLevel> {
-    let dir = levels_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let stem = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("");
-        if stem.is_empty() || stem.ends_with(".bak") {
-            continue;
-        }
-        let name = stem.to_owned();
-        match std::fs::read_to_string(&path).ok().and_then(|text| {
-            parse_any_snapshot_text(&text)
-                .and_then(Snapshot::validate)
-                .ok()
-        }) {
-            Some(loaded) => out.push(NativeLevel {
-                name,
-                pieces: loaded.pieces.len(),
-                has_character: loaded.character.is_some(),
-                unreadable: false,
-            }),
-            None => out.push(NativeLevel {
-                name,
-                pieces: 0,
-                has_character: false,
-                unreadable: true,
-            }),
-        }
-    }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
-}
-
-/// Read one native level by name (or an explicit file path).
-#[cfg(not(target_arch = "wasm32"))]
-pub fn load_native_level(name: &str) -> Result<Loaded, String> {
-    let path = if name.contains('/') || name.contains('\\') || name.ends_with(".json") {
-        std::path::PathBuf::from(name)
-    } else {
-        level_path_for(Some(name))?
-    };
-    let text =
-        std::fs::read_to_string(&path).map_err(|error| format!("could not read level: {error}"))?;
-    let display = path.display().to_string();
-    parse_any_snapshot_text(&text)
-        .and_then(|snapshot| snapshot.validate())
-        .map_err(|error| format!("{display}: {error:?}"))
-}
-
-/// Write a snapshot to the level file for `name`, creating the levels dir and
-/// keeping a `.bak` copy of the previous file.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn save_native_level(name: &str, snapshot: &Snapshot) -> Result<std::path::PathBuf, String> {
-    let path = level_path_for(Some(name))?;
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("could not create levels dir: {error}"))?;
-    }
-    snapshot
-        .clone()
-        .validate()
-        .map_err(|error| format!("level failed validation: {error:?}"))?;
-    if path.exists() {
-        let backup = path.with_extension("json.bak");
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            let _ = std::fs::write(&backup, text);
-        }
-    }
-    let pretty = serde_json::to_string_pretty(snapshot)
-        .map_err(|error| format!("could not serialize level: {error}"))?;
-    std::fs::write(&path, pretty).map_err(|error| format!("could not write level: {error}"))?;
-    Ok(path)
-}
-
-/// Delete a native level file by name.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn delete_native_level(name: &str) -> Result<(), String> {
-    let path = level_path_for(Some(name))?;
-    std::fs::remove_file(&path).map_err(|error| format!("could not delete level: {error}"))
+    cwd.join("controls.json")
 }
 
 /// Parse either a session Snapshot (v1) or the debug `level.json`
@@ -810,8 +666,7 @@ pub fn delete_native_level(name: &str) -> Result<(), String> {
 pub fn parse_any_snapshot_text(text: &str) -> Result<Snapshot, LoadError> {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
         if value.get("format").and_then(|v| v.as_str()) == Some("party-dungeon-level") {
-            return snapshot_from_level_json(&value)
-                .map_err(LoadError::Parse);
+            return snapshot_from_level_json(&value).map_err(LoadError::Parse);
         }
     }
     Snapshot::from_json(text)
@@ -890,11 +745,13 @@ pub fn snapshot_from_level_json(doc: &serde_json::Value) -> Result<Snapshot, Str
         platforms,
         grass: Vec::new(),
         grass_slows: false,
+        vines: Vec::new(),
     })
 }
 
 fn saved_piece_from_level_json(item: &serde_json::Value) -> Result<SavedPiece, String> {
-    let f64_field = |key: &str, default: f64| item.get(key).and_then(|v| v.as_f64()).unwrap_or(default) as f32;
+    let f64_field =
+        |key: &str, default: f64| item.get(key).and_then(|v| v.as_f64()).unwrap_or(default) as f32;
     let shape = item
         .get("shape")
         .and_then(|v| v.as_str())
@@ -913,53 +770,53 @@ fn saved_piece_from_level_json(item: &serde_json::Value) -> Result<SavedPiece, S
         rot_deg: f64_field("rotDeg", 0.0),
         pitch_deg: f64_field("pitchDeg", 0.0),
         roll_deg: f64_field("rollDeg", 0.0),
-        dynamic: item.get("dynamic").and_then(|v| v.as_bool()).unwrap_or(false),
-        damage: item.get("damage").and_then(|v| v.as_f64()).map(|v| v as f32),
+        dynamic: item
+            .get("dynamic")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        damage: item
+            .get("damage")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32),
         interact: item
             .get("interact")
             .and_then(|v| v.as_str())
             .map(|s| s.to_owned()),
-        trigger_width: item.get("triggerWidth").and_then(|v| v.as_f64()).map(|v| v as f32),
-        trigger_length: item.get("triggerLength").and_then(|v| v.as_f64()).map(|v| v as f32),
-        trigger_height: item.get("triggerHeight").and_then(|v| v.as_f64()).map(|v| v as f32),
+        trigger_width: item
+            .get("triggerWidth")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32),
+        trigger_length: item
+            .get("triggerLength")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32),
+        trigger_height: item
+            .get("triggerHeight")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32),
         trigger_shape: item
             .get("triggerShape")
             .and_then(|v| v.as_str())
             .map(|s| s.to_owned()),
-        trigger_alpha: item.get("triggerAlpha").and_then(|v| v.as_f64()).map(|v| v as f32),
+        trigger_alpha: item
+            .get("triggerAlpha")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32),
         trigger_color: item
             .get("triggerColor")
             .and_then(|v| v.as_str())
             .map(|s| s.to_owned()),
         trigger_visible: item.get("triggerVisible").and_then(|v| v.as_bool()),
-        name: item.get("name").and_then(|v| v.as_str()).map(|s| s.to_owned()),
+        name: item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_owned()),
         group: item.get("group").and_then(|v| v.as_u64()).map(|v| v as u32),
-        locked: item.get("locked").and_then(|v| v.as_bool()).unwrap_or(false),
+        locked: item
+            .get("locked")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     })
-}
-
-/// Level file for native runs and the MCP bridge: `PARTY_DUNGEON_LEVEL` when
-/// it looks like a path, otherwise `--level <path>` / `--level=<path>`.
-pub fn level_file_from_env_or_args() -> Option<std::path::PathBuf> {
-    if let Ok(value) = std::env::var("PARTY_DUNGEON_LEVEL") {
-        let trimmed = value.trim();
-        if !trimmed.is_empty()
-            && (trimmed.ends_with(".json") || trimmed.contains('/') || trimmed.contains('\\'))
-        {
-            return Some(std::path::PathBuf::from(trimmed));
-        }
-    }
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--level" {
-            if let Some(path) = args.next() {
-                return Some(std::path::PathBuf::from(path));
-            }
-        } else if let Some(rest) = arg.strip_prefix("--level=") {
-            return Some(std::path::PathBuf::from(rest));
-        }
-    }
-    None
 }
 
 /// Convert one saved piece into the game type (same rules as map loading).
@@ -967,28 +824,17 @@ pub fn level_file_from_env_or_args() -> Option<std::path::PathBuf> {
 pub(crate) fn piece_from_saved(saved: &SavedPiece) -> Result<Piece, LoadError> {
     validate_piece(saved.clone())
 }
-
-pub fn parse_session_id(query: &str) -> Option<String> {
-    query
-        .strip_prefix('?')
-        .unwrap_or(query)
-        .split('&')
-        .find_map(|pair| pair.strip_prefix("session="))
-        .filter(|id| !id.is_empty())
-        .map(str::to_owned)
-}
-
+/// Boot mode. There is a single unified world (owned by the sim, backed by
+/// SurrealDB), so booting never loads a file: the editor starts empty and the
+/// world arrives over the net after login.
 #[derive(Debug, Default, Resource, Clone)]
 pub struct Boot {
-    pub id: Option<String>,
-    pub loaded: Option<Loaded>,
     /// True when the app should open the Rust/Bevy glTF viewer instead of the
     /// level editor (`viewer-bevy.html?viewer`, or `--viewer` on native).
     pub viewer: bool,
-    /// Native level name (file stem in the levels dir) and the file it was
-    /// loaded from. Wasm leaves both `None` and uses `id` instead.
-    pub level_name: Option<String>,
-    pub level_path: Option<std::path::PathBuf>,
+    /// Headless GPU mode (native only): no window, offscreen render target.
+    /// `None` boots the normal windowed client. See `crate::headless`.
+    pub headless: Option<crate::headless::HeadlessConfig>,
 }
 
 /// The viewer is a separate Bevy path: `viewer-bevy.html?viewer` (or any query
@@ -1004,100 +850,29 @@ pub fn is_viewer_query(query: &str) -> bool {
         })
 }
 
+/// Boot the app. There is a single unified world (owned by the sim), so this
+/// never loads a file: `viewer` selects the glTF model viewer, otherwise the
+/// editor starts empty and the world arrives over the net after login.
 #[cfg(target_arch = "wasm32")]
-pub fn boot() -> Result<Boot, String> {
-    let window =
-        web_sys::window().ok_or_else(|| "Could not access the browser window.".to_owned())?;
-    let search = window
-        .location()
-        .search()
-        .map_err(|_| "Could not read the browser URL.".to_owned())?;
-    if is_viewer_query(&search) {
-        return Ok(Boot {
-            viewer: true,
-            ..Default::default()
-        });
+pub fn boot() -> Boot {
+    let search = web_sys::window()
+        .and_then(|window| window.location().search().ok())
+        .unwrap_or_default();
+    Boot {
+        viewer: is_viewer_query(&search),
+        // A browser tab always has a window; headless GPU mode is native-only.
+        headless: None,
     }
-    let id = parse_session_id(&search)
-        .ok_or_else(|| "Choose a map from the maps page before opening the editor.".to_owned())?;
-    let store = LocalStore::new()
-        .map_err(|_| "Browser storage is unavailable; the map cannot be opened.".to_owned())?;
-    if !read_index(&store).iter().any(|meta| meta.id == id) {
-        return Err("This map is not in your saved maps list.".to_owned());
-    }
-    let loaded = read_session(&store, &id)
-        .and_then(Snapshot::validate)
-        .map_err(load_error_message)?;
-
-    Ok(Boot {
-        id: Some(id),
-        loaded: Some(loaded),
-        viewer: false,
-        ..Default::default()
-    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn boot() -> Result<Boot, String> {
+pub fn boot() -> Boot {
     let viewer = std::env::args().any(|arg| arg == "--viewer" || arg == "--view");
-    if viewer {
-        return Ok(Boot {
-            viewer: true,
-            ..Default::default()
-        });
-    }
-    // Native runs (and the MCP bridge) can open a snapshot file directly:
-    // `--level <path>` or `PARTY_DUNGEON_LEVEL=<path>`. Both the session
-    // Snapshot (v1) and the debug `level.json` (v2) load, so an `S`-saved
-    // file reopens.
-    if let Some(path) = level_file_from_env_or_args() {
-        match std::fs::read_to_string(&path) {
-            Ok(text) => match parse_any_snapshot_text(&text).and_then(Snapshot::validate) {
-                Ok(loaded) => {
-                    let name = path
-                        .file_stem()
-                        .and_then(|stem| stem.to_str())
-                        .map(str::to_owned);
-                    return Ok(Boot {
-                        id: None,
-                        loaded: Some(loaded),
-                        viewer: false,
-                        level_name: name,
-                        level_path: Some(path),
-                    });
-                }
-                Err(error) => {
-                    eprintln!("party-dungeon: ignoring {}: {error:?}", path.display());
-                }
-            },
-            Err(error) => {
-                eprintln!("party-dungeon: could not read {}: {error}", path.display());
-            }
-        }
-    }
-    Ok(Boot {
-        viewer: false,
-        ..Default::default()
-    })
+    // `--headless` / `PARTY_DUNGEON_HEADLESS`: no window, offscreen GPU target.
+    let headless = crate::headless::HeadlessConfig::from_env();
+    Boot { viewer, headless }
 }
 
-fn load_error_message(error: LoadError) -> String {
-    match error {
-        LoadError::MissingVersion => "The saved map is missing its version.".to_owned(),
-        LoadError::UnsupportedVersion(version) => {
-            format!("The saved map uses unsupported version {version}.")
-        }
-        LoadError::UnknownShape(shape) => {
-            format!("The saved map contains an unknown shape: {shape}.")
-        }
-        LoadError::NonFinite(_) => "The saved map contains invalid geometry.".to_owned(),
-        LoadError::Parse(details) => {
-            bevy::log::warn!("Could not read saved map: {details}");
-            "The saved map could not be read.".to_owned()
-        }
-        LoadError::NotFound => "The saved map state is missing from browser storage.".to_owned(),
-    }
-}
 
 #[cfg(target_arch = "wasm32")]
 pub fn show_error(message: &str) {
@@ -1115,155 +890,6 @@ pub fn show_error(message: &str) {
         let _ = back.remove_attribute("hidden");
     }
 }
-
-#[cfg(test)]
-pub(crate) fn encode_index(metas: &[Meta]) -> String {
-    serde_json::to_string(metas).expect("session metadata serializes to JSON")
-}
-
-pub(crate) fn parse_index(text: &str) -> Vec<Meta> {
-    serde_json::from_str::<Vec<serde_json::Value>>(text)
-        .map(|entries| {
-            entries
-                .into_iter()
-                .filter_map(|entry| serde_json::from_value(entry).ok())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-pub(crate) fn read_index(store: &dyn Store) -> Vec<Meta> {
-    store
-        .get(INDEX_KEY)
-        .map_or_else(Vec::new, |json| parse_index(&json))
-}
-
-#[cfg(test)]
-pub(crate) fn write_index(store: &mut dyn Store, metas: &[Meta]) -> Result<(), StorageError> {
-    store.set(INDEX_KEY, &encode_index(metas))
-}
-
-pub(crate) fn read_session(store: &dyn Store, id: &str) -> Result<Snapshot, LoadError> {
-    let json = store.get(&session_key(id)).ok_or(LoadError::NotFound)?;
-    Snapshot::from_json(&json)
-}
-
-pub(crate) fn write_session(
-    store: &mut dyn Store,
-    id: &str,
-    snapshot: &Snapshot,
-) -> Result<(), StorageError> {
-    store.set(&session_key(id), &snapshot.to_json())
-}
-
-pub(crate) fn save_session(
-    store: &mut dyn Store,
-    id: &str,
-    snapshot: &Snapshot,
-    now_ms: f64,
-) -> Result<(), StorageError> {
-    write_session(store, id, snapshot)?;
-    let raw = store.get(INDEX_KEY).ok_or(StorageError::IndexMissing)?;
-    let mut entries: Vec<serde_json::Value> =
-        serde_json::from_str(&raw).map_err(|_| StorageError::IndexMissing)?;
-    let meta = entries
-        .iter_mut()
-        .find(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(id))
-        .ok_or(StorageError::IndexMissing)?;
-    meta["updatedAt"] = serde_json::json!(now_ms);
-    meta["pieceCount"] = serde_json::json!(snapshot.pieces.len());
-    let json = serde_json::to_string(&entries).expect("raw session metadata serializes to JSON");
-    store.set(INDEX_KEY, &json)
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(crate) struct LocalStore {
-    storage: web_sys::Storage,
-}
-
-#[cfg(target_arch = "wasm32")]
-impl LocalStore {
-    pub(crate) fn new() -> Result<Self, StorageError> {
-        let storage = web_sys::window()
-            .ok_or(StorageError::Unavailable)?
-            .local_storage()
-            .map_err(|_| StorageError::Unavailable)?
-            .ok_or(StorageError::Unavailable)?;
-        Ok(Self { storage })
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-impl Store for LocalStore {
-    fn get(&self, key: &str) -> Option<String> {
-        self.storage.get_item(key).ok().flatten()
-    }
-
-    fn set(&mut self, key: &str, value: &str) -> Result<(), StorageError> {
-        use wasm_bindgen::JsCast;
-
-        self.storage.set_item(key, value).map_err(|error| {
-            let name = error
-                .dyn_ref::<web_sys::DomException>()
-                .map(web_sys::DomException::name);
-            match name.as_deref() {
-                Some("QuotaExceededError" | "NS_ERROR_DOM_QUOTA_REACHED") => {
-                    StorageError::QuotaExceeded
-                }
-                _ => StorageError::Unavailable,
-            }
-        })
-    }
-}
-
-#[cfg(test)]
-struct MemoryStore {
-    entries: std::collections::HashMap<String, String>,
-    quota: Option<usize>,
-}
-
-#[cfg(test)]
-impl MemoryStore {
-    fn new() -> Self {
-        Self {
-            entries: std::collections::HashMap::new(),
-            quota: None,
-        }
-    }
-
-    fn with_quota(quota: usize) -> Self {
-        Self {
-            entries: std::collections::HashMap::new(),
-            quota: Some(quota),
-        }
-    }
-}
-
-#[cfg(test)]
-impl Store for MemoryStore {
-    fn get(&self, key: &str) -> Option<String> {
-        self.entries.get(key).cloned()
-    }
-
-    fn set(&mut self, key: &str, value: &str) -> Result<(), StorageError> {
-        if let Some(quota) = self.quota {
-            let size = self
-                .entries
-                .iter()
-                .filter(|(stored_key, _)| stored_key.as_str() != key)
-                .map(|(stored_key, stored_value)| stored_key.len() + stored_value.len())
-                .sum::<usize>()
-                + key.len()
-                + value.len();
-            if size > quota {
-                return Err(StorageError::QuotaExceeded);
-            }
-        }
-        self.entries.insert(key.to_owned(), value.to_owned());
-        Ok(())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Loaded {
     pub pieces: Vec<Piece>,
@@ -1276,6 +902,7 @@ pub struct Loaded {
     pub platforms: Vec<SavedPlatform>,
     pub grass: std::collections::HashMap<(i32, i32), u8>,
     pub grass_slows: bool,
+    pub vines: Vec<VineNode>,
 }
 
 /// Accept as many saved groups as possible: duplicate/zero/conflicting ids and
@@ -1353,6 +980,7 @@ fn validate_level(level: SavedLevel) -> Option<LevelState> {
         pieces,
         outline,
         grass: validate_grass(&level.grass),
+        vines: validate_vines(&level.vines),
     })
 }
 
@@ -1474,14 +1102,26 @@ fn validate_piece(saved: SavedPiece) -> Result<Piece, LoadError> {
         shape: shape_index,
         pos: Vec2::new(saved.x, saved.z),
         rot: saved.rot_deg.to_radians(),
-        pitch: if is_glade { 0.0 } else { saved.pitch_deg.to_radians() },
-        roll: if is_glade { 0.0 } else { saved.roll_deg.to_radians() },
+        pitch: if is_glade {
+            0.0
+        } else {
+            saved.pitch_deg.to_radians()
+        },
+        roll: if is_glade {
+            0.0
+        } else {
+            saved.roll_deg.to_radians()
+        },
         elevation: saved.elevation,
         dynamic: saved.dynamic,
         trigger: model::Trigger::damaging(damage),
         trigger_size,
         trigger_shape_override,
-        trigger_alpha,
+        // `SavedPiece.trigger_alpha` carries the glade **roof pitch** for glade
+        // shapes (0.08..2.0, see `capture`/`from_piece`) and the raw opacity
+        // for everything else; `Piece.trigger_alpha` is always the raw 0..1
+        // value that `glade::roof_pitch` doubles again.
+        trigger_alpha: if is_glade { trigger_alpha / 2.0 } else { trigger_alpha },
         trigger_color,
         trigger_visible,
         interact,
@@ -1513,19 +1153,6 @@ fn validate_history(history: Vec<SavedLevel>, highest_id: &mut u32) -> Vec<Level
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_session_id_is_read_from_the_query_string() {
-        assert_eq!(parse_session_id("?session=abc-123"), Some("abc-123".into()));
-        assert_eq!(
-            parse_session_id("?x=1&session=abc-123&y=2"),
-            Some("abc-123".into())
-        );
-        assert_eq!(parse_session_id("?session="), None);
-        assert_eq!(parse_session_id(""), None);
-        assert_eq!(parse_session_id("?Session=abc"), None);
-    }
-
     #[test]
     fn the_viewer_flag_is_read_from_the_query_string() {
         assert!(is_viewer_query("?viewer"));
@@ -1603,6 +1230,7 @@ mod tests {
                     r: 2,
                     density: 3,
                 }],
+                vines: vec![],
             }],
             platforms: vec![],
             grass: vec![SavedGrass {
@@ -1611,6 +1239,7 @@ mod tests {
                 density: 3,
             }],
             grass_slows: true,
+            vines: vec![],
         };
         let json = snapshot.to_json();
         assert!(json.contains("\"rotDeg\":30.0"), "{json}");
@@ -1879,19 +1508,16 @@ mod tests {
             undo: vec![
                 SavedLevel {
                     pieces: vec![saved(2, "block", 0.0, 0.0)],
-                    groups: vec![],
-                    grass: vec![],
+                    ..Default::default()
                 },
                 SavedLevel {
                     pieces: vec![bad],
-                    groups: vec![],
-                    grass: vec![],
+                    ..Default::default()
                 },
             ],
             redo: vec![SavedLevel {
                 pieces: vec![saved(3, "block", 0.0, 0.0)],
-                groups: vec![],
-                grass: vec![],
+                ..Default::default()
             }],
             ..Default::default()
         };
@@ -1909,13 +1535,11 @@ mod tests {
             pieces: vec![saved(2, "block", 0.0, 0.0)],
             undo: vec![SavedLevel {
                 pieces: vec![saved(7, "block", 0.0, 0.0)],
-                groups: vec![],
-                grass: vec![],
+                ..Default::default()
             }],
             redo: vec![SavedLevel {
                 pieces: vec![saved(9, "block", 0.0, 0.0)],
-                groups: vec![],
-                grass: vec![],
+                ..Default::default()
             }],
             ..Default::default()
         };
@@ -1927,8 +1551,7 @@ mod tests {
         let undo = (0..70)
             .map(|i| SavedLevel {
                 pieces: vec![saved(i + 1, "block", 0.0, 0.0)],
-                groups: vec![],
-                grass: vec![],
+                ..Default::default()
             })
             .collect();
         let loaded = Snapshot {
@@ -1942,157 +1565,6 @@ mod tests {
         assert_eq!(loaded.undo[0].pieces[0].id, 11);
         assert_eq!(loaded.undo[59].pieces[0].id, 70);
     }
-
-    #[test]
-    fn a_session_key_is_prefixed_and_versioned() {
-        assert_eq!(session_key("abc"), "party-dungeon.session.abc.v1");
-    }
-
-    #[test]
-    fn index_json_round_trips_and_skips_broken_entries() {
-        let metas = vec![Meta {
-            id: "a".into(),
-            name: "Alpha".into(),
-            created_at: 1.0,
-            updated_at: 2.0,
-            piece_count: 3,
-        }];
-        assert_eq!(parse_index(&encode_index(&metas)), metas);
-        let mixed = r#"[
-            {"id":"a","name":"Alpha","createdAt":1,"updatedAt":2,"pieceCount":3},
-            {"name":"no id"}
-        ]"#;
-        assert_eq!(parse_index(mixed).len(), 1);
-    }
-
-    #[test]
-    fn saving_a_session_updates_its_index_entry() {
-        let mut store = MemoryStore::new();
-        let meta = Meta {
-            id: "a".into(),
-            name: "Alpha".into(),
-            created_at: 1.0,
-            updated_at: 2.0,
-            piece_count: 0,
-        };
-        write_index(&mut store, &[meta]).unwrap();
-        let snapshot = Snapshot {
-            version: 1,
-            pieces: vec![saved(1, "block", 0.0, 0.0), saved(2, "block", 1.0, 0.0)],
-            ..Default::default()
-        };
-        save_session(&mut store, "a", &snapshot, 42.0).unwrap();
-        let metas = read_index(&store);
-        assert_eq!(metas[0].piece_count, 2);
-        assert_eq!(metas[0].updated_at, 42.0);
-        assert_eq!(read_session(&store, "a").unwrap(), snapshot);
-    }
-
-    #[test]
-    fn saving_a_session_preserves_malformed_sibling_index_entries() {
-        let mut store = MemoryStore::new();
-        let sibling = serde_json::json!({"id": "broken", "name": "Missing fields"});
-        let raw = serde_json::json!([
-            {
-                "id": "a",
-                "name": "Alpha",
-                "createdAt": 1,
-                "updatedAt": 2,
-                "pieceCount": 0
-            },
-            sibling.clone()
-        ])
-        .to_string();
-        store.set(INDEX_KEY, &raw).unwrap();
-        let snapshot = Snapshot {
-            version: 1,
-            pieces: vec![saved(1, "block", 0.0, 0.0)],
-            ..Default::default()
-        };
-
-        save_session(&mut store, "a", &snapshot, 42.0).unwrap();
-
-        let entries: Vec<serde_json::Value> =
-            serde_json::from_str(&store.get(INDEX_KEY).unwrap()).unwrap();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0]["updatedAt"], 42.0);
-        assert_eq!(entries[0]["pieceCount"], 1);
-        assert_eq!(entries[1], sibling);
-    }
-
-    #[test]
-    fn saving_a_session_with_a_missing_index_entry_returns_an_error() {
-        let mut store = MemoryStore::new();
-        let raw = serde_json::json!([{
-            "id": "a",
-            "name": "Alpha",
-            "createdAt": 1,
-            "updatedAt": 2,
-            "pieceCount": 0
-        }])
-        .to_string();
-        store.set(INDEX_KEY, &raw).unwrap();
-        let snapshot = Snapshot {
-            version: 1,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            save_session(&mut store, "b", &snapshot, 42.0),
-            Err(StorageError::IndexMissing)
-        );
-        assert_eq!(store.get(INDEX_KEY).unwrap(), raw);
-        assert_eq!(read_session(&store, "b").unwrap(), snapshot);
-    }
-
-    #[test]
-    fn saving_a_session_does_not_rewrite_an_invalid_raw_index() {
-        let mut store = MemoryStore::new();
-        let raw = r#"{"id":"a"}"#;
-        store.set(INDEX_KEY, raw).unwrap();
-        let snapshot = Snapshot {
-            version: 1,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            save_session(&mut store, "a", &snapshot, 42.0),
-            Err(StorageError::IndexMissing)
-        );
-        assert_eq!(store.get(INDEX_KEY).unwrap(), raw);
-        assert_eq!(read_session(&store, "a").unwrap(), snapshot);
-    }
-
-    #[test]
-    fn a_full_store_keeps_the_previous_snapshot() {
-        let mut store = MemoryStore::with_quota(400);
-        let old = Snapshot {
-            version: 1,
-            pieces: vec![saved(1, "block", 0.0, 0.0)],
-            ..Default::default()
-        };
-        write_session(&mut store, "a", &old).unwrap();
-        let big = Snapshot {
-            version: 1,
-            pieces: (0..20).map(|i| saved(i, "block", i as f32, 0.0)).collect(),
-            ..Default::default()
-        };
-        assert_eq!(
-            write_session(&mut store, "a", &big).unwrap_err(),
-            StorageError::QuotaExceeded
-        );
-        assert_eq!(read_session(&store, "a").unwrap(), old);
-    }
-
-    #[test]
-    fn a_missing_session_is_not_found() {
-        let store = MemoryStore::new();
-        assert_eq!(
-            read_session(&store, "nope").unwrap_err(),
-            LoadError::NotFound
-        );
-    }
-
     #[test]
     fn per_piece_damage_round_trips_through_json() {
         let mut damaged = saved(1, "block", 0.0, 0.0);

@@ -930,6 +930,21 @@ static SHAPES: LazyLock<Vec<Shape>> = LazyLock::new(|| {
             end_anchors(2.6),
         ),
         shape(
+            "glade_stairs",
+            "Building Stairs",
+            "Walls & Paths",
+            SnapMode::Edge,
+            0x9aa4b0,
+            Geometry::Bar {
+                len: 3.2,
+                thick: 1.4,
+            },
+            Style::Plain,
+            1.8,
+            0.0,
+            end_anchors(3.2),
+        ),
+        shape(
             "glade_door",
             "Building Door",
             "Doors & Windows",
@@ -970,6 +985,18 @@ static SHAPES: LazyLock<Vec<Shape>> = LazyLock::new(|| {
             2.2,
             0.0,
             ring_anchors(8, 2.8, 0.0),
+        ),
+        shape(
+            "glade_tree",
+            "Tree",
+            "Building",
+            SnapMode::Center,
+            0xffffff,
+            Geometry::Circle { r: 1.8 },
+            Style::Plain,
+            5.5,
+            0.0,
+            ring_anchors(4, 1.8, 0.0),
         ),
         shape(
             "glade_path",
@@ -1746,11 +1773,11 @@ mod tests {
 
     #[test]
     fn catalogue_has_every_piece() {
-        assert_eq!(shapes().len(), 34);
+        assert_eq!(shapes().len(), 36);
         let mut ids: Vec<_> = shapes().iter().map(|s| s.id).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 34);
+        assert_eq!(ids.len(), 36);
         for cat in CATEGORIES {
             assert!(shapes().iter().any(|s| s.category == cat), "missing {cat}");
         }

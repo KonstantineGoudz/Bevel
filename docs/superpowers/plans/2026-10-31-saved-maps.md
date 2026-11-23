@@ -20,7 +20,7 @@
 - Autosave throttles camera/character writes to at most once per second; committed edits save immediately.
 - Planned routes, waypoints, curve handles, selected tool, and build/play mode are never saved.
 - Native desktop keeps `level.json`; no local-storage code runs there.
-- The web build targets `wasm32-unknown-unknown` and is served from `game/web` on port 8082.
+- The web build targets `wasm32-unknown-unknown` and is served from `game/web` on port 6082.
 - Run Rust tests from `game/` with `cargo test -p party-dungeon`.
 
 ## Review Focus
@@ -717,7 +717,7 @@ localStorage.setItem("party-dungeon.index.v1", JSON.stringify([{id, name:"Manual
 localStorage.setItem(`party-dungeon.session.${id}.v1`, JSON.stringify({version:1}));
 ```
 
-Open `http://localhost:8082/game.html?session=manual-test`, place a block, move the camera, wait two seconds, and refresh. Expected: the block and camera return.
+Open `http://localhost:6082/game.html?session=manual-test`, place a block, move the camera, wait two seconds, and refresh. Expected: the block and camera return.
 
 - [ ] **Step 8: Commit**
 
@@ -821,7 +821,7 @@ Storage errors in create/rename/delete appear inline in the open dialog; the lis
 
 - [ ] **Step 3: Verify the picker manually**
 
-Serve with `./scripts/serve-web.sh` and open `http://localhost:8082/`. Check: empty state; create "First map" and open it; the row returns with a piece count and last-edited time; rename keeps row order; delete confirms by name and removes only that map; a 60-character unicode name renders literally; two maps share a name and stay separate.
+Serve with `./scripts/serve-web.sh` and open `http://localhost:6082/`. Check: empty state; create "First map" and open it; the row returns with a piece count and last-edited time; rename keeps row order; delete confirms by name and removes only that map; a 60-character unicode name renders literally; two maps share a name and stay separate.
 
 - [ ] **Step 4: Commit**
 
@@ -844,7 +844,7 @@ From `game/`: `./scripts/build-web.sh` — `Built web/pkg`, no errors.
 
 - [ ] **Step 2: Serve and run the checklist**
 
-Run `./scripts/serve-web.sh` and open `http://localhost:8082/`.
+Run `./scripts/serve-web.sh` and open `http://localhost:6082/`.
 
 1. Create "Reload test" and place at least two blocks and the character.
 2. Move the camera and walk for a couple of seconds, wait one second, refresh — pieces, camera, and character return.

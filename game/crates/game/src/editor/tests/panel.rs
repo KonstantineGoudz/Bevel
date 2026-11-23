@@ -55,11 +55,22 @@ fn the_right_panel_hit_box_covers_open_and_closed_states() {
         &right,
         &touch
     ));
-    assert!(!over_right_panel(Vec2::new(100.0, 40.0), size, &right, &touch));
+    assert!(!over_right_panel(
+        Vec2::new(100.0, 40.0),
+        size,
+        &right,
+        &touch
+    ));
 
     // Outliner vs Properties sections inside the open panel.
     let in_outliner = Vec2::new(900.0, RIGHT_PANEL_HEADER_HEIGHT + 20.0);
-    assert!(over_outliner_panel(in_outliner, size, &right, false, &touch));
+    assert!(over_outliner_panel(
+        in_outliner,
+        size,
+        &right,
+        false,
+        &touch
+    ));
     assert!(!over_properties_panel(
         in_outliner,
         size,
@@ -81,7 +92,13 @@ fn the_right_panel_hit_box_covers_open_and_closed_states() {
     // Closed: only the slim edge tab on the right counts.
     right.open = false;
     assert!(!over_right_panel(inside, size, &right, &touch));
-    assert!(!over_outliner_panel(in_outliner, size, &right, false, &touch));
+    assert!(!over_outliner_panel(
+        in_outliner,
+        size,
+        &right,
+        false,
+        &touch
+    ));
     assert!(over_right_panel(
         Vec2::new(1000.0 - 5.0, RIGHT_PANEL_TAB_TOP_DESKTOP + 10.0),
         size,
@@ -278,8 +295,8 @@ fn visuals_system_has_disjoint_queries() {
         pill_mat: Handle::default(),
         cone: Handle::default(),
         cone_mat: Handle::default(),
-        grass: Handle::default(),
-        grass_mats: [Handle::default(), Handle::default()],
+        vine_stem_mat: Handle::default(),
+        vine_leaf_mat: Handle::default(),
         character_collider: Collider::cuboid(0.5, 0.5, 0.5),
     });
     app.add_systems(Update, sync_visuals);
@@ -308,7 +325,14 @@ fn the_right_panel_clamps_width_and_split_and_toggles_open_closed() {
         PrimaryWindow,
     ));
     app.add_systems(Startup, spawn_panel);
-    app.add_systems(Update, (sync_right_panel, sync_outliner_panel, sync_properties_chrome));
+    app.add_systems(
+        Update,
+        (
+            sync_right_panel,
+            sync_outliner_panel,
+            sync_properties_chrome,
+        ),
+    );
     app.update();
 
     let root = app
@@ -327,28 +351,52 @@ fn the_right_panel_clamps_width_and_split_and_toggles_open_closed() {
         .single(app.world())
         .expect("right panel close button");
 
-    assert_eq!(app.world().entity(root).get::<Node>().unwrap().display, Display::Flex);
-    assert_eq!(app.world().entity(tab).get::<Node>().unwrap().display, Display::None);
+    assert_eq!(
+        app.world().entity(root).get::<Node>().unwrap().display,
+        Display::Flex
+    );
+    assert_eq!(
+        app.world().entity(tab).get::<Node>().unwrap().display,
+        Display::None
+    );
 
     // Close the right panel: root hides, edge tab appears.
     app.world_mut().trigger(Activate { entity: close_btn });
     app.update();
     assert!(!app.world().resource::<RightPanelState>().open);
-    assert_eq!(app.world().entity(root).get::<Node>().unwrap().display, Display::None);
-    assert_eq!(app.world().entity(tab).get::<Node>().unwrap().display, Display::Flex);
+    assert_eq!(
+        app.world().entity(root).get::<Node>().unwrap().display,
+        Display::None
+    );
+    assert_eq!(
+        app.world().entity(tab).get::<Node>().unwrap().display,
+        Display::Flex
+    );
 
     // Re-open via the edge tab.
     app.world_mut().trigger(Activate { entity: tab });
     app.update();
     assert!(app.world().resource::<RightPanelState>().open);
-    assert_eq!(app.world().entity(root).get::<Node>().unwrap().display, Display::Flex);
-    assert_eq!(app.world().entity(tab).get::<Node>().unwrap().display, Display::None);
+    assert_eq!(
+        app.world().entity(root).get::<Node>().unwrap().display,
+        Display::Flex
+    );
+    assert_eq!(
+        app.world().entity(tab).get::<Node>().unwrap().display,
+        Display::None
+    );
 
     // Play hides both root and edge tab.
     app.world_mut().resource_mut::<Editor>().mode = Mode::Play;
     app.update();
-    assert_eq!(app.world().entity(root).get::<Node>().unwrap().display, Display::None);
-    assert_eq!(app.world().entity(tab).get::<Node>().unwrap().display, Display::None);
+    assert_eq!(
+        app.world().entity(root).get::<Node>().unwrap().display,
+        Display::None
+    );
+    assert_eq!(
+        app.world().entity(tab).get::<Node>().unwrap().display,
+        Display::None
+    );
 }
 
 #[test]
@@ -514,7 +562,10 @@ fn a_press_on_row_text_resolves_to_the_owning_row() {
         app.world().resource::<OutlinerState>().selection,
         GraphNode::Piece(1)
     );
-    assert_eq!(app.world().resource::<Editor>().selection.primary(), Some(1));
+    assert_eq!(
+        app.world().resource::<Editor>().selection.primary(),
+        Some(1)
+    );
 }
 
 #[test]
@@ -704,7 +755,10 @@ fn motion_editing_pins_the_paths_piece_in_the_outliner() {
     // Without the Motion tool the same click selects normally.
     app.world_mut().resource_mut::<Editor>().actor_tool = None;
     app.world_mut().trigger(press());
-    assert_eq!(app.world().resource::<Editor>().selection.primary(), Some(2));
+    assert_eq!(
+        app.world().resource::<Editor>().selection.primary(),
+        Some(2)
+    );
     assert_eq!(
         app.world().resource::<OutlinerState>().selection,
         GraphNode::Piece(2)
@@ -741,4 +795,158 @@ fn outliner_list_has_zero_min_height_and_scroll_overflow() {
         .expect("outliner body node");
     assert_eq!(body.min_height, px(0));
     assert_eq!(body.flex_shrink, 1.0);
+}
+
+#[test]
+fn the_left_panel_hit_box_covers_open_and_closed_states() {
+    let touch = TouchState::default();
+    let mut left = LeftPanelState::default();
+
+    // Open: the whole strip left of the palette width.
+    assert!(over_left_panel(Vec2::new(10.0, 400.0), &left, &touch));
+    assert!(over_left_panel(Vec2::new(PANEL_WIDTH, 400.0), &left, &touch));
+    assert!(!over_left_panel(
+        Vec2::new(PANEL_WIDTH + 1.0, 400.0),
+        &left,
+        &touch
+    ));
+
+    // Closed: only the slim re-open tab counts, not the free viewport.
+    left.open = false;
+    assert!(!over_left_panel(Vec2::new(10.0, 400.0), &left, &touch));
+    assert!(!over_left_panel(Vec2::new(10.0, 4.0), &left, &touch));
+    assert!(over_left_panel(
+        Vec2::new(5.0, LEFT_PANEL_TAB_TOP + 10.0),
+        &left,
+        &touch
+    ));
+    assert!(!over_left_panel(
+        Vec2::new(5.0, LEFT_PANEL_TAB_TOP + LEFT_PANEL_TAB_HEIGHT + 1.0),
+        &left,
+        &touch
+    ));
+
+    // Touch builds have no palette at all.
+    left.open = true;
+    let mobile = TouchState {
+        enabled: true,
+        ..default()
+    };
+    assert!(!over_left_panel(Vec2::new(10.0, 10.0), &left, &mobile));
+}
+
+#[test]
+fn the_left_panel_collapses_to_an_edge_tab_and_slides_the_docked_bars() {
+    fn spawn_panel(mut commands: Commands) {
+        commands.spawn((LeftPanelRoot, Node::default()));
+        spawn_left_panel_toggle(&mut commands);
+        spawn_left_panel_edge_tab(&mut commands);
+        commands.spawn((
+            LeftPanelOffsetBar {
+                open: PANEL_WIDTH + LEFT_PANEL_BAR_GAP,
+                closed: LEFT_PANEL_BAR_GAP,
+            },
+            Node::default(),
+        ));
+    }
+
+    let mut app = App::new();
+    app.init_resource::<Editor>();
+    app.init_resource::<LeftPanelState>();
+    app.init_resource::<InputFocus>();
+    app.init_resource::<TouchState>();
+    app.add_systems(Startup, spawn_panel);
+    app.add_systems(Update, sync_left_panel);
+    app.update();
+
+    let root = app
+        .world_mut()
+        .query_filtered::<Entity, With<LeftPanelRoot>>()
+        .single(app.world())
+        .expect("left panel root");
+    let tab = app
+        .world_mut()
+        .query_filtered::<Entity, With<LeftPanelEdgeTab>>()
+        .single(app.world())
+        .expect("left panel edge tab");
+    let toggle = app
+        .world_mut()
+        .query_filtered::<Entity, With<LeftPanelToggleButton>>()
+        .single(app.world())
+        .expect("left panel toggle");
+    let bar = app
+        .world_mut()
+        .query_filtered::<Entity, With<LeftPanelOffsetBar>>()
+        .single(app.world())
+        .expect("docked bar");
+
+    // Open: palette shown, tab hidden, bars clear the palette.
+    assert_eq!(
+        app.world().entity(root).get::<Node>().unwrap().display,
+        Display::Flex
+    );
+    assert_eq!(
+        app.world().entity(tab).get::<Node>().unwrap().display,
+        Display::None
+    );
+    assert_eq!(
+        app.world().entity(bar).get::<Node>().unwrap().left,
+        px(PANEL_WIDTH + LEFT_PANEL_BAR_GAP)
+    );
+
+    // Collapse: root hides, edge tab appears, bars slide into the strip.
+    app.world_mut().trigger(Activate { entity: toggle });
+    app.update();
+    assert!(!app.world().resource::<LeftPanelState>().open);
+    assert_eq!(
+        app.world().entity(root).get::<Node>().unwrap().display,
+        Display::None
+    );
+    assert_eq!(
+        app.world().entity(tab).get::<Node>().unwrap().display,
+        Display::Flex
+    );
+    assert_eq!(
+        app.world().entity(bar).get::<Node>().unwrap().left,
+        px(LEFT_PANEL_BAR_GAP)
+    );
+
+    // Re-open from the edge tab.
+    app.world_mut().trigger(Activate { entity: tab });
+    app.update();
+    assert!(app.world().resource::<LeftPanelState>().open);
+    assert_eq!(
+        app.world().entity(root).get::<Node>().unwrap().display,
+        Display::Flex
+    );
+    assert_eq!(
+        app.world().entity(tab).get::<Node>().unwrap().display,
+        Display::None
+    );
+
+    // Play hides palette and tab; the tab must not linger over the viewport.
+    app.world_mut().trigger(Activate { entity: toggle });
+    app.world_mut().resource_mut::<Editor>().mode = Mode::Play;
+    app.update();
+    assert_eq!(
+        app.world().entity(root).get::<Node>().unwrap().display,
+        Display::None
+    );
+    assert_eq!(
+        app.world().entity(tab).get::<Node>().unwrap().display,
+        Display::None
+    );
+
+    // Touch builds use their own toolbar and never see the palette or tab.
+    app.world_mut().resource_mut::<Editor>().mode = Mode::Build;
+    app.world_mut().resource_mut::<TouchState>().enabled = true;
+    app.update();
+    assert_eq!(
+        app.world().entity(root).get::<Node>().unwrap().display,
+        Display::None
+    );
+    assert_eq!(
+        app.world().entity(tab).get::<Node>().unwrap().display,
+        Display::None
+    );
 }

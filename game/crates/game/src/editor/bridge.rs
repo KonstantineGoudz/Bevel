@@ -2,7 +2,7 @@
 //! exposes the running editor's level and applies commands to it.
 //!
 //! Enabled on native builds when `PARTY_DUNGEON_BRIDGE` is set (`1` means the
-//! default `127.0.0.1:3559`, any other value is used as the bind address,
+//! default `127.0.0.1:6559`, any other value is used as the bind address,
 //! `0`/empty disables). The endpoint only ever binds loopback-style
 //! addresses; anything else is refused.
 //!
@@ -11,13 +11,21 @@
 //! - `POST /command` — `{"op": ...}`; the reply is `{"ok":true,"note":...}`
 //!   or `{"ok":false,"error":...}` once the next frame has applied it.
 //!
-//! The MCP server prefers this when it is reachable and falls back to level
-//! files otherwise, so file edits and live edits converge.
+//! The MCP server prefers this when it is reachable and falls back to SurrealDB
+//! (the single shared world) otherwise, so live edits and DB edits converge.
+//! Because `/state` is the game's editor world and the MCP tools may save it
+//! back, a client with the bridge enabled requests full-world interest from the
+//! sim (`ClientMsg::SetInterest` with `None` radii) instead of streaming cells.
 
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use super::*;
+// `Headless` is checked on every target (the bridge reports its render info in
+// `/health`); the capture plumbing below only exists in the native server.
+use crate::headless::Headless;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::headless::{CaptureQueue, CAPTURE_BRIDGE_TIMEOUT, MAX_PENDING_CAPTURES};
 use crate::platforms::PlatformMode;
 
 // ---------------------------------------------------------------------------
@@ -32,13 +40,15 @@ struct Envelope {
 #[derive(Default)]
 struct LiveState {
     snapshot: Option<String>,
+    /// Headless render info (`{width, height, fps, frames}`), if in that mode.
+    /// Kept as JSON so the HTTP thread can serve/report it without the ECS.
+    headless: Option<serde_json::Value>,
 }
 
 #[derive(Resource)]
 pub(super) struct Bridge {
     inbox: Arc<Mutex<Vec<Envelope>>>,
     state: Arc<Mutex<LiveState>>,
-    level_path: Option<std::path::PathBuf>,
     last_publish: Instant,
 }
 
@@ -49,13 +59,20 @@ fn bridge_addr() -> Option<String> {
             if trimmed.is_empty() || trimmed == "0" {
                 None
             } else if trimmed == "1" {
-                Some("127.0.0.1:3559".to_owned())
+                Some("127.0.0.1:6559".to_owned())
             } else {
                 Some(trimmed)
             }
         }
-        // On by default for localhost dev so the MCP server just works.
-        Err(_) => Some("127.0.0.1:3559".to_owned()),
+        Err(_) => {
+            // On by default for localhost dev so the MCP server just works.
+            // Off on Android: no MCP client runs on the phone, so the bridge
+            // would only burn battery holding a loopback socket.
+            #[cfg(target_os = "android")]
+            return None;
+            #[cfg(not(target_os = "android"))]
+            return Some("127.0.0.1:6559".to_owned());
+        }
     }
 }
 
@@ -63,11 +80,34 @@ fn loopback_only(addr: &str) -> bool {
     addr.starts_with("127.") || addr.starts_with("localhost") || addr.starts_with("::1")
 }
 
-/// Startup: bind the bridge and share the inbox/outbox with the game.
-pub(super) fn setup_bridge(mut commands: Commands) {
+/// True when the live MCP bridge wants to serve this game's editor world.
+///
+/// The bridge is **on by default on native** (`PARTY_DUNGEON_BRIDGE` unset), so
+/// a native client must ask the sim for the whole world: `GET /state` feeds the
+/// MCP tools, and a save of a partially streamed world would overwrite the real
+/// one with that fraction. WASM clients never run the bridge and always stream.
+///
+/// This only reports intent; `setup_bridge` may still refuse to bind (bad
+/// address, port taken), in which case asking for the full world is harmless.
+pub(crate) fn enabled() -> bool {
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = &mut commands;
+        false
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        bridge_addr().is_some()
+    }
+}
+
+/// Startup: bind the bridge and share the inbox/outbox with the game.
+///
+/// `headless` is present only under `--headless`, where the bridge additionally
+/// serves `GET /screenshot` from the offscreen render target.
+pub(super) fn setup_bridge(mut commands: Commands, headless: Option<Res<Headless>>) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (&mut commands, headless);
         return;
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -87,12 +127,24 @@ pub(super) fn setup_bridge(mut commands: Commands) {
             }
         };
         let inbox: Arc<Mutex<Vec<Envelope>>> = Arc::default();
-        let state: Arc<Mutex<LiveState>> = Arc::default();
+        let state = Arc::new(Mutex::new(LiveState {
+            snapshot: None,
+            headless: headless.as_ref().map(|headless| {
+                serde_json::json!({
+                    "width": headless.config.width,
+                    "height": headless.config.height,
+                    "fps": headless.config.fps,
+                    "frames": 0,
+                })
+            }),
+        }));
+        let capture = headless.as_ref().map(|headless| Arc::clone(&headless.queue));
         let worker_inbox = Arc::clone(&inbox);
         let worker_state = Arc::clone(&state);
+        let worker_capture = capture.clone();
         if std::thread::Builder::new()
             .name("mcp-bridge".into())
-            .spawn(move || serve(listener, worker_inbox, worker_state))
+            .spawn(move || serve(listener, worker_inbox, worker_state, worker_capture))
             .is_err()
         {
             warn!("mcp bridge: could not spawn worker thread");
@@ -102,7 +154,6 @@ pub(super) fn setup_bridge(mut commands: Commands) {
         commands.insert_resource(Bridge {
             inbox,
             state,
-            level_path: session::level_file_from_env_or_args(),
             last_publish: Instant::now() - Duration::from_secs(10),
         });
     }
@@ -113,9 +164,7 @@ pub(super) fn setup_bridge(mut commands: Commands) {
 // ---------------------------------------------------------------------------
 
 #[cfg(not(target_arch = "wasm32"))]
-fn read_request(
-    stream: &mut std::net::TcpStream,
-) -> Option<(String, String, Vec<u8>)> {
+fn read_request(stream: &mut std::net::TcpStream) -> Option<(String, String, Vec<u8>)> {
     use std::io::Read;
 
     let mut head = Vec::with_capacity(4096);
@@ -177,11 +226,26 @@ fn respond(mut stream: std::net::TcpStream, status: &str, body: &str) {
     );
 }
 
+/// Binary response for captured frames (JSON errors still go through
+/// [`respond`]).
+#[cfg(not(target_arch = "wasm32"))]
+fn respond_bytes(mut stream: std::net::TcpStream, status: &str, content_type: &str, body: &[u8]) {
+    use std::io::Write;
+
+    let header = format!(
+        "HTTP/1.0 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(body);
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn serve(
     listener: std::net::TcpListener,
     inbox: Arc<Mutex<Vec<Envelope>>>,
     state: Arc<Mutex<LiveState>>,
+    capture: Option<CaptureQueue>,
 ) {
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else {
@@ -193,16 +257,70 @@ fn serve(
         };
         match (method.as_str(), path.as_str()) {
             ("GET", "/health") => {
-                respond(stream, "200 OK", r#"{"ok":true,"game":"party-dungeon"}"#);
+                let headless = state.lock().ok().and_then(|guard| guard.headless.clone());
+                let body = serde_json::json!({
+                    "ok": true,
+                    "game": "party-dungeon",
+                    // `headless` is true only under `--headless`; `render`
+                    // carries the offscreen target's size/rate/frame count.
+                    "headless": headless.is_some(),
+                    "render": headless,
+                    "screenshot": capture.is_some(),
+                })
+                .to_string();
+                respond(stream, "200 OK", &body);
+            }
+            ("GET", "/screenshot") => {
+                // Windowed clients have a swapchain, not an offscreen image to
+                // read back; only headless mode can serve frames.
+                let Some(capture) = capture.as_ref() else {
+                    respond(
+                        stream,
+                        "503 Service Unavailable",
+                        r#"{"ok":false,"error":"screenshots need the game in headless mode (--headless)"}"#,
+                    );
+                    continue;
+                };
+                let (tx, rx) = mpsc::channel();
+                let queued = match capture.lock() {
+                    Ok(mut queue) if queue.len() < MAX_PENDING_CAPTURES => {
+                        queue.push_back(tx);
+                        true
+                    }
+                    _ => false,
+                };
+                if !queued {
+                    respond(
+                        stream,
+                        "503 Busy",
+                        r#"{"ok":false,"error":"screenshot queue is full"}"#,
+                    );
+                    continue;
+                }
+                // The game renders one queued frame at a time and replies with
+                // the PNG bytes once the GPU readback lands.
+                match rx.recv_timeout(CAPTURE_BRIDGE_TIMEOUT) {
+                    Ok(Ok(png)) => respond_bytes(stream, "200 OK", "image/png", &png),
+                    Ok(Err(error)) => {
+                        let body = serde_json::json!({"ok": false, "error": error}).to_string();
+                        respond(stream, "500 Internal Server Error", &body);
+                    }
+                    Err(_) => respond(
+                        stream,
+                        "503 Busy",
+                        r#"{"ok":false,"error":"game did not produce a frame"}"#,
+                    ),
+                }
             }
             ("GET", "/state") => {
-                let snapshot = state
-                    .lock()
-                    .ok()
-                    .and_then(|guard| guard.snapshot.clone());
+                let snapshot = state.lock().ok().and_then(|guard| guard.snapshot.clone());
                 match snapshot {
                     Some(json) => respond(stream, "200 OK", &json),
-                    None => respond(stream, "503 Busy", r#"{"ok":false,"error":"no snapshot yet"}"#),
+                    None => respond(
+                        stream,
+                        "503 Busy",
+                        r#"{"ok":false,"error":"no snapshot yet"}"#,
+                    ),
                 }
             }
             ("POST", "/command") => {
@@ -229,7 +347,11 @@ fn serve(
                     ),
                 }
             }
-            _ => respond(stream, "404 Not Found", r#"{"ok":false,"error":"unknown route"}"#),
+            _ => respond(
+                stream,
+                "404 Not Found",
+                r#"{"ok":false,"error":"unknown route"}"#,
+            ),
         }
     }
 }
@@ -245,6 +367,8 @@ pub(super) fn bridge_publish(
     editor: Res<Editor>,
     orbit: Res<Orbit>,
     movers: Res<Movers>,
+    headless: Option<Res<Headless>>,
+    frames: Option<Res<bevy::diagnostic::FrameCount>>,
 ) {
     let Some(mut bridge) = bridge else {
         return;
@@ -255,8 +379,19 @@ pub(super) fn bridge_publish(
     }
     bridge.last_publish = Instant::now();
     let snapshot = editor.capture(orbit.as_ref(), movers.as_ref());
+    let headless_info = headless.as_ref().map(|headless| {
+        serde_json::json!({
+            "width": headless.config.width,
+            "height": headless.config.height,
+            "fps": headless.config.fps,
+            "frames": frames.as_ref().map(|frames| frames.0).unwrap_or(0),
+        })
+    });
     if let Ok(mut guard) = bridge.state.lock() {
         guard.snapshot = Some(snapshot.to_json());
+        if headless_info.is_some() {
+            guard.headless = headless_info;
+        }
     }
 }
 
@@ -324,7 +459,6 @@ pub(super) fn bridge_drain(
             &nav,
             &rapier,
             &player,
-            bridge.level_path.as_deref(),
             &envelope.body,
         );
         let _ = envelope.reply.send(reply);
@@ -339,7 +473,6 @@ fn apply_command(
     nav: &Nav,
     rapier: &ReadRapierContext,
     player: &Query<Entity, With<CharacterVisual>>,
-    level_path: Option<&std::path::Path>,
     body: &serde_json::Value,
 ) -> String {
     let op = body.get("op").and_then(|v| v.as_str()).unwrap_or("");
@@ -384,8 +517,14 @@ fn apply_command(
         "delete_pieces" => delete_pieces(editor, movers, body),
         "set_character" => set_character(editor, body),
         "teleport" => teleport(editor, orbit, body),
-        "damage" => change_hp(editor, -(body.get("amount").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32)),
-        "heal" => change_hp(editor, body.get("amount").and_then(|v| v.as_f64()).unwrap_or(25.0) as f32),
+        "damage" => change_hp(
+            editor,
+            -(body.get("amount").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32),
+        ),
+        "heal" => change_hp(
+            editor,
+            body.get("amount").and_then(|v| v.as_f64()).unwrap_or(25.0) as f32,
+        ),
         "set_hp" => set_hp(editor, body),
         "respawn" => respawn(editor),
         "remove_character" => {
@@ -406,7 +545,7 @@ fn apply_command(
             editor.note = "stopped";
             ok_note("stopped")
         }
-        "reload" => reload(editor, orbit, movers, level_path),
+        "reload" => ok_note("single world: nothing to reload from disk"),
         _ => err(format!("unknown op: {op}")),
     }
 }
@@ -481,7 +620,13 @@ fn delete_pieces(editor: &mut Editor, movers: &mut Movers, body: &serde_json::Va
     let ids: Vec<u32> = body
         .get("ids")
         .and_then(|v| v.as_array())
-        .map(|items| items.iter().filter_map(|v| v.as_u64()).map(|v| v as u32).collect())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_u64())
+                .map(|v| v as u32)
+                .collect()
+        })
         .unwrap_or_default();
     if ids.is_empty() {
         return err("missing ids");
@@ -716,30 +861,3 @@ fn walk_to(
     ok_note("walking")
 }
 
-fn reload(
-    editor: &mut Editor,
-    orbit: &mut Orbit,
-    movers: &mut Movers,
-    level_path: Option<&std::path::Path>,
-) -> String {
-    let Some(path) = level_path else {
-        return err("no level file (set PARTY_DUNGEON_LEVEL or --level)");
-    };
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) => return err(format!("could not read {}: {error}", path.display())),
-    };
-    let loaded = match session::parse_any_snapshot_text(&text).and_then(|snapshot| snapshot.validate()) {
-        Ok(loaded) => loaded,
-        Err(error) => return err(format!("invalid level: {error:?}")),
-    };
-    editor.apply_loaded(orbit, movers, loaded);
-    editor.level_path = Some(path.to_path_buf());
-    editor.level_name = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(str::to_owned);
-    editor.hard_dirty = false;
-    editor.soft_dirty = false;
-    ok_note(format!("reloaded {}", path.display()))
-}

@@ -1,32 +1,6 @@
 use super::*;
 
 #[test]
-fn camera_and_character_changes_are_noticed() {
-    let seen = Seen {
-        orbit: Orbit::default(),
-        character: None,
-    };
-    assert!(!soft_changed(&seen, &Orbit::default(), None));
-    let moved = Orbit {
-        yaw: 1.0,
-        ..Orbit::default()
-    };
-    assert!(soft_changed(&seen, &moved, None));
-    let character = Character {
-        pos: Vec2::ZERO,
-        feet: 0.0,
-        yaw: 0.0,
-        vy: 0.0,
-        hv: Vec2::ZERO,
-        ride_vel: Vec2::ZERO,
-        grounded: true,
-        sliding: false,
-        health: crate::statuses::Health::default(),
-    };
-    assert!(soft_changed(&seen, &Orbit::default(), Some(character)));
-}
-
-#[test]
 fn the_route_line_climbs_a_ramp_and_ignores_wall_tops() {
     // A ramp rising from 0 to 0.9 between x = 1 and x = 3, then a block.
     let ramp = |p: Vec2| -> Option<f32> {
@@ -2077,7 +2051,6 @@ fn clicking_empty_ground_selects_nothing() {
 #[test]
 fn a_session_captures_and_restores_pieces_camera_character_and_history() {
     let mut editor = Editor::default();
-    editor.session = Some("map-1".into());
     editor.pieces = vec![test_piece(2), test_piece(4)];
     editor.character = Some(Character {
         pos: Vec2::new(1.5, -2.5),

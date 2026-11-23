@@ -6,19 +6,10 @@
 //! stay inert (see [`home_modal_open`]).
 
 use super::*;
-use bevy::input_focus::InputFocus;
-use bevy::text::{EditableText, TextCursorStyle};
-use bevy::ui_widgets::TextInput;
 
 use crate::controls::{Action, Binding, ClusterButton};
 
 /// Which home tab is visible.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(super) enum HomeTab {
-    #[default]
-    Maps,
-    Settings,
-}
 
 /// One pending rebind: `index` is the binding slot, `-1` appends a new one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -32,24 +23,19 @@ pub(super) struct CaptureSlot {
 #[derive(Resource)]
 pub(super) struct HomeMenu {
     pub(super) open: bool,
-    pub(super) tab: HomeTab,
     pub(super) status: String,
     pub(super) capturing: Option<CaptureSlot>,
     /// Bumped whenever the map list or bindings change so the rows rebuild.
     pub(super) dirty: u64,
-    /// Last name typed in the New/Save-as field (mirrored from the widget).
-    pub(super) pending_name: String,
 }
 
 impl Default for HomeMenu {
     fn default() -> Self {
         Self {
             open: false,
-            tab: HomeTab::Maps,
             status: String::new(),
             capturing: None,
             dirty: 1,
-            pending_name: String::new(),
         }
     }
 }
@@ -82,16 +68,7 @@ pub(super) struct HomePanel;
 pub(super) struct HomeStatus;
 
 #[derive(Component)]
-pub(super) struct HomeMapList;
-
-#[derive(Component)]
 pub(super) struct HomeControlsList;
-
-#[derive(Component)]
-pub(super) struct HomeNameInput;
-
-#[derive(Component)]
-pub(super) struct HomeMapsSection;
 
 #[derive(Component)]
 pub(super) struct HomeSettingsSection;
@@ -101,14 +78,6 @@ pub(super) struct HomeButton(HomeAction);
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) enum HomeAction {
-    TabMaps,
-    TabSettings,
-    Refresh,
-    Create,
-    Open(String),
-    Delete(String),
-    Save,
-    SaveAs,
     Close,
     ResetControls,
     Rebind(Action, isize),
@@ -172,7 +141,7 @@ pub(super) fn spawn_home_menu(commands: &mut Commands) {
         .id();
     let subtitle = commands
         .spawn((
-            Text::new("Native build: pick a map from the levels dir, or tune controls. Browser builds use the maps page instead."),
+            Text::new("Tune controls, then enter the shared world."),
             TextFont {
                 font_size: FontSize::Px(12.0),
                 ..default()
@@ -181,115 +150,7 @@ pub(super) fn spawn_home_menu(commands: &mut Commands) {
         ))
         .id();
 
-    let tabs = commands
-        .spawn(Node {
-            width: percent(100),
-            flex_direction: FlexDirection::Row,
-            column_gap: px(8),
-            ..default()
-        })
-        .id();
-    let maps_tab = home_button(commands, HomeAction::TabMaps, "Maps");
-    let settings_tab = home_button(commands, HomeAction::TabSettings, "Controls");
-    commands.entity(tabs).add_children(&[maps_tab, settings_tab]);
 
-    // ---- Maps section ----
-    let maps_section = commands
-        .spawn((
-            HomeMapsSection,
-            Node {
-                width: percent(100),
-                flex_direction: FlexDirection::Column,
-                row_gap: px(8),
-                ..default()
-            },
-        ))
-        .id();
-
-    let name_row = commands
-        .spawn(Node {
-            width: percent(100),
-            flex_direction: FlexDirection::Row,
-            column_gap: px(8),
-            align_items: AlignItems::Center,
-            ..default()
-        })
-        .id();
-    let name_label = commands
-        .spawn((
-            Text::new("Map name"),
-            TextFont {
-                font_size: FontSize::Px(12.0),
-                ..default()
-            },
-            TextColor(MUTED),
-        ))
-        .id();
-    let mut editable = EditableText::new("");
-    editable.allow_newlines = false;
-    let name_input = commands
-        .spawn((
-            HomeNameInput,
-            TextInput,
-            editable,
-            TextCursorStyle::default(),
-            TextFont {
-                font_size: FontSize::Px(13.0),
-                ..default()
-            },
-            Node {
-                flex_grow: 1.0,
-                height: px(28),
-                padding: UiRect::axes(px(8), px(4)),
-                border: UiRect::all(px(1)),
-                border_radius: BorderRadius::all(px(6)),
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            BackgroundColor(BUTTON_BG),
-            BorderColor::all(BORDER),
-        ))
-        .id();
-    let create = home_button(commands, HomeAction::Create, "New map");
-    commands
-        .entity(name_row)
-        .add_children(&[name_label, name_input, create]);
-
-    let map_list = commands
-        .spawn((
-            HomeMapList,
-            ScrollPosition::default(),
-            Node {
-                width: percent(100),
-                height: px(260),
-                flex_direction: FlexDirection::Column,
-                row_gap: px(6),
-                overflow: Overflow::scroll_y(),
-                ..default()
-            },
-            BackgroundColor(Color::NONE),
-        ))
-        .id();
-
-    let maps_footer = commands
-        .spawn(Node {
-            width: percent(100),
-            flex_direction: FlexDirection::Row,
-            column_gap: px(8),
-            ..default()
-        })
-        .id();
-    let refresh = home_button(commands, HomeAction::Refresh, "Refresh");
-    let save = home_button(commands, HomeAction::Save, "Save");
-    let save_as = home_button(commands, HomeAction::SaveAs, "Save as");
-    let close = home_button(commands, HomeAction::Close, "Enter editor");
-    commands
-        .entity(maps_footer)
-        .add_children(&[refresh, save, save_as, close]);
-
-    commands
-        .entity(maps_section)
-        .add_children(&[name_row, map_list, maps_footer]);
 
     // ---- Settings section ----
     let settings_section = commands
@@ -299,7 +160,6 @@ pub(super) fn spawn_home_menu(commands: &mut Commands) {
                 width: percent(100),
                 flex_direction: FlexDirection::Column,
                 row_gap: px(8),
-                display: Display::None,
                 ..default()
             },
         ))
@@ -360,14 +220,9 @@ pub(super) fn spawn_home_menu(commands: &mut Commands) {
         ))
         .id();
 
-    commands.entity(panel).add_children(&[
-        title,
-        subtitle,
-        tabs,
-        maps_section,
-        settings_section,
-        status,
-    ]);
+    commands
+        .entity(panel)
+        .add_children(&[title, subtitle, settings_section, status]);
     commands.entity(root).add_child(panel);
 }
 
@@ -421,12 +276,9 @@ pub(super) fn sync_home_menu(
     home: Res<HomeMenu>,
     controls: Res<crate::controls::Controls>,
     mut roots: Query<&mut Node, With<HomeRoot>>,
-    maps_sections: Query<Entity, With<HomeMapsSection>>,
     settings_sections: Query<Entity, With<HomeSettingsSection>>,
-    map_lists: Query<Entity, With<HomeMapList>>,
     controls_lists: Query<Entity, With<HomeControlsList>>,
     mut status_texts: Query<&mut Text, With<HomeStatus>>,
-    mut tab_buttons: Query<(&HomeButton, &mut BackgroundColor, &mut BorderColor)>,
     mut last_built: Local<u64>,
 ) {
     let display = if home.open {
@@ -442,40 +294,12 @@ pub(super) fn sync_home_menu(
     if !home.open {
         return;
     }
-    // Tab highlight.
-    for (button, mut bg, mut border) in &mut tab_buttons {
-        let on = match button.0 {
-            HomeAction::TabMaps => home.tab == HomeTab::Maps,
-            HomeAction::TabSettings => home.tab == HomeTab::Settings,
-            _ => continue,
-        };
-        bg.0 = if on { BUTTON_ON } else { BUTTON_BG };
-        *border = BorderColor::all(if on { BORDER_ON } else { BORDER });
-    }
-    // Section visibility.
-    if let Ok(maps) = maps_sections.single() {
-        commands.entity(maps).insert(Node {
-            width: percent(100),
-            flex_direction: FlexDirection::Column,
-            row_gap: px(8),
-            display: if home.tab == HomeTab::Maps {
-                Display::Flex
-            } else {
-                Display::None
-            },
-            ..default()
-        });
-    }
     if let Ok(settings) = settings_sections.single() {
         commands.entity(settings).insert(Node {
             width: percent(100),
             flex_direction: FlexDirection::Column,
             row_gap: px(8),
-            display: if home.tab == HomeTab::Settings {
-                Display::Flex
-            } else {
-                Display::None
-            },
+            display: Display::Flex,
             ..default()
         });
     }
@@ -501,143 +325,12 @@ pub(super) fn sync_home_menu(
         return;
     }
     *last_built = fingerprint;
-    if let Ok(list) = map_lists.single() {
-        rebuild_map_list(&mut commands, list, &home);
-    }
     if let Ok(list) = controls_lists.single() {
         rebuild_controls_list(&mut commands, list, &home, &controls);
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn rebuild_map_list(commands: &mut Commands, list: Entity, _home: &HomeMenu) {
-    use crate::session::list_native_levels;
-    commands.entity(list).despawn_children();
-    let levels = list_native_levels();
-    if levels.is_empty() {
-        let empty = commands
-            .spawn((
-                Text::new("No maps yet. Type a name above and press New map."),
-                TextFont {
-                    font_size: FontSize::Px(12.0),
-                    ..default()
-                },
-                TextColor(MUTED),
-            ))
-            .id();
-        commands.entity(list).add_child(empty);
-        return;
-    }
-    let mut rows = Vec::new();
-    for level in levels {
-        let label = if level.unreadable {
-            format!("{} (unreadable)", level.name)
-        } else {
-            format!(
-                "{} — {} {} {}",
-                level.name,
-                level.pieces,
-                if level.pieces == 1 { "piece" } else { "pieces" },
-                if level.has_character {
-                    "+ character"
-                } else {
-                    ""
-                }
-            )
-        };
-        let text = commands
-            .spawn((
-                Text::new(label),
-                TextFont {
-                    font_size: FontSize::Px(12.0),
-                    ..default()
-                },
-                TextColor(Color::srgb_u8(0xc3, 0xd0, 0xdf)),
-                Node {
-                    flex_grow: 1.0,
-                    ..default()
-                },
-            ))
-            .id();
-        let open = commands
-            .spawn((
-                Button,
-                HomeButton(HomeAction::Open(level.name.clone())),
-                Node {
-                    padding: UiRect::axes(px(10), px(6)),
-                    border: UiRect::all(px(1)),
-                    border_radius: BorderRadius::all(px(6)),
-                    ..default()
-                },
-                BackgroundColor(BUTTON_BG),
-                BorderColor::all(BORDER),
-                children![(
-                    Text::new("Open"),
-                    TextFont {
-                        font_size: FontSize::Px(11.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb_u8(0xc3, 0xd0, 0xdf)),
-                )],
-            ))
-            .id();
-        let delete = commands
-            .spawn((
-                Button,
-                HomeButton(HomeAction::Delete(level.name.clone())),
-                Node {
-                    padding: UiRect::axes(px(10), px(6)),
-                    border: UiRect::all(px(1)),
-                    border_radius: BorderRadius::all(px(6)),
-                    ..default()
-                },
-                BackgroundColor(BUTTON_BG),
-                BorderColor::all(BORDER),
-                children![(
-                    Text::new("Delete"),
-                    TextFont {
-                        font_size: FontSize::Px(11.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb_u8(0xc3, 0xd0, 0xdf)),
-                )],
-            ))
-            .id();
-        let row = commands
-            .spawn((
-                Node {
-                    width: percent(100),
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::Center,
-                    column_gap: px(8),
-                    padding: UiRect::all(px(8)),
-                    border: UiRect::all(px(1)),
-                    border_radius: BorderRadius::all(px(8)),
-                    ..default()
-                },
-                BorderColor::all(BORDER),
-            ))
-            .id();
-        commands.entity(row).add_children(&[text, open, delete]);
-        rows.push(row);
-    }
-    commands.entity(list).add_children(&rows);
-}
 
-#[cfg(target_arch = "wasm32")]
-fn rebuild_map_list(commands: &mut Commands, list: Entity, _home: &HomeMenu) {
-    commands.entity(list).despawn_children();
-    commands.entity(list).with_children(|parent| {
-        parent.spawn((
-            Text::new("Maps live on the browser home page on web builds."),
-            TextFont {
-                font_size: FontSize::Px(12.0),
-                ..default()
-            },
-            TextColor(MUTED),
-        ));
-    });
-}
 
 fn rebuild_controls_list(
     commands: &mut Commands,
@@ -647,7 +340,15 @@ fn rebuild_controls_list(
 ) {
     use crate::controls::Action;
     commands.entity(list).despawn_children();
-    let groups = ["Play", "Camera", "Mode", "Editor", "Transform", "Add menu", "Model viewer"];
+    let groups = [
+        "Play",
+        "Camera",
+        "Mode",
+        "Editor",
+        "Transform",
+        "Add menu",
+        "Model viewer",
+    ];
     let mut top: Vec<Entity> = Vec::new();
     for group in groups {
         let header = commands
@@ -679,9 +380,9 @@ fn rebuild_controls_list(
                 .id();
             let mut kids: Vec<Entity> = vec![label];
             for (index, binding) in controls.binding(action).iter().enumerate() {
-                let capturing_here = home.capturing.is_some_and(|slot| {
-                    slot.action == action && slot.index as usize == index
-                });
+                let capturing_here = home
+                    .capturing
+                    .is_some_and(|slot| slot.action == action && slot.index as usize == index);
                 let text = if capturing_here {
                     "press input…".to_owned()
                 } else {
@@ -880,59 +581,14 @@ pub(super) fn on_home_button(
     buttons: Query<&HomeButton>,
     mut home: ResMut<HomeMenu>,
     mut controls: ResMut<crate::controls::Controls>,
-    mut editor: ResMut<Editor>,
-    mut orbit: ResMut<Orbit>,
-    mut movers: ResMut<Movers>,
-    mut focus: ResMut<InputFocus>,
-    name_fields: Query<(Entity, &EditableText), With<HomeNameInput>>,
+    editor: Res<Editor>,
     mut commands: Commands,
 ) {
     let Ok(button) = buttons.get(event.entity) else {
         return;
     };
     match button.0.clone() {
-        HomeAction::TabMaps => {
-            home.tab = HomeTab::Maps;
-            home.capturing = None;
-            home.dirty = home.dirty.wrapping_add(1);
-        }
-        HomeAction::TabSettings => {
-            home.tab = HomeTab::Settings;
-            home.dirty = home.dirty.wrapping_add(1);
-        }
-        HomeAction::Refresh => {
-            home.dirty = home.dirty.wrapping_add(1);
-            home.status = "refreshed".to_owned();
-        }
-        HomeAction::Create => {
-            let typed = name_fields
-                .single()
-                .map(|(_, text)| text.value().to_string())
-                .unwrap_or_default();
-            create_map(&mut editor, &mut orbit, &mut movers, typed, &mut home);
-        }
-        HomeAction::Open(name) => {
-            open_map(&mut editor, &mut orbit, &mut movers, &name, &mut home);
-        }
-        HomeAction::Delete(name) => {
-            delete_map(&name, &mut home);
-        }
-        HomeAction::Save => {
-            save_current(&editor, &orbit, &movers, &mut home);
-        }
-        HomeAction::SaveAs => {
-            let typed = name_fields
-                .single()
-                .map(|(_, text)| text.value().to_string())
-                .unwrap_or_default();
-            save_as(&mut editor, &orbit, &movers, typed, &mut home);
-        }
         HomeAction::Close => {
-            if let Ok((entity, _)) = name_fields.single() {
-                if focus.get() == Some(entity) {
-                    focus.clear();
-                }
-            }
             close_home(&mut home);
             home.status = current_level_note(&editor);
         }
@@ -943,11 +599,6 @@ pub(super) fn on_home_button(
             home.dirty = home.dirty.wrapping_add(1);
         }
         HomeAction::Rebind(action, index) => {
-            if let Ok((entity, _)) = name_fields.single() {
-                if focus.get() == Some(entity) {
-                    focus.clear();
-                }
-            }
             home.capturing = Some(CaptureSlot { action, index });
             home.dirty = home.dirty.wrapping_add(1);
         }
@@ -964,207 +615,10 @@ pub(super) fn on_home_button(
     }
 }
 
-pub(super) fn current_level_note(editor: &Editor) -> String {
-    match &editor.level_name {
-        Some(name) => format!("editing {name}"),
-        None => "unsaved map — open Maps to save".to_owned(),
-    }
+pub(super) fn current_level_note(_editor: &Editor) -> String {
+    "shared world".to_owned()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn create_map(
-    editor: &mut Editor,
-    orbit: &mut Orbit,
-    movers: &mut Movers,
-    typed: String,
-    home: &mut HomeMenu,
-) {
-    use crate::session::sanitize_level_name;
-    let Some(name) = sanitize_level_name(&typed).or_else(|| {
-        // Empty field creates a numbered untitled map.
-        let mut counter = 1;
-        loop {
-            let candidate = format!("untitled-{counter}");
-            let path = crate::session::level_path_for(Some(&candidate)).ok()?;
-            if !path.exists() {
-                return Some(candidate);
-            }
-            counter += 1;
-        }
-    }) else {
-        home.status = "invalid name (use a-z, 0-9, '-', '_')".to_owned();
-        return;
-    };
-    if crate::session::level_path_for(Some(&name))
-        .is_ok_and(|path| path.exists())
-    {
-        home.status = format!("{name} already exists — pick Open, or another name");
-        return;
-    }
-    clear_editor(editor, orbit, movers);
-    editor.level_name = Some(name.clone());
-    editor.level_path = crate::session::level_path_for(Some(&name)).ok();
-    editor.session = None;
-    home.pending_name = name.clone();
-    home.status = format!("created {name} — Save to write it");
-    home.dirty = home.dirty.wrapping_add(1);
-    close_home(home);
-}
-
-#[cfg(target_arch = "wasm32")]
-fn create_map(
-    _editor: &mut Editor,
-    _orbit: &mut Orbit,
-    _movers: &mut Movers,
-    _typed: String,
-    home: &mut HomeMenu,
-) {
-    home.status = "maps live on the browser home page on web builds".to_owned();
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn open_map(
-    editor: &mut Editor,
-    orbit: &mut Orbit,
-    movers: &mut Movers,
-    name: &str,
-    home: &mut HomeMenu,
-) {
-    match crate::session::load_native_level(name) {
-        Ok(loaded) => {
-            editor.apply_loaded(orbit, movers, loaded);
-            editor.level_name = Some(name.to_owned());
-            editor.level_path = crate::session::level_path_for(Some(name)).ok();
-            editor.session = None;
-            home.pending_name = name.to_owned();
-            home.status = format!("opened {name}");
-            home.dirty = home.dirty.wrapping_add(1);
-            close_home(home);
-        }
-        Err(error) => {
-            home.status = error;
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn open_map(
-    _editor: &mut Editor,
-    _orbit: &mut Orbit,
-    _movers: &mut Movers,
-    _name: &str,
-    home: &mut HomeMenu,
-) {
-    home.status = "maps live on the browser home page on web builds".to_owned();
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn delete_map(name: &str, home: &mut HomeMenu) {
-    match crate::session::delete_native_level(name) {
-        Ok(()) => {
-            home.status = format!("deleted {name}");
-            home.dirty = home.dirty.wrapping_add(1);
-        }
-        Err(error) => {
-            home.status = error;
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn delete_map(_name: &str, home: &mut HomeMenu) {
-    home.status = "maps live on the browser home page on web builds".to_owned();
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn save_current(editor: &Editor, orbit: &Orbit, movers: &Movers, home: &mut HomeMenu) {
-    let Some(name) = editor.level_name.clone() else {
-        home.status = "no map open — type a name and press Save as".to_owned();
-        home.tab = HomeTab::Maps;
-        return;
-    };
-    let snapshot = editor.capture(orbit, movers);
-    match crate::session::save_native_level(&name, &snapshot) {
-        Ok(path) => {
-            home.status = format!("saved {} ({} pieces)", path.display(), snapshot.pieces.len());
-            home.dirty = home.dirty.wrapping_add(1);
-        }
-        Err(error) => {
-            home.status = error;
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn save_current(_editor: &Editor, _orbit: &Orbit, _movers: &Movers, home: &mut HomeMenu) {
-    home.status = "saving happens in the browser on web builds".to_owned();
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn save_as(
-    editor: &mut Editor,
-    orbit: &Orbit,
-    movers: &Movers,
-    typed: String,
-    home: &mut HomeMenu,
-) {
-    let Some(name) = crate::session::sanitize_level_name(&typed) else {
-        home.status = "type a valid name first (use a-z, 0-9, '-', '_')".to_owned();
-        return;
-    };
-    let snapshot = editor.capture(orbit, movers);
-    match crate::session::save_native_level(&name, &snapshot) {
-        Ok(path) => {
-            editor.level_name = Some(name.clone());
-            editor.level_path = Some(path.clone());
-            home.pending_name = name.clone();
-            home.status = format!("saved {} ({} pieces)", path.display(), snapshot.pieces.len());
-            home.dirty = home.dirty.wrapping_add(1);
-        }
-        Err(error) => {
-            home.status = error;
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn save_as(
-    _editor: &mut Editor,
-    _orbit: &Orbit,
-    _movers: &Movers,
-    _typed: String,
-    home: &mut HomeMenu,
-) {
-    home.status = "saving happens in the browser on web builds".to_owned();
-}
-
-fn clear_editor(editor: &mut Editor, orbit: &mut Orbit, movers: &mut Movers) {
-    editor.pieces.clear();
-    editor.outline = SceneOutline::default();
-    editor.character = None;
-    editor.undo.clear();
-    editor.redo.clear();
-    editor.next_id = 1;
-    editor.grass.clear();
-    editor.grass_slows = false;
-    editor.grass_rev = editor.grass_rev.wrapping_add(1);
-    editor.selection.clear();
-    editor.ghost = None;
-    editor.drag = None;
-    editor.gizmo_drag = None;
-    editor.keyboard_transform = None;
-    editor.plan = None;
-    editor.route = None;
-    editor.walk = None;
-    editor.tool = None;
-    editor.actor_tool = None;
-    editor.platform_request = None;
-    editor.hard_dirty = false;
-    editor.soft_dirty = false;
-    editor.note = "new map";
-    *orbit = Orbit::default();
-    movers.map.clear();
-}
 
 fn remove_binding(
     controls: &mut crate::controls::Controls,
@@ -1447,10 +901,7 @@ fn finish_capture(
                 serde_json::to_value(binding_to_stored(entry)).unwrap_or(serde_json::Value::Null)
             })
             .collect();
-        map.insert(
-            slot.action.id().to_owned(),
-            serde_json::Value::Array(list),
-        );
+        map.insert(slot.action.id().to_owned(), serde_json::Value::Array(list));
     }
     if let Some(next) = crate::controls::Controls::from_json(&stored.to_string()) {
         *controls = next;
@@ -1462,42 +913,10 @@ fn finish_capture(
 
 // ---------------------------------------------------------------------------
 // Name field focus
-// ---------------------------------------------------------------------------
-
-pub(super) fn sync_home_name_field(
-    home: Res<HomeMenu>,
-    mut names: Query<&mut EditableText, With<HomeNameInput>>,
-) {
-    if !home.open {
-        return;
-    }
-    // Keep the widget text as the source of truth; only mirror the level name
-    // into it when the field is empty at open time. Create/Save-as read the
-    // widget directly.
-    for mut text in &mut names {
-        let current = text.value().to_string();
-        if current != home.pending_name && current.is_empty() && !home.pending_name.is_empty() {
-            let pending = home.pending_name.clone();
-            text.editor_mut().set_text(&pending);
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sanitize_accepts_plain_names_and_rejects_paths() {
-        assert_eq!(
-            crate::session::sanitize_level_name("my-map_1"),
-            Some("my-map_1".to_owned())
-        );
-        assert_eq!(crate::session::sanitize_level_name("  spaced  "), Some("spaced".to_owned()));
-        assert_eq!(crate::session::sanitize_level_name("a/b"), None);
-        assert_eq!(crate::session::sanitize_level_name(".."), None);
-        assert_eq!(crate::session::sanitize_level_name(""), None);
-    }
 
     #[test]
     fn debug_level_json_loads_as_a_snapshot() {
@@ -1524,8 +943,8 @@ mod tests {
         use crate::controls::KeyChord;
         let controls = crate::controls::Controls::with_defaults();
         let dup = Binding::Key(KeyChord::key(KeyCode::KeyW));
-        // W is MoveForward (Play); MoveBack (Play) must conflict, Save (Build) must not.
+        // W is MoveForward (Play); MoveBack (Play) must conflict, CopyJson (Build) must not.
         assert!(!controls.conflicts_with(Action::MoveBack, &dup).is_empty());
-        assert!(controls.conflicts_with(Action::SaveLevel, &dup).is_empty());
+        assert!(controls.conflicts_with(Action::CopyJson, &dup).is_empty());
     }
 }

@@ -8,17 +8,81 @@ license.workspace = true
 name = "party_dungeon"
 crate-type = ["lib", "cdylib"]
 
+[features]
+default = []
+# bevy_replicon replication path (server-authoritative entities + messages)
+# instead of the hand-written snapshot/chunk protocol. Off by default: the
+# legacy `net_client` path stays the shipping default until cutover.
+replicon = [
+    "dep:party-dungeon-replication",
+    "dep:party-dungeon-repl-matchbox",
+    "dep:bevy_replicon",
+    "party-dungeon-replication/client",
+    "party-dungeon-repl-matchbox/client",
+    "bevy_replicon/client",
+]
+
 [dependencies]
 # `jpeg` is not on by default in Bevy 0.20. glTF only guarantees JPEG and PNG
 # textures, so without it any model with JPEG maps fails at load time with
 # "invalid image mime type: image/jpeg".
-bevy = { version = "=0.20.0", features = ["android-game-activity", "system_clipboard", "jpeg"] }
+# NOTE: `android-native-activity` (not `android-game-activity`): the APK is
+# assembled directly by xbuild with no Gradle/Maven, so the androidx
+# GameActivity Java classes are unavailable. NativeActivity's basic text input
+# is enough for the email/password login form (ASCII entry + Enter to submit);
+# revisit GameActivity only if soft-keyboard behavior proves inadequate.
+# NOTE: `system_clipboard` is desktop/wasm-only (arboard has no Android
+# backend). It is added back for non-Android targets in the target-specific
+# table at the end of this file; Android builds use a stub clipboard instead
+# (see src/android_clipboard.rs).
+bevy = { version = "=0.20.0", features = ["android-native-activity", "jpeg"] }
+# NOTE: do NOT enable Bevy's `webgpu` feature here: on wasm it replaces the
+# WebGL2 backend instead of adding a fallback, and renderer creation panics
+# outright where WebGPU is unavailable (e.g. insecure contexts). bevy_grass
+# then degrades gracefully (warning + no grass) instead of killing the game.
 # Sole physics backend. (`dim3` is the 3D core without debug-render extras.)
 bevy_rapier3d = { version = "0.37", default-features = false, features = ["dim3"] }
+# GPU grass fields (wind + trampling). Needs compute shaders: where the GPU
+# backend lacks them (e.g. WebGL2), grass logs one warning and draws nothing.
+bevy_grass = { version = "0.20.6", features = ["rapier"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Headless frame capture (`headless.rs`) encodes the offscreen target as PNG.
+# Bevy already compiles this exact `image` crate for `bevy_image`'s `png`
+# feature, so this is a direct handle, not an extra dependency tree.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+party-dungeon-net = { path = "../net" }
+# Replication path (feature `replicon`): shared schema + matchbox/WebRTC
+# messaging backend for bevy_replicon 0.45 (Bevy 0.20).
+party-dungeon-replication = { path = "../replication", optional = true, default-features = false }
+party-dungeon-repl-matchbox = { path = "../repl_matchbox", optional = true, default-features = false }
+bevy_replicon = { version = "0.45", optional = true, default-features = false }
+# NOTE: do NOT depend on `party-dungeon-server` here — it pulls SurrealDB +
+# tokio (which has no wasm support for `rt-multi-thread`), breaking the web
+# build. The client needs nothing from it: auth is HTTP (ehttp), the protocol
+# lives in `party-dungeon-net`, and row rules are enforced server-side.
+matchbox_socket = "0.15"
+# Minimal HTTP client (native + WASM) for the Rauthy auth flow. Callback-based:
+# requests are fired from systems, responses arrive on an mpsc channel.
+ehttp = "0.7"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Blob", "DataTransfer", "Document", "DragEvent", "DomException", "Element", "Event", "File", "FileList", "FileReader", "HtmlDocument", "HtmlElement", "HtmlInputElement", "HtmlTextAreaElement", "Location", "Navigator", "Node", "Storage", "Window"] }
+# `DomRect` + `KeyboardEvent` exist for the auth form's mobile soft-keyboard
+# overlays (native <input>s laid over the Bevy-drawn rows): layout rects come
+# from `Element::get_bounding_client_rect`, Enter/Tab from the keydown handler.
+web-sys = { version = "0.3", features = ["Blob", "DataTransfer", "Document", "DragEvent", "DomException", "DomRect", "Element", "Event", "File", "FileList", "FileReader", "HtmlDocument", "HtmlElement", "HtmlInputElement", "HtmlTextAreaElement", "KeyboardEvent", "Location", "Navigator", "Node", "Storage", "Window"] }
+
+# System clipboard everywhere except Android (see note on the base `bevy`
+# dependency above). Additive per-target features like this are merged by
+# Cargo only when building for the matching target.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+bevy = { version = "=0.20.0", features = ["system_clipboard"] }
+
+# Forced soft keyboard on Android (see src/android_ime.rs). Versions match
+# what the rest of the tree already resolves, so no duplicate crates.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"

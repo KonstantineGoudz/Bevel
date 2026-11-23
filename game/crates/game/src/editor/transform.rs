@@ -63,7 +63,9 @@ pub(super) fn keyboard_transform(
             Some(axis)
         };
         if transform.mode == TransformMode::Rotate
-            && shapes().get(transform.base.shape).is_some_and(|s| s.is_glade())
+            && shapes()
+                .get(transform.base.shape)
+                .is_some_and(|s| s.is_glade())
             && matches!(next, Some(TransformAxis::X | TransformAxis::Z))
         {
             editor.note = "glade objects only rotate on Y";

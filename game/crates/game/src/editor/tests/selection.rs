@@ -14,12 +14,20 @@ fn deleting_removes_every_selected_piece_in_one_step() {
     delete_piece(&mut editor);
 
     assert_eq!(
-        editor.pieces.iter().map(|piece| piece.id).collect::<Vec<_>>(),
+        editor
+            .pieces
+            .iter()
+            .map(|piece| piece.id)
+            .collect::<Vec<_>>(),
         [2],
         "only the selected pieces go"
     );
     assert!(editor.selection.is_empty());
-    assert_eq!(editor.undo.len(), 1, "one delete of a group is one undo step");
+    assert_eq!(
+        editor.undo.len(),
+        1,
+        "one delete of a group is one undo step"
+    );
 }
 
 #[test]
@@ -46,8 +54,15 @@ fn rotating_turns_every_selected_piece() {
 
     assert!((editor.pieces[0].rot - step).abs() < 1e-6, "primary turned");
     assert!((editor.pieces[1].rot).abs() < 1e-6, "unselected piece kept");
-    assert!((editor.pieces[2].rot - step).abs() < 1e-6, "other member turned");
-    assert_eq!(editor.undo.len(), 1, "one rotate of a group is one undo step");
+    assert!(
+        (editor.pieces[2].rot - step).abs() < 1e-6,
+        "other member turned"
+    );
+    assert_eq!(
+        editor.undo.len(),
+        1,
+        "one rotate of a group is one undo step"
+    );
 }
 
 #[test]
@@ -61,7 +76,11 @@ fn copying_copies_every_selected_piece_in_selection_order() {
     copy_piece(&mut editor);
 
     assert_eq!(
-        editor.clipboard.iter().map(|piece| piece.id).collect::<Vec<_>>(),
+        editor
+            .clipboard
+            .iter()
+            .map(|piece| piece.id)
+            .collect::<Vec<_>>(),
         [3, 1],
         "the clipboard keeps the primary first"
     );
@@ -180,11 +199,18 @@ fn a_shift_click_toggles_membership_and_never_drags() {
     editor.pieces.push(test_piece(2));
     editor.selection.set(1);
 
-    assert!(!click_selection(&mut editor, 2, true), "no drag on shift-click");
+    assert!(
+        !click_selection(&mut editor, 2, true),
+        "no drag on shift-click"
+    );
     assert_eq!(editor.selection.ids(), [2, 1], "the new piece joins first");
 
     assert!(!click_selection(&mut editor, 2, true));
-    assert_eq!(editor.selection.ids(), [1], "shift-clicking it again drops it");
+    assert_eq!(
+        editor.selection.ids(),
+        [1],
+        "shift-clicking it again drops it"
+    );
 
     assert!(!click_selection(&mut editor, 1, true));
     assert!(editor.selection.is_empty(), "the last piece can be dropped");
@@ -209,10 +235,7 @@ fn a_drag_from_a_multi_selection_carries_every_other_piece() {
 
     assert_eq!(
         offsets,
-        vec![
-            (1, Vec2::new(-1.0, 0.0)),
-            (3, Vec2::new(-1.0, 2.0)),
-        ],
+        vec![(1, Vec2::new(-1.0, 0.0)), (3, Vec2::new(-1.0, 2.0)),],
         "every other member keeps its offset from the grabbed piece, primary order first"
     );
 }
@@ -282,7 +305,10 @@ fn building_attachments_auto_group_and_move_with_host_building() {
     let offsets = group_offsets(&editor, 1, room.pos);
     let carried: Vec<u32> = offsets.iter().map(|(id, _)| *id).collect();
     assert_eq!(carried, vec![2, 3, 4]);
-    let gizmo_carried: Vec<u32> = dragged_group(&editor, 1).into_iter().map(|p| p.id).collect();
+    let gizmo_carried: Vec<u32> = dragged_group(&editor, 1)
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
     assert_eq!(gizmo_carried, vec![2, 3, 4]);
 
     // Selecting and dragging a single door or window does not drag the building.
@@ -298,5 +324,8 @@ fn a_plain_click_drops_the_stamp_but_shift_keeps_it_armed() {
         "a plain click hands the pointer back to selection"
     );
     assert!(keeps_stamping(true, false), "Shift keeps stamping");
-    assert!(keeps_stamping(false, true), "the sticky touch Add keeps stamping");
+    assert!(
+        keeps_stamping(false, true),
+        "the sticky touch Add keeps stamping"
+    );
 }

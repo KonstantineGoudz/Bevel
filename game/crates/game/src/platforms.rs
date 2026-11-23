@@ -155,6 +155,25 @@ fn build_platform_curves(waypoints: &[PlatformWaypoint], closed: bool) -> Vec<pa
     curves
 }
 
+/// Midpoints (`t = 0.5`) of every cubic Bezier segment along `waypoints`.
+pub fn segment_midpoints(waypoints: &[PlatformWaypoint], closed: bool) -> Vec<Vec2> {
+    build_platform_curves(waypoints, closed)
+        .into_iter()
+        .map(|cubic| cubic.at(0.5))
+        .collect()
+}
+
+/// Midpoint (`t = 0.5`) of a single cubic Bezier segment `segment`.
+pub fn segment_midpoint(
+    waypoints: &[PlatformWaypoint],
+    closed: bool,
+    segment: usize,
+) -> Option<Vec2> {
+    build_platform_curves(waypoints, closed)
+        .get(segment)
+        .map(|cubic| cubic.at(0.5))
+}
+
 /// Build a smoothed Bezier track through the waypoints, honouring manual
 /// handles. Needs at least two points; fewer yields an empty track.
 ///
@@ -173,7 +192,10 @@ pub fn build_platform_track(waypoints: &[PlatformWaypoint], closed: bool) -> pat
 
 /// Effective incoming/outgoing Bezier control handles for each waypoint,
 /// combining automatic smooth tangents with any manual handle overrides.
-pub fn platform_controls(waypoints: &[PlatformWaypoint], closed: bool) -> Vec<path::AnchorControls> {
+pub fn platform_controls(
+    waypoints: &[PlatformWaypoint],
+    closed: bool,
+) -> Vec<path::AnchorControls> {
     if waypoints.len() < 2 {
         return vec![
             path::AnchorControls {

@@ -1,0 +1,14 @@
+# xbuild packaging manifest (Android-only for now; read by `x build`).
+# The activity is NativeActivity (see the bevy feature note in Cargo.toml):
+# no Gradle/Maven Java deps are needed, so xbuild assembles the APK directly.
+android:
+  manifest:
+    package: biz.conman.partydungeon
+    version_name: 0.1.0
+    sdk:
+      min_sdk_version: 28
+    uses_permission:
+      - name: android.permission.INTERNET
+      - name: android.permission.ACCESS_NETWORK_STATE
+    application:
+      label: Party Dungeon

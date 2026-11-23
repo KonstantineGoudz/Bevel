@@ -169,7 +169,6 @@ pub enum Action {
     DeletePiece,
     Undo,
     Redo,
-    SaveLevel,
     CopyJson,
     NewGroup,
     UngroupNodes,
@@ -218,7 +217,6 @@ impl Action {
         Action::DeletePiece,
         Action::Undo,
         Action::Redo,
-        Action::SaveLevel,
         Action::CopyJson,
         Action::NewGroup,
         Action::UngroupNodes,
@@ -264,7 +262,6 @@ impl Action {
             Self::DeletePiece => "deletePiece",
             Self::Undo => "undo",
             Self::Redo => "redo",
-            Self::SaveLevel => "saveLevel",
             Self::CopyJson => "copyJson",
             Self::NewGroup => "newGroup",
             Self::UngroupNodes => "ungroupNodes",
@@ -317,7 +314,6 @@ impl Action {
             Self::DeletePiece => "Delete",
             Self::Undo => "Undo",
             Self::Redo => "Redo",
-            Self::SaveLevel => "Save level",
             Self::CopyJson => "Copy level JSON",
             Self::NewGroup => "New group",
             Self::UngroupNodes => "Ungroup nodes",
@@ -361,7 +357,6 @@ impl Action {
             | Self::DeletePiece
             | Self::Undo
             | Self::Redo
-            | Self::SaveLevel
             | Self::CopyJson
             | Self::NewGroup
             | Self::UngroupNodes
@@ -405,7 +400,6 @@ impl Action {
             | Self::DeletePiece
             | Self::Undo
             | Self::Redo
-            | Self::SaveLevel
             | Self::CopyJson
             | Self::NewGroup
             | Self::UngroupNodes
@@ -731,7 +725,6 @@ impl Controls {
                     Binding::Key(KeyChord::ctrl(KeyCode::KeyY)),
                 ],
             ),
-            (A::SaveLevel, &[key(KeyCode::KeyS)]),
             (A::CopyJson, &[Binding::Key(KeyChord::shift(KeyCode::KeyS))]),
             (A::NewGroup, &[Binding::Key(KeyChord::ctrl(KeyCode::KeyG))]),
             (
@@ -925,11 +918,9 @@ impl Controls {
     ) -> bool {
         let insensitive = action.mod_insensitive();
         let shift_blind = Self::mouse_ignores_shift(self.binding(action));
-        self.binding(action)
-            .iter()
-            .any(|binding| {
-                Self::binding_just_pressed(binding, keys, mouse, pads, insensitive, shift_blind)
-            })
+        self.binding(action).iter().any(|binding| {
+            Self::binding_just_pressed(binding, keys, mouse, pads, insensitive, shift_blind)
+        })
     }
 
     /// Whether this action's mouse bindings should ignore the Shift key.
@@ -1383,12 +1374,10 @@ mod tests {
     fn chords_match_modifiers_exactly_unless_insensitive() {
         let controls = Controls::with_defaults();
         let pads: [&Gamepad; 0] = [];
-        // Plain S saves; Shift+S must not.
+        // Plain S is unbound (single world: nothing to save); Shift+S copies JSON.
         let s = pressed_keys(&[KeyCode::KeyS]);
-        assert!(controls.pressed(Action::SaveLevel, &s, &mouse(), &pads));
         assert!(!controls.pressed(Action::CopyJson, &s, &mouse(), &pads));
         let shift_s = pressed_keys(&[KeyCode::KeyS, KeyCode::ShiftLeft]);
-        assert!(!controls.pressed(Action::SaveLevel, &shift_s, &mouse(), &pads));
         assert!(controls.pressed(Action::CopyJson, &shift_s, &mouse(), &pads));
         // Movement ignores extra modifiers so sprint-walking works.
         let shift_w = pressed_keys(&[KeyCode::KeyW, KeyCode::ShiftLeft]);

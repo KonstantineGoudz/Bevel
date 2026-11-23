@@ -476,6 +476,8 @@ fn raw_touch_grabs_a_gizmo_without_pointer_events() {
 
     let (mut app, window) = touch_app(1.0);
     app.init_resource::<Editor>();
+    app.init_resource::<Movers>();
+    app.init_resource::<Orbit>();
     app.init_resource::<PathGesture>();
     app.init_resource::<PointerCapture>();
     app.init_resource::<OutlinerState>();
@@ -526,7 +528,10 @@ fn raw_touch_grabs_a_gizmo_without_pointer_events() {
     send_touch(&mut app, window, TouchPhase::Started, press_pos);
 
     let editor = app.world().resource::<Editor>();
-    let drag = editor.gizmo_drag.clone().expect("raw touch grabs the handle");
+    let drag = editor
+        .gizmo_drag
+        .clone()
+        .expect("raw touch grabs the handle");
     assert_eq!(drag.handle, GizmoHandle::X);
     assert_eq!(drag.pointer, PointerId::Touch(1));
     let touch = app.world().resource::<TouchState>();
@@ -557,4 +562,139 @@ fn raw_touch_grabs_a_gizmo_without_pointer_events() {
     let editor = app.world().resource::<Editor>();
     assert!(editor.gizmo_drag.is_none());
     assert!(editor.hard_dirty);
+}
+
+/// Regression: on mobile browsers where overlapping UI swallows pointer events,
+/// raw touches must still grab, drag, and release curve/path controls (such as
+/// `glade_wall` / `glade_path` waypoints and tangents), not just transform gizmos.
+#[test]
+fn raw_touch_grabs_and_drags_curve_controls_without_pointer_events() {
+    use bevy::camera::{RenderTargetInfo, Viewport};
+    use bevy::input::touch::TouchPhase;
+
+    let (mut app, window) = touch_app(1.0);
+    app.init_resource::<Editor>();
+    app.init_resource::<Movers>();
+    app.init_resource::<PathGesture>();
+    app.init_resource::<PointerCapture>();
+    app.init_resource::<Orbit>();
+    app.init_resource::<OutlinerState>();
+    app.init_resource::<PropertiesPanelState>();
+    app.init_resource::<RightPanelState>();
+    app.init_resource::<AddMenu>();
+    app.init_resource::<InputFocus>();
+
+    let wall_shape = model::shape_index("glade_wall").expect("glade_wall shape");
+    let wall_piece = Piece {
+        id: 1,
+        shape: wall_shape,
+        pos: Vec2::ZERO,
+        rot: 0.0,
+        pitch: 0.0,
+        roll: 0.0,
+        elevation: 0.0,
+        dynamic: false,
+        trigger: model::Trigger::default(),
+        trigger_size: Vec3::new(2.8, 2.2, 0.36),
+        trigger_shape_override: model::TriggerShape::Box,
+        trigger_alpha: 0.35,
+        trigger_color: model::TRIGGER_DEFAULT_COLOR,
+        trigger_visible: false,
+        interact: model::InteractAction::None,
+    };
+    {
+        let mut world = app.world_mut();
+        world.resource_scope(|world, mut movers: Mut<Movers>| {
+            movers::ensure_glade_wall_mover(&wall_piece, &mut movers);
+            let mut editor = world.resource_mut::<Editor>();
+            editor.pieces.push(wall_piece);
+            editor.selection.set(1);
+        });
+    }
+
+    let eye = Vec3::new(0.0, 9.0, 6.0);
+    let cam_transform = Transform::from_translation(eye).looking_at(Vec3::ZERO, Vec3::Y);
+    let mut camera = Camera::default();
+    camera.viewport = Some(Viewport {
+        physical_position: UVec2::ZERO,
+        physical_size: UVec2::new(800, 600),
+        depth: 0.0..1.0,
+    });
+    camera.computed.clip_from_view =
+        Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, 800.0 / 600.0, 0.1, 100.0);
+    camera.computed.target_info = Some(RenderTargetInfo {
+        physical_size: UVec2::new(800, 600),
+        scale_factor: 1.0,
+    });
+    app.world_mut()
+        .spawn((camera, Camera3d::default(), cam_transform));
+    app.add_systems(Update, touch_gizmo_fallback.after(touch_input));
+
+    let handle_world = {
+        let world = app.world();
+        let editor = world.resource::<Editor>();
+        let movers = world.resource::<Movers>();
+        let mover = movers.map.get(&1).expect("wall mover");
+        let wp = mover.waypoints[0].pos;
+        let shape = shapes().get(wall_shape);
+        let y = glade_curve_handle_y(
+            &wall_piece,
+            shape,
+            &editor.pieces,
+            mover.track.as_ref().map(|t| t.points()),
+            wp,
+            0.0,
+        );
+        Vec3::new(wp.x, y, wp.y)
+    };
+    let press_pos = {
+        let world = app.world_mut();
+        let (camera, transform) = world
+            .query::<(&Camera, &Transform)>()
+            .single(world)
+            .expect("camera");
+        camera
+            .world_to_viewport(&GlobalTransform::from(*transform), handle_world)
+            .expect("curve handle on screen")
+    };
+
+    send_touch(&mut app, window, TouchPhase::Started, press_pos);
+    {
+        let gesture = app.world().resource::<PathGesture>();
+        assert!(gesture.0.dragging(), "raw touch must grab curve handle");
+        assert_eq!(gesture.0.drag_pointer(), Some(PointerId::Touch(1)));
+        let editor = app.world().resource::<Editor>();
+        assert!(
+            editor.gizmo_drag.is_none(),
+            "curve handle must not be stolen by glade gizmo orbs"
+        );
+        let movers = app.world().resource::<Movers>();
+        assert_eq!(movers.map.get(&1).and_then(|m| m.selected), Some(0));
+        let touch = app.world().resource::<TouchState>();
+        assert!(
+            touch.tracks.get(&1).is_some_and(|track| track.control),
+            "the grabbing finger must not also orbit"
+        );
+    }
+
+    let moved_pos = press_pos + Vec2::new(30.0, 0.0);
+    send_touch(&mut app, window, TouchPhase::Moved, moved_pos);
+    {
+        let gesture = app.world().resource::<PathGesture>();
+        assert_eq!(
+            gesture.0.drag_target().map(|d| d.handle),
+            Some(PathHandle::Waypoint(0)),
+            "drag past tap threshold must activate waypoint drag"
+        );
+        assert!(
+            gesture
+                .0
+                .screen()
+                .is_some_and(|s| (s - moved_pos).length() < 1e-4)
+        );
+    }
+
+    send_touch(&mut app, window, TouchPhase::Ended, moved_pos);
+    assert!(!app.world().resource::<PathGesture>().0.dragging());
+    assert!(!app.world().resource::<TouchState>().path_drag_active);
 }

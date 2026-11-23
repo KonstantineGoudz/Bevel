@@ -1,279 +1,309 @@
-//! File store + level-data helpers for the Party Dungeon MCP server.
+//! Single-world store for the Party Dungeon MCP server.
 //!
-//! Canonical on-disk format is the game session [`Snapshot`] (version 1):
-//! `{ "version": 1, "pieces": [...], "character": {...}, ... }`. The native
-//! game also boots from these files (`--level <path>` /
-//! `PARTY_DUNGEON_LEVEL`), so file edits apply on (re)start. When the game is
-//! running with the live bridge (`PARTY_DUNGEON_BRIDGE`), mutations are also
-//! forwarded so they apply instantly.
+//! The MMO has exactly one world: SurrealDB is the system of record
+//! (`dungeon_piece` / `platform_path` rows), the sim is authoritative at
+//! runtime, and the live game bridge is the hot path for instant edits.
+//! There are no level files and no level names anymore.
+//!
+//! MCP tools work on an editor-style [`Snapshot`] (local u32 ids); this
+//! module translates to/from SurrealDB rows (stable string `rid`s). The
+//! `rids` map remembers the row key behind each local id for the session so
+//! saves update rows instead of forking them.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use party_dungeon::model::{self, Piece};
 use party_dungeon::path;
 use party_dungeon::session::{
-    self, SavedCharacter, SavedPiece, SavedPlatform, SavedPlatformPoint, Snapshot,
-    SNAPSHOT_VERSION,
+    self, SNAPSHOT_VERSION, SavedCharacter, SavedPiece, SavedPlatform, SavedPlatformPoint, Snapshot,
 };
+use party_dungeon_server::{Backend, SurrealConfig};
 
 /// Which backend a tool should use.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum Source {
-    /// Try the live bridge first, fall back to the file.
+    /// Try the live bridge first, fall back to the database.
     #[default]
     Auto,
-    File,
+    /// SurrealDB only (the single shared world).
+    Db,
+    /// Live game only; error when the bridge is unreachable.
     Live,
 }
 
 impl Source {
     pub fn parse(value: Option<&str>) -> Self {
         match value.unwrap_or("auto").to_ascii_lowercase().as_str() {
-            "file" => Source::File,
+            // "file" is the pre-world name for the stored backend.
+            "db" | "file" => Source::Db,
             "live" => Source::Live,
             _ => Source::Auto,
         }
     }
 }
 
-/// Resolve a level name to a file path. `None` means the default level.
-pub fn sanitize_level_name(name: &str) -> Option<String> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if !trimmed
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-    {
-        return None;
-    }
-    if trimmed == "." || trimmed == ".." || trimmed.contains("..") {
-        return None;
-    }
-    Some(trimmed.to_owned())
-}
-
-#[derive(Clone)]
+/// World handle: live bridge address plus the local-id -> row-rid map that
+/// makes saves round-trip without forking rows.
+#[derive(Clone, Default)]
 pub struct Store {
-    dir: PathBuf,
-    default_level: String,
     bridge: Option<String>,
+    rids: Arc<Mutex<HashMap<u32, String>>>,
 }
 
 impl Store {
     pub fn from_env() -> Self {
-        let dir = std::env::var("PARTY_DUNGEON_LEVELS_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                for candidate in ["game/levels", "levels"] {
-                    let path = cwd.join(candidate);
-                    if path.is_dir() {
-                        return path;
-                    }
-                }
-                cwd.join("game/levels")
-            });
-        let default_level = std::env::var("PARTY_DUNGEON_LEVEL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "level".to_owned());
-        // `PARTY_DUNGEON_LEVEL` may be a full snapshot path instead of a name.
+        // `PARTY_DUNGEON_BRIDGE` may be an address, "1" for the default, or
+        // empty/"0" to disable the live path.
         let bridge = match std::env::var("PARTY_DUNGEON_BRIDGE") {
             Ok(value) if value.trim().is_empty() => None,
             Ok(value) => Some(value),
-            Err(_) => Some("127.0.0.1:3559".to_owned()),
+            Err(_) => Some("127.0.0.1:6559".to_owned()),
         };
         Self {
-            dir,
-            default_level,
             bridge,
+            rids: Arc::new(Mutex::new(HashMap::new())),
         }
-    }
-
-    pub fn levels_dir(&self) -> &Path {
-        &self.dir
-    }
-
-    pub fn default_level_name(&self) -> &str {
-        if self.default_level.ends_with(".json")
-            || self.default_level.contains('/')
-            || self.default_level.contains('\\')
-        {
-            "level"
-        } else {
-            &self.default_level
-        }
-    }
-
-    /// An explicit snapshot file via `PARTY_DUNGEON_LEVEL=/path/to/file.json`.
-    pub fn explicit_file(&self) -> Option<PathBuf> {
-        let value = std::env::var("PARTY_DUNGEON_LEVEL").ok()?;
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        let path = PathBuf::from(trimmed);
-        let looks_like_path = trimmed.ends_with(".json")
-            || trimmed.contains('/')
-            || trimmed.contains('\\');
-        looks_like_path.then_some(path)
     }
 
     pub fn bridge_addr(&self) -> Option<&str> {
         self.bridge.as_deref()
     }
 
-    pub fn path_for(&self, level: Option<&str>) -> Result<PathBuf, String> {
-        if level.is_none() {
-            if let Some(path) = self.explicit_file() {
-                return Ok(path);
-            }
-        }
-        let name = level
-            .map(sanitize_level_name)
-            .unwrap_or_else(|| sanitize_level_name(&self.default_level).or(Some("level".into())))
-            .ok_or_else(|| "invalid level name (use a-z, 0-9, '-', '_')".to_owned())?;
-        let mut file = name;
-        if !file.ends_with(".json") {
-            file.push_str(".json");
-        }
-        Ok(self.dir.join(file))
+    async fn service_backend() -> Result<Backend, String> {
+        let cfg = SurrealConfig::from_env()
+            .map_err(|error| format!("surreal config (DUNGEON_* env): {error}"))?;
+        let user = std::env::var("DUNGEON_SERVICE_USER")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .ok_or_else(|| "set DUNGEON_SERVICE_USER (trusted sidecar)".to_string())?;
+        let pass = std::env::var("DUNGEON_SERVICE_PASS")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .ok_or_else(|| "set DUNGEON_SERVICE_PASS (trusted sidecar)".to_string())?;
+        Backend::connect_service(&cfg, &user, &pass)
+            .await
+            .map_err(|error| format!("surreal connect: {error}"))
     }
 
-    pub fn load_snapshot(&self, level: Option<&str>) -> Result<(PathBuf, Snapshot), String> {
-        let path = self.path_for(level)?;
-        if !path.exists() {
-            return Ok((
-                path,
-                Snapshot {
-                    version: SNAPSHOT_VERSION,
-                    next_id: Some(1),
-                    ..Default::default()
+    /// Load the single shared world: live bridge first (unless `Db`), else
+    /// SurrealDB. Returns the snapshot and whether it came from the live game.
+    pub async fn load_world(&self, source: Source) -> Result<(Snapshot, bool), String> {
+        if source != Source::Db {
+            if let Some(addr) = self.bridge_addr() {
+                if let Some(snapshot) = bridge_state(addr).await {
+                    self.remember_rids_fresh(&snapshot);
+                    return Ok((snapshot, true));
+                }
+                if source == Source::Live {
+                    return Err(format!("live bridge at {addr} is unreachable"));
+                }
+            } else if source == Source::Live {
+                return Err("live bridge is disabled (PARTY_DUNGEON_BRIDGE is empty)".to_owned());
+            }
+        }
+        self.db_snapshot().await.map(|snapshot| (snapshot, false))
+    }
+
+    /// Read the world from SurrealDB and remember row rids behind fresh
+    /// sequential local ids.
+    async fn db_snapshot(&self) -> Result<Snapshot, String> {
+        let backend = Self::service_backend().await?;
+        let pieces = backend
+            .list_pieces()
+            .await
+            .map_err(|error| format!("list pieces: {error}"))?;
+        let paths = backend
+            .list_paths()
+            .await
+            .map_err(|error| format!("list paths: {error}"))?;
+        let mut rids = HashMap::new();
+        let mut saved_pieces = Vec::with_capacity(pieces.len());
+        for (index, row) in pieces.iter().enumerate() {
+            let id = index as u32 + 1;
+            rids.insert(id, row.rid.clone());
+            saved_pieces.push(SavedPiece {
+                id,
+                shape: row.shape.clone(),
+                x: row.x,
+                z: row.z,
+                elevation: row.elevation,
+                rot_deg: row.rot_deg,
+                pitch_deg: row.pitch_deg,
+                roll_deg: row.roll_deg,
+                dynamic: row.dynamic,
+                damage: Some(row.damage),
+                interact: if row.interact == "none" {
+                    None
+                } else {
+                    Some(row.interact.clone())
                 },
-            ));
+                trigger_width: Some(row.trigger_w),
+                trigger_height: Some(row.trigger_h),
+                trigger_length: Some(row.trigger_l),
+                trigger_shape: None,
+                trigger_alpha: None,
+                trigger_color: None,
+                trigger_visible: None,
+                name: None,
+                group: None,
+                locked: false,
+            });
         }
-        let text =
-            std::fs::read_to_string(&path).map_err(|error| format!("could not read level: {error}"))?;
-        let display = path.display().to_string();
-        Self::parse_snapshot_text(&text)
-            .map(|snapshot| (path, snapshot))
-            .map_err(|error| format!("{display}: {error}"))
+        let mut saved_paths = Vec::new();
+        let mut skipped = 0usize;
+        for path in &paths {
+            let Some(piece) = rids.iter().find_map(|(id, rid)| (*rid == path.piece_rid).then_some(*id)) else {
+                skipped += 1;
+                continue;
+            };
+            saved_paths.push(SavedPlatform {
+                piece,
+                mode: path.mode.clone(),
+                speed: Some(path.speed),
+                paused: path.paused,
+                waypoints: path
+                    .waypoints
+                    .iter()
+                    .map(|w| SavedPlatformPoint {
+                        x: w.x,
+                        z: w.z,
+                        incoming: None,
+                        outgoing: None,
+                    })
+                    .collect(),
+            });
+        }
+        if skipped > 0 {
+            eprintln!("mcp: skipped {skipped} orphan platform path(s)");
+        }
+        *self.rids.lock().unwrap() = rids;
+        Ok(Snapshot {
+            version: SNAPSHOT_VERSION,
+            next_id: Some(saved_pieces.len() as u32 + 1),
+            pieces: saved_pieces,
+            character: None,
+            camera: None,
+            groups: Vec::new(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            platforms: saved_paths,
+            grass: Vec::new(),
+            grass_slows: false,
+            vines: Vec::new(),
+        })
     }
 
-    /// Parse either a session Snapshot (v1) or the debug `level.json` (v2)
-    /// the game writes with `S` / CopyJson.
-    pub fn parse_snapshot_text(text: &str) -> Result<Snapshot, String> {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-            if value.get("format").and_then(|v| v.as_str()) == Some("party-dungeon-level") {
-                return snapshot_from_level_json(&value);
-            }
-        }
-        Snapshot::from_json(text).map_err(|error| format!("{error:?}"))
-    }
-
-    pub fn save_snapshot(&self, path: &Path, snapshot: &Snapshot) -> Result<(), String> {
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("could not create levels dir: {error}"))?;
-        }
-        // Validate before writing so a bad edit never corrupts the file.
-        snapshot
+    /// Validate + persist the world to SurrealDB (full replace, like the
+    /// sim's hot-reload path). Unknown local ids get fresh row rids and are
+    /// remembered for the rest of the session.
+    pub async fn save_world(&self, snapshot: &Snapshot, actor: &str) -> Result<String, String> {
+        let loaded = snapshot
             .clone()
             .validate()
-            .map_err(|error| format!("level failed validation: {error:?}"))?;
-        if path.exists() {
-            let backup = path.with_extension("json.bak");
-            if let Ok(text) = std::fs::read_to_string(path) {
-                let _ = std::fs::write(&backup, text);
-            }
+            .map_err(|error| format!("invalid world: {error:?}"))?;
+        let backend = Self::service_backend().await?;
+        let world_name = backend
+            .level_name()
+            .await
+            .map_err(|error| format!("read world name: {error}"))?
+            .map(|meta| meta.name)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "world".to_owned());
+        let mut rids = self.rids.lock().unwrap().clone();
+        let mut pieces = Vec::with_capacity(loaded.pieces.len());
+        for piece in &loaded.pieces {
+            let rid = rids.entry(piece.id).or_insert_with(party_dungeon_server::new_rid).clone();
+            let shape_id = model::shapes()
+                .get(piece.shape)
+                .map(|shape| shape.id.to_string())
+                .unwrap_or_else(|| "block".to_string());
+            pieces.push(party_dungeon_server::Piece {
+                rid,
+                shape: shape_id,
+                x: piece.pos.x,
+                z: piece.pos.y,
+                elevation: piece.elevation,
+                rot_deg: piece.rot.to_degrees(),
+                pitch_deg: piece.pitch.to_degrees(),
+                roll_deg: piece.roll.to_degrees(),
+                dynamic: piece.dynamic,
+                damage: piece.trigger.damage,
+                interact: piece.interact.id().to_string(),
+                trigger_w: piece.trigger_size.x,
+                trigger_h: piece.trigger_size.y,
+                trigger_l: piece.trigger_size.z,
+                trigger_alpha: piece.trigger_alpha,
+            });
         }
-        let pretty = serde_json::to_string_pretty(snapshot)
-            .map_err(|error| format!("could not serialize level: {error}"))?;
-        std::fs::write(path, pretty).map_err(|error| format!("could not write level: {error}"))?;
-        Ok(())
+        let mut paths = Vec::new();
+        for platform in &loaded.platforms {
+            let Some(rid) = rids.get(&platform.piece) else {
+                return Err(format!(
+                    "platform path references unknown piece id {}",
+                    platform.piece
+                ));
+            };
+            paths.push(party_dungeon_server::PlatformPath {
+                piece_rid: rid.clone(),
+                mode: platform.mode.clone(),
+                speed: platform.speed.ok_or_else(|| {
+                    format!("platform path on piece {} needs a speed", platform.piece)
+                })?,
+                paused: platform.paused,
+                waypoints: platform
+                    .waypoints
+                    .iter()
+                    .map(|w| party_dungeon_server::Waypoint { x: w.x, z: w.z })
+                    .collect(),
+            });
+        }
+        let doc = serde_json::to_string(&party_dungeon_server::LevelSnapshot {
+            version: party_dungeon_server::SNAPSHOT_VERSION,
+            name: world_name,
+            pieces,
+            paths,
+        })
+        .map_err(|error| format!("serialize world: {error}"))?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        backend
+            .import_snapshot(&doc, actor, now_ms)
+            .await
+            .map_err(|error| format!("save world: {error}"))?;
+        *self.rids.lock().unwrap() = rids;
+        Ok(format!(
+            "saved shared world ({} pieces, {} paths)",
+            loaded.pieces.len(),
+            loaded.platforms.len()
+        ))
     }
 
-    pub fn list_levels(&self) -> Result<Vec<LevelSummary>, String> {
-        let mut out = Vec::new();
-        let Ok(entries) = std::fs::read_dir(&self.dir) else {
-            return Ok(out);
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
-            if path.extension().and_then(|ext| ext.to_str()) == Some("json")
-                && path
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .is_some_and(|stem| stem.ends_with(".bak"))
-            {
-                continue;
-            }
-            let name = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or("")
-                .to_owned();
-            if name.ends_with(".bak") {
-                continue;
-            }
-            let summary = match std::fs::read_to_string(&path) {
-                Ok(text) => match Self::parse_snapshot_text(&text) {
-                    Ok(snapshot) => LevelSummary {
-                        name,
-                        pieces: snapshot.pieces.len(),
-                        platforms: snapshot.platforms.len(),
-                        has_character: snapshot.character.is_some(),
-                        ..LevelSummary::default_name()
-                    },
-                    Err(_) => LevelSummary {
-                        name,
-                        pieces: 0,
-                        platforms: 0,
-                        has_character: false,
-                        unreadable: true,
-                    },
-                },
-                Err(_) => LevelSummary {
-                    name,
-                    pieces: 0,
-                    platforms: 0,
-                    has_character: false,
-                    unreadable: true,
-                },
-            };
-            out.push(summary);
-        }
-        out.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(out)
+    /// Remember rids for snapshots that came from the live bridge: the
+    /// bridge serves game pieces with local ids, so fresh rids are minted on
+    /// the next save (full replace keeps the world consistent either way).
+    fn remember_rids_fresh(&self, _snapshot: &Snapshot) {
+        *self.rids.lock().unwrap() = HashMap::new();
+    }
+
+    /// One-line summary of the single shared world.
+    pub async fn world_summary(&self) -> Result<WorldSummary, String> {
+        let (snapshot, live) = self.load_world(Source::Db).await?;
+        Ok(WorldSummary {
+            pieces: snapshot.pieces.len(),
+            platforms: snapshot.platforms.len(),
+            live,
+        })
     }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct LevelSummary {
-    pub name: String,
+pub struct WorldSummary {
     pub pieces: usize,
     pub platforms: usize,
-    pub has_character: bool,
-    #[serde(default)]
-    pub unreadable: bool,
-}
-
-impl LevelSummary {
-    fn default_name() -> Self {
-        Self {
-            name: String::new(),
-            pieces: 0,
-            platforms: 0,
-            has_character: false,
-            unreadable: false,
-        }
-    }
+    pub live: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -296,10 +326,7 @@ pub fn saved_to_piece(saved: &SavedPiece) -> Result<Piece, String> {
             return Err(format!("piece {name} must be finite"));
         }
     }
-    let default_damage = model::shapes()
-        .get(shape)
-        .map(|s| s.damage)
-        .unwrap_or(0.0);
+    let default_damage = model::shapes().get(shape).map(|s| s.damage).unwrap_or(0.0);
     let damage = saved.damage.unwrap_or(default_damage);
     if !damage.is_finite() || damage < 0.0 || damage > 10000.0 {
         return Err("damage must be within 0..=10000".to_owned());
@@ -414,7 +441,11 @@ pub fn reassign_next_id(snapshot: &mut Snapshot) {
         .chain(snapshot.groups.iter().map(|group| group.id))
         .max()
         .unwrap_or(0);
-    let next = snapshot.next_id.unwrap_or(1).max(highest.saturating_add(1)).max(1);
+    let next = snapshot
+        .next_id
+        .unwrap_or(1)
+        .max(highest.saturating_add(1))
+        .max(1);
     snapshot.next_id = Some(next);
 }
 
@@ -519,6 +550,7 @@ pub fn snapshot_from_level_json(doc: &serde_json::Value) -> Result<Snapshot, Str
         platforms,
         grass: Vec::new(),
         grass_slows: false,
+        vines: Vec::new(),
     })
 }
 
@@ -545,28 +577,52 @@ fn saved_piece_from_level_json(item: &serde_json::Value) -> Result<SavedPiece, S
         rot_deg: f64_field(item, "rotDeg", 0.0),
         pitch_deg: f64_field(item, "pitchDeg", 0.0),
         roll_deg: f64_field(item, "rollDeg", 0.0),
-        dynamic: item.get("dynamic").and_then(|v| v.as_bool()).unwrap_or(false),
-        damage: item.get("damage").and_then(|v| v.as_f64()).map(|v| v as f32),
+        dynamic: item
+            .get("dynamic")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        damage: item
+            .get("damage")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32),
         interact: item
             .get("interact")
             .and_then(|v| v.as_str())
             .map(|s| s.to_owned()),
-        trigger_width: item.get("triggerWidth").and_then(|v| v.as_f64()).map(|v| v as f32),
-        trigger_length: item.get("triggerLength").and_then(|v| v.as_f64()).map(|v| v as f32),
-        trigger_height: item.get("triggerHeight").and_then(|v| v.as_f64()).map(|v| v as f32),
+        trigger_width: item
+            .get("triggerWidth")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32),
+        trigger_length: item
+            .get("triggerLength")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32),
+        trigger_height: item
+            .get("triggerHeight")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32),
         trigger_shape: item
             .get("triggerShape")
             .and_then(|v| v.as_str())
             .map(|s| s.to_owned()),
-        trigger_alpha: item.get("triggerAlpha").and_then(|v| v.as_f64()).map(|v| v as f32),
+        trigger_alpha: item
+            .get("triggerAlpha")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32),
         trigger_color: item
             .get("triggerColor")
             .and_then(|v| v.as_str())
             .map(|s| s.to_owned()),
         trigger_visible: item.get("triggerVisible").and_then(|v| v.as_bool()),
-        name: item.get("name").and_then(|v| v.as_str()).map(|s| s.to_owned()),
+        name: item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_owned()),
         group: item.get("group").and_then(|v| v.as_u64()).map(|v| v as u32),
-        locked: item.get("locked").and_then(|v| v.as_bool()).unwrap_or(false),
+        locked: item
+            .get("locked")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     })
 }
 
@@ -680,7 +736,43 @@ pub fn export_level_json(snapshot: &Snapshot) -> serde_json::Value {
 // Live bridge client (game running with PARTY_DUNGEON_BRIDGE)
 // ---------------------------------------------------------------------------
 
-async fn http_roundtrip(addr: &str, request: String) -> Option<String> {
+/// PNG signature that precedes every frame the bridge can serve.
+const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+
+/// Whether `bytes` looks like a PNG (magic-number check; the bridge serves
+/// raw `image/png` frames on `/screenshot`).
+fn is_png(bytes: &[u8]) -> bool {
+    bytes.starts_with(&PNG_MAGIC)
+}
+
+/// Split an HTTP/1.x response into its head (status line + headers) and raw
+/// body. Binary-safe: the body is never decoded as UTF-8, so PNG bytes
+/// survive the round trip.
+fn split_http_response(buf: &[u8]) -> Option<(String, &[u8])> {
+    let (head, body) = if let Some(index) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+        (&buf[..index], &buf[index + 4..])
+    } else {
+        // Be liberal about bare-LF headers; the bridge itself always writes
+        // CRLF, this only keeps the helper forgiving.
+        let index = buf.windows(2).position(|w| w == b"\n\n")?;
+        (&buf[..index], &buf[index + 2..])
+    };
+    Some((String::from_utf8_lossy(head).into_owned(), body))
+}
+
+/// Status code from a response head (`HTTP/1.0 200 OK` -> `200`).
+fn http_status_code(head: &str) -> Option<u16> {
+    head.lines().next()?.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Binary-safe HTTP/1.0 round trip to the live bridge. Returns the response
+/// head plus the raw body bytes; `None` = unreachable or timed out before the
+/// response arrived.
+async fn http_roundtrip_bytes(
+    addr: &str,
+    request: String,
+    read_timeout: std::time::Duration,
+) -> Option<(String, Vec<u8>)> {
     let connect = tokio::time::timeout(
         std::time::Duration::from_millis(600),
         tokio::net::TcpStream::connect(addr),
@@ -701,13 +793,85 @@ async fn http_roundtrip(addr: &str, request: String) -> Option<String> {
     }
     let mut buf = Vec::with_capacity(65536);
     let _read = tokio::time::timeout(
-        std::time::Duration::from_millis(2000),
+        read_timeout,
         tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut buf),
     )
-    .await.ok()?;
-    let text = String::from_utf8_lossy(&buf).into_owned();
-    let body = text.split("\r\n\r\n").nth(1).or_else(|| text.split("\n\n").nth(1))?;
-    Some(body.to_owned())
+    .await
+    .ok()?;
+    let (head, body) = split_http_response(&buf)?;
+    Some((head, body.to_vec()))
+}
+
+/// String-only convenience wrapper used by the JSON endpoints.
+async fn http_roundtrip(addr: &str, request: String) -> Option<String> {
+    let (_head, body) =
+        http_roundtrip_bytes(addr, request, std::time::Duration::from_millis(2000)).await?;
+    Some(String::from_utf8_lossy(&body).into_owned())
+}
+
+/// Fetch one PNG frame from a headless game (`GET /screenshot`).
+///
+/// Screenshots only work when the game runs with `--headless`; anything else
+/// answers `503` with a JSON `{"ok":false,"error":...}` body, which is
+/// surfaced verbatim as the error. The first frame right after startup can
+/// take several seconds (renderer warm-up), so the read timeout is generous.
+pub async fn bridge_screenshot(addr: &str) -> Result<Vec<u8>, String> {
+    let request =
+        format!("GET /screenshot HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    // The bridge keeps the request open for up to 12 s because the first
+    // capture can only be armed once the renderer has drawn a frame (a
+    // software renderer spends several seconds compiling pipelines first).
+    // Wait 20 s here so a cold game still yields a frame instead of a bogus
+    // "unreachable".
+    let Some((head, body)) =
+        http_roundtrip_bytes(addr, request, std::time::Duration::from_secs(20)).await
+    else {
+        return Err(format!(
+            "live bridge at {addr} is unreachable; screenshots need the game running \
+             with --headless (live bridge on by default at 127.0.0.1:6559)"
+        ));
+    };
+    let status = http_status_code(&head).unwrap_or(0);
+    if status != 200 {
+        let text = String::from_utf8_lossy(&body);
+        let text = text.trim();
+        let detail = serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("error")
+                    .and_then(|error| error.as_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| text.to_owned());
+        return Err(if detail.is_empty() {
+            format!("bridge /screenshot returned HTTP {status}")
+        } else {
+            format!("bridge /screenshot returned HTTP {status}: {detail}")
+        });
+    }
+    if body.is_empty() {
+        return Err("bridge /screenshot returned an empty body".to_owned());
+    }
+    if !is_png(&body) {
+        return Err(format!(
+            "bridge /screenshot did not return a PNG ({} bytes, HTTP {status})",
+            body.len()
+        ));
+    }
+    Ok(body)
+}
+
+/// `GET /health` from the live bridge as JSON (`headless`, `render`,
+/// `screenshot` flags). `None` = unreachable or not a JSON reply.
+pub async fn bridge_health(addr: &str) -> Option<serde_json::Value> {
+    let request = format!("GET /health HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    let (head, body) =
+        http_roundtrip_bytes(addr, request, std::time::Duration::from_millis(2000)).await?;
+    if http_status_code(&head)? != 200 {
+        return None;
+    }
+    serde_json::from_slice(&body).ok()
 }
 
 /// Fetch the live editor Snapshot from a running game. `None` = unreachable.
@@ -731,7 +895,10 @@ pub async fn bridge_command(addr: &str, command: &serde_json::Value) -> Option<S
     http_roundtrip(addr, request).await
 }
 
-pub async fn bridge_command_json(addr: &str, command: &serde_json::Value) -> Result<String, String> {
+pub async fn bridge_command_json(
+    addr: &str,
+    command: &serde_json::Value,
+) -> Result<String, String> {
     let body = bridge_command(addr, command)
         .await
         .ok_or_else(|| format!("live bridge at {addr} is unreachable"))?;
@@ -752,18 +919,17 @@ pub async fn bridge_command_json(addr: &str, command: &serde_json::Value) -> Res
     }
 }
 
-/// Load preferring the live bridge; falls back to the file.
+/// Load preferring the live bridge; falls back to SurrealDB (the single
+/// shared world). There are no levels and no files anymore.
 pub async fn load_effective(
     store: &Store,
-    level: Option<&str>,
     source: Source,
-) -> Result<(PathBuf, Snapshot, bool), String> {
-    if source != Source::File {
+) -> Result<(Snapshot, bool), String> {
+    if source != Source::Db {
         if let Some(addr) = store.bridge_addr() {
-            if level.is_none() {
-                if let Some(snapshot) = bridge_state(addr).await {
-                    return Ok((store.path_for(None)?, snapshot, true));
-                }
+            if let Some(snapshot) = bridge_state(addr).await {
+                store.remember_rids_fresh(&snapshot);
+                return Ok((snapshot, true));
             }
             if source == Source::Live {
                 return Err(format!("live bridge at {addr} is unreachable"));
@@ -772,36 +938,37 @@ pub async fn load_effective(
             return Err("live bridge is disabled (PARTY_DUNGEON_BRIDGE is empty)".to_owned());
         }
     }
-    store.load_snapshot(level).map(|(path, snapshot)| (path, snapshot, false))
+    store.db_snapshot().await.map(|snapshot| (snapshot, false))
 }
 
-/// Persist to the file and, when live, forward the whole snapshot so the
-/// running game adopts it instantly.
+/// Persist to SurrealDB (full replace via import) and, when live, forward the
+/// edit command so the running game applies it instantly too.
 pub async fn save_effective(
     store: &Store,
-    path: &Path,
     snapshot: &Snapshot,
     live: bool,
     live_note: Option<serde_json::Value>,
 ) -> Result<String, String> {
-    store.save_snapshot(path, snapshot)?;
+    let mut note = store.save_world(snapshot, "mcp").await?;
+    // Forward a targeted edit command so a live-attached editor applies it
+    // instantly; everyone else follows via the sim's interest stream (it polls
+    // the DB for edits, then streams only the changed cells to each peer). No
+    // command means DB-only.
     if live {
-        if let Some(addr) = store.bridge_addr() {
-            let command = live_note.unwrap_or_else(|| serde_json::json!({"op":"reload"}));
-            match bridge_command_json(addr, &command).await {
-                Ok(note) => {
-                    return Ok(format!("saved {} and applied live ({note})", path.display()));
-                }
-                Err(error) => {
-                    return Ok(format!(
-                        "saved {} (live bridge not applied: {error})",
-                        path.display()
-                    ));
+        if let Some(command) = live_note {
+            if let Some(addr) = store.bridge_addr() {
+                match bridge_command_json(addr, &command).await {
+                    Ok(applied) => {
+                        note = format!("{note} and applied live ({applied})");
+                    }
+                    Err(error) => {
+                        note = format!("{note} (live bridge not applied: {error})");
+                    }
                 }
             }
         }
     }
-    Ok(format!("saved {}", path.display()))
+    Ok(note)
 }
 
 #[allow(dead_code)]
@@ -851,4 +1018,104 @@ pub fn validate_platform_path(piece_id: u32, platform: &SavedPlatform) -> Result
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal one-shot HTTP bridge: accepts one connection per response
+    /// and writes the given raw bytes back.
+    async fn fake_bridge(responses: Vec<Vec<u8>>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake bridge");
+        let addr = listener.local_addr().expect("fake bridge addr").to_string();
+        tokio::spawn(async move {
+            for response in responses {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = [0u8; 1024];
+                let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut request).await;
+                let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, &response).await;
+            }
+        });
+        addr
+    }
+
+    fn response(status: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
+        let mut bytes = format!(
+            "HTTP/1.0 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    #[test]
+    fn split_http_response_keeps_binary_body_intact() {
+        // The body deliberately contains CRLF pairs and the PNG signature, so
+        // a UTF-8 round trip would corrupt it.
+        let png = b"\x89PNG\r\n\x1a\n\x00\x01\x02\r\n\r\nrest-of-frame";
+        let mut raw = b"HTTP/1.0 200 OK\r\nContent-Type: image/png\r\n\r\n".to_vec();
+        raw.extend_from_slice(png);
+        let (head, body) = split_http_response(&raw).expect("splits");
+        assert!(head.contains("200 OK"), "unexpected head: {head}");
+        assert_eq!(body, png);
+    }
+
+    #[test]
+    fn status_line_and_png_detection() {
+        assert_eq!(
+            http_status_code("HTTP/1.0 200 OK\r\nContent-Length: 0"),
+            Some(200)
+        );
+        assert_eq!(
+            http_status_code("HTTP/1.0 503 Service Unavailable"),
+            Some(503)
+        );
+        assert_eq!(http_status_code("garbage"), None);
+        assert!(is_png(b"\x89PNG\r\n\x1a\nrest"));
+        assert!(!is_png(br#"{"ok":false}"#));
+    }
+
+    #[tokio::test]
+    async fn screenshot_fetches_png_bytes() {
+        let png = b"\x89PNG\r\n\x1a\n-idat".to_vec();
+        let addr = fake_bridge(vec![response("200 OK", "image/png", &png)]).await;
+        let got = bridge_screenshot(&addr).await.expect("png");
+        assert_eq!(got, png);
+    }
+
+    #[tokio::test]
+    async fn screenshot_surfaces_bridge_json_error() {
+        let body = br#"{"ok":false,"error":"screenshots need the game in headless mode (--headless)"}"#;
+        let addr = fake_bridge(vec![response(
+            "503 Service Unavailable",
+            "application/json",
+            body,
+        )])
+        .await;
+        let error = bridge_screenshot(&addr).await.expect_err("503 is an error");
+        assert!(error.contains("503"), "unexpected error: {error}");
+        assert!(error.contains("--headless"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn health_reads_headless_flags() {
+        let body =
+            br#"{"ok":true,"game":"party-dungeon","headless":true,"render":null,"screenshot":true}"#;
+        let addr = fake_bridge(vec![response("200 OK", "application/json", body)]).await;
+        let health = bridge_health(&addr).await.expect("health json");
+        assert_eq!(
+            health.get("headless").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            health.get("screenshot").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
 }

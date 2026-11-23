@@ -7,6 +7,14 @@
         command: /home/kon/dev/bevy/game/target/release/party-dungeon-mcp
         cwd: /home/kon/dev/bevy/game
         env:
-          PARTY_DUNGEON_LEVELS_DIR: /home/kon/dev/bevy/game/levels
-          PARTY_DUNGEON_BRIDGE: 127.0.0.1:3559
+          # Single shared world: no level files. The MCP server talks to
+          # SurrealDB directly (DUNGEON_SURREAL_* + DUNGEON_SERVICE_USER/PASS)
+          # and to the live game via the bridge. Fill service creds from
+          # game/crates/server/.env (never commit them):
+          #   DUNGEON_SERVICE_USER: service
+          #   DUNGEON_SERVICE_PASS: <see .env>
+          DUNGEON_SURREAL_URL: 127.0.0.1:6000
+          DUNGEON_SURREAL_NS: party_dungeon
+          DUNGEON_SURREAL_DB: main
+          PARTY_DUNGEON_BRIDGE: 127.0.0.1:6559
         failOnStartupError: true

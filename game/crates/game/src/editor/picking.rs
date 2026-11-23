@@ -14,6 +14,91 @@ pub(super) fn pick_unlocked(pieces: &[Piece], ray: Ray3d, locked: &BTreeSet<u32>
     pick_where(pieces, ray, |piece| !locked.contains(&piece.id))
 }
 
+/// Like [`pick_unlocked`], but also tests curved `glade_wall` and `glade_path`
+/// spines stored in `movers` so clicking anywhere along a curve selects it.
+pub(super) fn pick_unlocked_with_movers(
+    pieces: &[Piece],
+    movers: &Movers,
+    ray: Ray3d,
+    locked: &BTreeSet<u32>,
+) -> Option<u32> {
+    let mut best: Option<(f32, u32)> = None;
+    for piece in pieces {
+        if locked.contains(&piece.id) {
+            continue;
+        }
+        let shape = &shapes()[piece.shape];
+        let distance = if matches!(shape.id, "glade_wall" | "glade_stairs")
+            && let Some(spine) = movers::glade_wall_spine(piece, movers)
+            && spine.len() >= 2
+        {
+            let ext = crate::glade::piece_extents(piece, shape);
+            ray_spine_distance(&spine, piece.elevation, ext.y, ext.z * 0.5, ray)
+        } else if shape.id == "glade_path"
+            && let Some(spine) = movers::glade_path_spine(piece, movers)
+            && spine.len() >= 2
+        {
+            ray_spine_distance(&spine, piece.elevation, 0.35, 0.55, ray)
+        } else {
+            ray_piece_distance(piece, shape, ray)
+        };
+        if let Some(distance) = distance
+            && best.is_none_or(|(best_distance, _)| distance < best_distance)
+        {
+            best = Some((distance, piece.id));
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
+fn ray_spine_distance(
+    spine: &[Vec2],
+    elevation: f32,
+    height: f32,
+    half_width: f32,
+    ray: Ray3d,
+) -> Option<f32> {
+    let pad = HIT_PAD;
+    let mut best: Option<f32> = None;
+    for pair in spine.windows(2) {
+        let a = pair[0];
+        let b = pair[1];
+        let seg = b - a;
+        let len = seg.length();
+        if len < 0.01 {
+            continue;
+        }
+        let dir2 = seg / len;
+        let mid = (a + b) * 0.5;
+        let root = Vec3::new(mid.x, elevation, mid.y);
+        let rot = Quat::from_rotation_y((-dir2.y).atan2(dir2.x));
+        let inverse = rot.inverse();
+        let origin = inverse * (ray.origin - root);
+        let dir = inverse * *ray.direction;
+        let hw = len * 0.5;
+        let (mut near, mut far) = (f32::NEG_INFINITY, f32::INFINITY);
+        if slab(origin.x, dir.x, -hw - pad, hw + pad, &mut near, &mut far).is_some()
+            && slab(
+                origin.z,
+                dir.z,
+                -half_width - pad,
+                half_width + pad,
+                &mut near,
+                &mut far,
+            )
+            .is_some()
+            && slab(origin.y, dir.y, -pad, height + pad, &mut near, &mut far).is_some()
+            && far >= 0.0
+        {
+            let d = near.max(0.0);
+            if best.is_none_or(|b| d < b) {
+                best = Some(d);
+            }
+        }
+    }
+    best
+}
+
 fn pick_where(pieces: &[Piece], ray: Ray3d, allow: impl Fn(&Piece) -> bool) -> Option<u32> {
     let mut best: Option<(f32, u32)> = None;
     for piece in pieces {

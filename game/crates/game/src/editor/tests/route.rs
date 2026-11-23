@@ -415,7 +415,11 @@ fn play_routes_do_not_create_glade_paths_only_glade_path_tool_does() {
     let mut editor = Editor::default();
     editor.mode = Mode::Play;
     let track = path::Track::new(vec![Vec2::ZERO, Vec2::new(4.0, 0.0)]);
-    let line: Vec<Vec3> = track.points().iter().map(|p| Vec3::new(p.x, 0.07, p.y)).collect();
+    let line: Vec<Vec3> = track
+        .points()
+        .iter()
+        .map(|p| Vec3::new(p.x, 0.07, p.y))
+        .collect();
     editor.route = Some(Route {
         track,
         trail: Vec::new(),
@@ -557,4 +561,294 @@ fn glade_path_exposes_and_drags_bezier_tangent_handles_in_curve_editor() {
         "dragging the curve handle bends the glade_path geometry spine: {:?}",
         paths[0]
     );
+}
+
+#[test]
+fn glade_wall_exposes_direct_curve_and_midpoint_insert_controls_without_motion_tool() {
+    let mut app = physics_app();
+    let wall_shape = model::shape_index("glade_wall").expect("glade_wall");
+    let wall_piece = {
+        let world = app.world_mut();
+        let mut editor = world.resource_mut::<Editor>();
+        editor.mode = Mode::Building;
+        editor.actor_tool = None;
+        editor.tool = None;
+        let mut piece = test_piece(10);
+        piece.shape = wall_shape;
+        piece.trigger_size = Vec3::new(6.0, 2.2, 0.36);
+        editor.pieces.push(piece);
+        editor.selection.set(10);
+        piece
+    };
+    {
+        let mut movers = app.world_mut().resource_mut::<Movers>();
+        ensure_glade_wall_mover(&wall_piece, &mut movers);
+    }
+    viewport_camera(&mut app);
+
+    let (outgoing, midpoint) = {
+        let movers = app.world().resource::<Movers>();
+        let mover = movers.map.get(&10).expect("wall mover");
+        assert_eq!(mover.waypoints.len(), 2);
+        let controls = mover.controls();
+        let mids = mover.midpoints();
+        assert_eq!(mids.len(), 1);
+        (controls[0].outgoing.expect("outgoing tangent"), mids[0])
+    };
+
+    let tan_screen = viewport_of(&mut app, Vec3::new(outgoing.x, 2.26, outgoing.y));
+    let mid_screen = viewport_of(&mut app, Vec3::new(midpoint.x, 2.26, midpoint.y));
+
+    let world = app.world_mut();
+    let mut camera_q = world.query::<(&Camera, &Transform)>();
+    let (camera, cam_transform) = camera_q.single(world).expect("camera");
+    let cam_global = GlobalTransform::from(*cam_transform);
+
+    assert_eq!(
+        mover_handle_at(
+            world.resource::<Editor>(),
+            world.resource::<Movers>(),
+            camera,
+            &cam_global,
+            tan_screen,
+            10.0,
+        ),
+        Some(PathHandle::Tangent {
+            waypoint: 0,
+            side: TangentSide::Outgoing,
+        }),
+        "glade_wall tangent handles are directly grabbable without ActorTool::Platform"
+    );
+
+    assert_eq!(
+        mover_handle_at(
+            world.resource::<Editor>(),
+            world.resource::<Movers>(),
+            camera,
+            &cam_global,
+            mid_screen,
+            10.0,
+        ),
+        Some(PathHandle::Insert { segment: 0 }),
+        "glade_wall segment midpoint exposes an insert/split handle"
+    );
+    drop(world);
+
+    // Clicking the midpoint handle inserts a 3rd control point and selects it.
+    let inserted = {
+        let world = app.world_mut();
+        world.resource_scope(|world, mut editor: Mut<Editor>| {
+            world.resource_scope(|world, mut movers: Mut<Movers>| {
+                let mut camera_q = world.query::<(&Camera, &Transform)>();
+                let (camera, cam_transform) = camera_q.single(world).expect("camera");
+                select_mover_handle(
+                    &mut editor,
+                    &mut movers,
+                    camera,
+                    &GlobalTransform::from(*cam_transform),
+                    mid_screen,
+                    false,
+                )
+            })
+        })
+    };
+    assert!(inserted);
+    assert_eq!(
+        app.world().resource::<Movers>().map[&10].waypoints.len(),
+        3,
+        "midpoint click splits the wall segment into 3 control points"
+    );
+    assert_eq!(app.world().resource::<Movers>().map[&10].selected, Some(1));
+
+    // Dragging the newly inserted middle point bends the wall spine.
+    let bent_screen = viewport_of(&mut app, Vec3::new(0.0, 0.06, 2.5));
+    let moved = {
+        let world = app.world_mut();
+        world.resource_scope(|world, mut editor: Mut<Editor>| {
+            world.resource_scope(|world, mut movers: Mut<Movers>| {
+                let mut camera_q = world.query::<(&Camera, &Transform)>();
+                let (camera, cam_transform) = camera_q.single(world).expect("camera");
+                apply_mover_drag(
+                    &mut editor,
+                    &mut movers,
+                    PathDrag {
+                        pointer: PointerId::Mouse,
+                        handle: PathHandle::Waypoint(1),
+                    },
+                    bent_screen,
+                    camera,
+                    &GlobalTransform::from(*cam_transform),
+                )
+            })
+        })
+    };
+    assert!(moved);
+
+    let spine = glade_wall_spine(
+        &app.world().resource::<Editor>().pieces[0],
+        app.world().resource::<Movers>(),
+    )
+    .expect("wall spine");
+    assert!(
+        spine.iter().any(|p| p.y > 1.0),
+        "dragging the inserted control point curves the wall spine: {:?}",
+        spine
+    );
+
+    // Deleting the selected middle point returns to 2 points; a 2-point wall refuses point deletion so Delete removes the piece.
+    {
+        let world = app.world_mut();
+        world.resource_scope(|world, mut editor: Mut<Editor>| {
+            world.resource_scope(|world, mut movers: Mut<Movers>| {
+                assert!(delete_selected_mover_waypoint(&mut editor, &mut movers));
+                assert_eq!(movers.map[&10].waypoints.len(), 2);
+                movers.map.get_mut(&10).unwrap().selected = Some(0);
+                assert!(!delete_selected_mover_waypoint(&mut editor, &mut movers));
+            });
+        });
+    }
+}
+
+#[test]
+fn pick_unlocked_with_movers_hits_curved_wall_away_from_origin() {
+    let wall_shape = model::shape_index("glade_wall").expect("glade_wall");
+    let mut piece = test_piece(21);
+    piece.shape = wall_shape;
+    piece.pos = Vec2::ZERO;
+    let mut movers = Movers::default();
+    let mover = movers.mover_mut(21, Vec2::new(-5.0, 0.0));
+    mover
+        .waypoints
+        .push(crate::platforms::PlatformWaypoint::new(Vec2::new(5.0, 4.0)));
+    mover.rebuild();
+
+    let ray = Ray3d::new(Vec3::new(4.5, 5.0, 3.6), Dir3::NEG_Y);
+    let locked = std::collections::BTreeSet::new();
+    assert_eq!(
+        pick_unlocked_with_movers(&[piece], &movers, ray, &locked),
+        Some(21)
+    );
+}
+
+#[test]
+fn glade_stairs_exposes_curve_controls_and_builds_curved_mesh() {
+    let mut app = physics_app();
+    let stairs_shape_idx = model::shape_index("glade_stairs").expect("glade_stairs");
+    let stairs_shape = &shapes()[stairs_shape_idx];
+    assert_eq!(
+        crate::glade::GladeKind::from_shape(stairs_shape),
+        Some(crate::glade::GladeKind::Stairs)
+    );
+
+    let stairs_piece = {
+        let world = app.world_mut();
+        let mut editor = world.resource_mut::<Editor>();
+        editor.mode = Mode::Building;
+        editor.actor_tool = None;
+        editor.tool = None;
+        let mut piece = test_piece(30);
+        piece.shape = stairs_shape_idx;
+        piece.trigger_size = Vec3::new(4.0, 2.0, 1.4);
+        editor.pieces.push(piece);
+        editor.selection.set(30);
+        piece
+    };
+    {
+        let mut movers = app.world_mut().resource_mut::<Movers>();
+        ensure_glade_wall_mover(&stairs_piece, &mut movers);
+    }
+    viewport_camera(&mut app);
+
+    let (outgoing, midpoint) = {
+        let movers = app.world().resource::<Movers>();
+        let mover = movers.map.get(&30).expect("stairs mover");
+        assert_eq!(mover.waypoints.len(), 2);
+        (
+            mover.controls()[0].outgoing.expect("outgoing tangent"),
+            mover.midpoints()[0],
+        )
+    };
+
+    // Waypoint 0 is at elevation (0.12), outgoing tangent at 0.33 rise (0.78), midpoint at half rise (1.12).
+    let tan_screen = viewport_of(
+        &mut app,
+        Vec3::new(outgoing.x, 2.0 * 0.33 + 0.12, outgoing.y),
+    );
+    let mid_screen = viewport_of(
+        &mut app,
+        Vec3::new(midpoint.x, 2.0 * 0.5 + 0.12, midpoint.y),
+    );
+
+    let world = app.world_mut();
+    let mut camera_q = world.query::<(&Camera, &Transform)>();
+    let (camera, cam_transform) = camera_q.single(world).expect("camera");
+    let cam_global = GlobalTransform::from(*cam_transform);
+
+    assert_eq!(
+        mover_handle_at(
+            world.resource::<Editor>(),
+            world.resource::<Movers>(),
+            camera,
+            &cam_global,
+            tan_screen,
+            10.0,
+        ),
+        Some(PathHandle::Tangent {
+            waypoint: 0,
+            side: TangentSide::Outgoing,
+        })
+    );
+    assert_eq!(
+        mover_handle_at(
+            world.resource::<Editor>(),
+            world.resource::<Movers>(),
+            camera,
+            &cam_global,
+            mid_screen,
+            10.0,
+        ),
+        Some(PathHandle::Insert { segment: 0 })
+    );
+    drop(world);
+
+    // Bend the staircase and verify procedural mesh generation produces vertices.
+    let bent_screen = viewport_of(&mut app, Vec3::new(0.0, 0.06, 2.5));
+    let moved = {
+        let world = app.world_mut();
+        world.resource_scope(|world, mut editor: Mut<Editor>| {
+            world.resource_scope(|world, mut movers: Mut<Movers>| {
+                let mut camera_q = world.query::<(&Camera, &Transform)>();
+                let (camera, cam_transform) = camera_q.single(world).expect("camera");
+                apply_mover_drag(
+                    &mut editor,
+                    &mut movers,
+                    PathDrag {
+                        pointer: PointerId::Mouse,
+                        handle: PathHandle::Tangent {
+                            waypoint: 0,
+                            side: TangentSide::Outgoing,
+                        },
+                    },
+                    bent_screen,
+                    camera,
+                    &GlobalTransform::from(*cam_transform),
+                )
+            })
+        })
+    };
+    assert!(moved);
+
+    let spine = glade_wall_spine(
+        &app.world().resource::<Editor>().pieces[0],
+        app.world().resource::<Movers>(),
+    )
+    .expect("stairs spine");
+    let parts = crate::glade::build_glade_meshes_with_spine(
+        &app.world().resource::<Editor>().pieces[0],
+        stairs_shape,
+        &app.world().resource::<Editor>().pieces,
+        &[],
+        Some(&spine),
+    );
+    assert!(parts.stone.count_vertices() > 24);
 }

@@ -1,0 +1,55 @@
+# Rauthy config for local Party Dungeon dev.
+# Copy to `crates/server/rauthy.cfg` and edit `PUB_URL` / `ENC_KEYS` for any shared env.
+# The compose file mounts this as `/app/rauthy.cfg:ro` and then lets `PUB_URL`/`ENC_KEYS`
+# from `.env` win via env overrides (see docker-compose.yml).
+
+# Public URL clients use to reach Rauthy (browser + OIDC discovery). Must match
+# DUNGEON_RAUTHY_ISSUER (which defaults to `${PUB_URL}/auth/v1` in the sim).
+# For docker-compose, keep this as localhost:6080 so the browser can reach it;
+# SurrealDB reaches Rauthy at http://rauthy:6080 via the internal JWKS URL.
+server.pub_url = "http://localhost:6080"
+
+# Where Rauthy listens inside the container.
+server.listen_address = "0.0.0.0:6080"
+
+# Hiqlite (embedded) — no Postgres needed for up to millions of users.
+# Data lives in the `rauthy-data` volume at /data.
+[hiqlite]
+data_dir = "/data"
+
+# First admin — created on first boot, then ignored.
+[bootstrap]
+admin_email = "admin@party.dungeon"
+# Set a dev password here or via BOOTSTRAP_ADMIN_PASSWORD_PLAIN env.
+# admin_password_plain = "admin123"
+
+# Encryption at rest — generate a fresh one per env:
+#   openssl rand -base64 32
+[encryption]
+# enc_keys = ["a9s8f7g6h5j4k3l2m1n0p9o8i7u6y5t4r3e2w1q0a=="]
+# The compose file injects this via ENC_KEYS env, so you can leave it commented.
+
+# OIDC client for the game — created on first boot if you POST it via the
+# admin API, or create it in the Rauthy admin UI at http://localhost:6080.
+# Example (run after `docker compose up -d`):
+#
+#   curl -k -u 'admin@party.dungeon:admin123' \
+#     -H 'content-type: application/json' \
+#     -d '{
+#       "id": "party-dungeon",
+#       "name": "Party Dungeon (local)",
+#       "enabled": true,
+#       "confidential": false,
+#       "redirect_uris": ["http://localhost:6082/callback", "http://localhost:6420/callback"],
+#       "post_logout_redirect_uris": ["http://localhost:6082/"],
+#       "allowed_origins": ["http://localhost:6082", "http://localhost:6420"],
+#       "scopes": ["openid", "profile", "email", "offline_access"],
+#       "default_scopes": ["openid"],
+#       "access_token_lifetime": 3600,
+#       "id_token_lifetime": 3600,
+#       "challenges": ["S256"],
+#       "force_mfa": false
+#     }' \
+#     http://localhost:6080/auth/v1/clients
+#
+# Or use the Rauthy admin UI: Clients → New Client → same values.

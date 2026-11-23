@@ -84,6 +84,16 @@ pub const DEFAULT_ROOF_COLOR: u32 = 0xc45b43;
 pub const GLADE_DEFAULT_ROOF_COLOR: u32 = DEFAULT_ROOF_COLOR;
 /// Default lush meadow grass colour for `glade_terrain` (`0xRRGGBB`).
 pub const DEFAULT_TERRAIN_COLOR: u32 = 0x5ca046;
+/// Default lush forest foliage colour for `glade_tree` (`0xRRGGBB`).
+pub const DEFAULT_TREE_COLOR: u32 = 0x528f3d;
+/// Minimum canopy spread (width/length) for a `glade_tree`, in metres.
+pub const TREE_MIN_SPAN: f32 = 1.2;
+/// Maximum canopy spread (width/length) for a `glade_tree`, in metres.
+pub const TREE_MAX_SPAN: f32 = 14.0;
+/// Minimum total height for a `glade_tree`, in metres.
+pub const TREE_MIN_HEIGHT: f32 = 1.8;
+/// Maximum total height for a `glade_tree`, in metres.
+pub const TREE_MAX_HEIGHT: f32 = 18.0;
 /// Default normalized roof pitch (`0.5` -> `1.0` slope factor).
 pub const GLADE_DEFAULT_ROOF_PITCH: f32 = 0.5;
 
@@ -93,10 +103,12 @@ pub enum GladeKind {
     Tower,
     Room,
     Wall,
+    Stairs,
     Door,
     Window,
     Terrain,
     Path,
+    Tree,
 }
 
 impl GladeKind {
@@ -151,6 +163,28 @@ impl GladeTerrainStyle {
     }
 }
 
+/// Parametric species style for a `glade_tree`, controlled by
+/// `piece.trigger_shape_override`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GladeTreeStyle {
+    /// Gnarled branching oak/meadow tree with billowing leaf-cloud canopy (`TriggerShape::Box`).
+    Broadleaf,
+    /// Tall evergreen conifer with stacked, scalloped needle bough whorls (`TriggerShape::Cylinder`).
+    Pine,
+    /// Slender pale-barked birch with dark lenticel bands & airy upper crown (`TriggerShape::Sphere`).
+    Birch,
+}
+
+impl GladeTreeStyle {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Broadleaf => "Broadleaf",
+            Self::Pine => "Pine",
+            Self::Birch => "Birch",
+        }
+    }
+}
+
 /// Contextual height tier for a wall or building facade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WallTier {
@@ -168,10 +202,12 @@ pub fn glade_kind(shape: &Shape) -> Option<GladeKind> {
         "glade_tower" => Some(GladeKind::Tower),
         "glade_room" => Some(GladeKind::Room),
         "glade_wall" => Some(GladeKind::Wall),
+        "glade_stairs" => Some(GladeKind::Stairs),
         "glade_door" => Some(GladeKind::Door),
         "glade_window" => Some(GladeKind::Window),
         "glade_terrain" => Some(GladeKind::Terrain),
         "glade_path" => Some(GladeKind::Path),
+        "glade_tree" => Some(GladeKind::Tree),
         _ => None,
     }
 }
@@ -204,10 +240,12 @@ pub fn default_size(shape: &Shape) -> Vec3 {
         Some(GladeKind::Tower) => Vec3::new(2.4, 3.2, 2.4),
         Some(GladeKind::Room) => Vec3::new(3.2, 2.6, 2.4),
         Some(GladeKind::Wall) => Vec3::new(2.8, 2.2, 0.36),
+        Some(GladeKind::Stairs) => Vec3::new(3.2, 1.8, 1.4),
         Some(GladeKind::Door) => Vec3::new(1.15, 2.1, 0.42),
         Some(GladeKind::Window) => Vec3::new(0.72, 0.92, 0.42),
         Some(GladeKind::Terrain) => Vec3::new(11.0, 2.5, 11.0),
         Some(GladeKind::Path) => Vec3::new(1.08, 0.2, 1.08),
+        Some(GladeKind::Tree) => Vec3::new(3.6, 5.5, 3.6),
         None => model::TRIGGER_DEFAULT_SIZE,
     }
 }
@@ -249,25 +287,29 @@ pub fn piece_extents(piece: &Piece, shape: &Shape) -> Vec3 {
             y.clamp(GLADE_MIN_HEIGHT, GLADE_MAX_HEIGHT),
             z.clamp(GLADE_MIN_THICK, 2.4),
         ),
-        Some(GladeKind::Door) => Vec3::new(
-            x.clamp(0.6, 5.0),
-            y.clamp(0.85, 6.0),
-            z.clamp(0.18, 1.6),
+        Some(GladeKind::Stairs) => Vec3::new(
+            x.clamp(0.8, GLADE_MAX_SPAN),
+            y.clamp(0.3, GLADE_MAX_HEIGHT),
+            z.clamp(0.6, 4.0),
         ),
-        Some(GladeKind::Window) => Vec3::new(
-            x.clamp(0.40, 3.6),
-            y.clamp(0.45, 3.6),
-            z.clamp(0.18, 1.6),
-        ),
+        Some(GladeKind::Door) => {
+            Vec3::new(x.clamp(0.6, 5.0), y.clamp(0.85, 6.0), z.clamp(0.18, 1.6))
+        }
+        Some(GladeKind::Window) => {
+            Vec3::new(x.clamp(0.40, 3.6), y.clamp(0.45, 3.6), z.clamp(0.18, 1.6))
+        }
         Some(GladeKind::Terrain) => Vec3::new(
             x.clamp(TERRAIN_MIN_SPAN, TERRAIN_MAX_SPAN),
             y.clamp(TERRAIN_MIN_HEIGHT, TERRAIN_MAX_HEIGHT),
             z.clamp(TERRAIN_MIN_SPAN, TERRAIN_MAX_SPAN),
         ),
-        Some(GladeKind::Path) => Vec3::new(
-            x.clamp(0.4, 4.0),
-            y.clamp(0.05, 1.0),
-            z.clamp(0.4, 4.0),
+        Some(GladeKind::Path) => {
+            Vec3::new(x.clamp(0.4, 4.0), y.clamp(0.05, 1.0), z.clamp(0.4, 4.0))
+        }
+        Some(GladeKind::Tree) => Vec3::new(
+            x.clamp(TREE_MIN_SPAN, TREE_MAX_SPAN),
+            y.clamp(TREE_MIN_HEIGHT, TREE_MAX_HEIGHT),
+            z.clamp(TREE_MIN_SPAN, TREE_MAX_SPAN),
         ),
         None => model::sanitize_trigger_size(raw),
     }
@@ -279,6 +321,15 @@ pub fn terrain_style(piece: &Piece) -> GladeTerrainStyle {
         TriggerShape::Box => GladeTerrainStyle::Plateau,
         TriggerShape::Sphere => GladeTerrainStyle::Mound,
         TriggerShape::Cylinder => GladeTerrainStyle::CliffMesa,
+    }
+}
+
+/// Effective [`GladeTreeStyle`] for a `glade_tree` piece.
+pub fn tree_style(piece: &Piece) -> GladeTreeStyle {
+    match piece.trigger_shape_override {
+        TriggerShape::Box => GladeTreeStyle::Broadleaf,
+        TriggerShape::Cylinder => GladeTreeStyle::Pine,
+        TriggerShape::Sphere => GladeTreeStyle::Birch,
     }
 }
 
@@ -320,7 +371,14 @@ pub fn is_tent_house(piece: &Piece, shape: &Shape) -> bool {
 pub fn roof_pitch(piece: &Piece, shape: &Shape) -> f32 {
     if matches!(
         glade_kind(shape),
-        Some(GladeKind::Wall | GladeKind::Door | GladeKind::Window | GladeKind::Terrain)
+        Some(
+            GladeKind::Wall
+                | GladeKind::Stairs
+                | GladeKind::Door
+                | GladeKind::Window
+                | GladeKind::Terrain
+                | GladeKind::Tree
+        )
     ) {
         return 0.0;
     }
@@ -339,10 +397,12 @@ pub fn roof_style(piece: &Piece, shape: &Shape) -> GladeRoofStyle {
     if matches!(
         kind,
         GladeKind::Wall
+            | GladeKind::Stairs
             | GladeKind::Door
             | GladeKind::Window
             | GladeKind::Terrain
             | GladeKind::Path
+            | GladeKind::Tree
     ) {
         return GladeRoofStyle::Battlements;
     }
@@ -359,10 +419,12 @@ pub fn roof_style(piece: &Piece, shape: &Shape) -> GladeRoofStyle {
         (GladeKind::Room, TriggerShape::Cylinder) => GladeRoofStyle::Battlements,
         (
             GladeKind::Wall
+            | GladeKind::Stairs
             | GladeKind::Door
             | GladeKind::Window
             | GladeKind::Terrain
-            | GladeKind::Path,
+            | GladeKind::Path
+            | GladeKind::Tree,
             _,
         ) => GladeRoofStyle::Battlements,
     }
@@ -374,10 +436,12 @@ pub fn roof_rise(piece: &Piece, shape: &Shape) -> f32 {
         glade_kind(shape),
         Some(
             GladeKind::Wall
+                | GladeKind::Stairs
                 | GladeKind::Door
                 | GladeKind::Window
                 | GladeKind::Terrain
                 | GladeKind::Path
+                | GladeKind::Tree
         )
     ) {
         return 0.0;
@@ -415,18 +479,19 @@ pub fn roof_overhang(piece: &Piece, shape: &Shape) -> f32 {
     }
 }
 
-/// Roof shingle colour for a Glade building, or lush meadow grass colour for
-/// a `glade_terrain` chunk.
+/// Roof shingle colour for a Glade building, lush meadow grass colour for
+/// a `glade_terrain` chunk, or foliage tint for a `glade_tree`.
 pub fn roof_color(piece: &Piece) -> Color {
-    let is_terrain = shapes()
-        .get(piece.shape)
-        .and_then(glade_kind)
-        .is_some_and(|k| k == GladeKind::Terrain);
+    let kind = shapes().get(piece.shape).and_then(glade_kind);
+    let is_terrain = kind == Some(GladeKind::Terrain);
+    let is_tree = kind == Some(GladeKind::Tree);
     let hex = if piece.trigger_color == model::TRIGGER_DEFAULT_COLOR
-        || (is_terrain && piece.trigger_color == DEFAULT_ROOF_COLOR)
+        || ((is_terrain || is_tree) && piece.trigger_color == DEFAULT_ROOF_COLOR)
     {
         if is_terrain {
             DEFAULT_TERRAIN_COLOR
+        } else if is_tree {
+            DEFAULT_TREE_COLOR
         } else {
             DEFAULT_ROOF_COLOR
         }
@@ -446,7 +511,7 @@ pub fn details_enabled(piece: &Piece) -> bool {
 pub fn local_footprint(piece: &Piece, shape: &Shape) -> Vec<Vec2> {
     let ext = piece_extents(piece, shape);
     match glade_kind(shape) {
-        Some(GladeKind::Tower) => {
+        Some(GladeKind::Tower | GladeKind::Tree) => {
             let rx = ext.x * 0.5;
             let rz = ext.z * 0.5;
             let segments = 24;
@@ -469,7 +534,13 @@ pub fn local_footprint(piece: &Piece, shape: &Shape) -> Vec<Vec2> {
                 })
                 .collect()
         }
-        Some(GladeKind::Room | GladeKind::Wall | GladeKind::Door | GladeKind::Window) => {
+        Some(
+            GladeKind::Room
+            | GladeKind::Wall
+            | GladeKind::Stairs
+            | GladeKind::Door
+            | GladeKind::Window,
+        ) => {
             let hw = ext.x * 0.5;
             let hd = ext.z * 0.5;
             vec![
@@ -490,10 +561,7 @@ pub fn world_footprint(piece: &Piece, shape: &Shape) -> Vec<Vec2> {
     let (sin, cos) = piece.rot.sin_cos();
     local
         .into_iter()
-        .map(|p| {
-            piece.pos
-                + Vec2::new(p.x * cos - p.y * sin, p.x * sin + p.y * cos)
-        })
+        .map(|p| piece.pos + Vec2::new(p.x * cos - p.y * sin, p.x * sin + p.y * cos))
         .collect()
 }
 
@@ -642,61 +710,22 @@ pub fn terrain_height_at(world_pt: Vec2, all_pieces: &[Piece]) -> f32 {
 
 /// Built-in large-scale meadow & hillside relief for the continuous `280m x 280m`
 /// world terrain:
-/// - Keeps the central spawn/course clearing (`r <= FLAT_CLEARING_RADIUS`)
-///   flat at `y = 0.0` so flat-ground courses and tests start level,
-/// - Raises a picturesque Tiny Glade plateau hill & craggy limestone cliff
-///   escarpment in the `(-X, -Z)` view (`center = (-7.6, -6.8)`) right in front
-///   of the default orbit camera,
+/// - Keeps the entire central spawn/course clearing (`r <= FLAT_CLEARING_RADIUS`)
+///   flat at `y = 0.0` so new levels, flat-ground courses, and tests start level,
 /// - Surrounds the outer glade (`r > FLAT_CLEARING_RADIUS`) with gentle rolling hills and
 ///   rocky ridges out to `WORLD_TERRAIN_HALF_EXTENT`.
 pub fn base_meadow_height_at(world_pt: Vec2) -> f32 {
-    let mut h = 0.0_f32;
-
-    // 1. Scenic Tiny Glade hillside plateau & craggy cliff escarpment in (-X, -Z)
-    let hill_center = Vec2::new(-7.6, -6.8);
-    let rel = world_pt - hill_center;
-    // Rotate slightly (22 deg) so the cliff faces the camera diagonally like ref.jpg
-    let (s, c) = 0.38_f32.sin_cos();
-    let lx = rel.x * c - rel.y * s;
-    let lz = rel.x * s + rel.y * c;
-    let rx = 5.8_f32;
-    let rz = 4.8_f32;
-    let ux = (lx / rx).abs();
-    let uz = (lz / rz).abs();
-    let d_hill = (ux.powf(3.2) + uz.powf(3.2)).powf(1.0 / 3.2);
-    if d_hill < 1.0 {
-        let plateau_r = 0.62;
-        let profile = if d_hill <= plateau_r {
-            1.0
-        } else {
-            let t = ((d_hill - plateau_r) / (1.0 - plateau_r)).clamp(0.0, 1.0);
-            let smooth = 1.0 - t * t * (3.0 - 2.0 * t);
-            smooth.powf(0.82)
-        };
-        h = smooth_max_height(h, 2.35 * profile, 0.35);
-    }
-
-    // Secondary lower rocky spur extending toward (-2.8, -5.2) (like the foreground rock seam in ref.jpg)
-    let spur_center = Vec2::new(-3.6, -6.2);
-    let d_spur = ((world_pt.x - spur_center.x) / 3.4).hypot((world_pt.y - spur_center.y) / 2.4);
-    if d_spur < 1.0 {
-        let t = d_spur.clamp(0.0, 1.0);
-        let smooth = 1.0 - t * t * (3.0 - 2.0 * t);
-        h = smooth_max_height(h, 0.95 * smooth, 0.30);
-    }
-
-    // 2. Outer rolling countryside hills framing the glade (`r > FLAT_CLEARING_RADIUS`)
     let r = world_pt.length();
-    if r > FLAT_CLEARING_RADIUS {
-        let rim_t = ((r - FLAT_CLEARING_RADIUS) / 28.0).clamp(0.0, 1.0);
-        let smooth_rim = rim_t * rim_t * (3.0 - 2.0 * rim_t);
-        let wave = (world_pt.x * 0.14).sin() * (world_pt.y * 0.13).cos() * 0.5 + 0.5;
-        let ridge = ((world_pt.x * 0.09 - world_pt.y * 0.11).sin()).abs();
-        let outer_h = smooth_rim * (1.1 + 2.4 * wave + 1.2 * ridge);
-        h = smooth_max_height(h, outer_h, 0.45);
+    if r <= FLAT_CLEARING_RADIUS {
+        return 0.0;
     }
 
-    h
+    // Outer rolling countryside hills framing the glade (`r > FLAT_CLEARING_RADIUS`)
+    let rim_t = ((r - FLAT_CLEARING_RADIUS) / 28.0).clamp(0.0, 1.0);
+    let smooth_rim = rim_t * rim_t * (3.0 - 2.0 * rim_t);
+    let wave = (world_pt.x * 0.14).sin() * (world_pt.y * 0.13).cos() * 0.5 + 0.5;
+    let ridge = ((world_pt.x * 0.09 - world_pt.y * 0.11).sin()).abs();
+    smooth_rim * (1.1 + 2.4 * wave + 1.2 * ridge)
 }
 
 /// Unified world-space terrain elevation at `world_pt`, combining the
@@ -1389,7 +1418,12 @@ pub fn snap_door_to_glade_wall_with_elevation(
             compute_exposed_wall_segments(other, other_shape, others)
                 .into_iter()
                 .filter(|s| is_window || s.base_y <= 0.25)
-                .map(|s| (local_to_world_2d(other, s.p0), local_to_world_2d(other, s.p1)))
+                .map(|s| {
+                    (
+                        local_to_world_2d(other, s.p0),
+                        local_to_world_2d(other, s.p1),
+                    )
+                })
                 .collect()
         } else if let model::Geometry::Bar { len, .. } = other_shape.geom {
             let hl = len * 0.5;
@@ -1474,10 +1508,7 @@ pub fn pin_doors_on_glade_resize(old_piece: &Piece, new_piece: &Piece, pieces: &
     let Some(kind) = glade_kind(shape) else {
         return;
     };
-    if !matches!(
-        kind,
-        GladeKind::Room | GladeKind::Tower | GladeKind::Wall
-    ) {
+    if !matches!(kind, GladeKind::Room | GladeKind::Tower | GladeKind::Wall) {
         return;
     }
 
@@ -1494,7 +1525,10 @@ pub fn pin_doors_on_glade_resize(old_piece: &Piece, new_piece: &Piece, pieces: &
         let Some(other_shape) = shapes().get(other.shape) else {
             continue;
         };
-        if !matches!(other_shape.id, "glade_door" | "glade_window" | "door" | "gate") {
+        if !matches!(
+            other_shape.id,
+            "glade_door" | "glade_window" | "door" | "gate"
+        ) {
             continue;
         }
         if other_shape.id == "glade_window" {
@@ -1563,7 +1597,12 @@ pub fn pin_doors_on_glade_resize(old_piece: &Piece, new_piece: &Piece, pieces: &
                 let new_local = Vec2::new((ratio * new_hl).clamp(-new_hl, new_hl), 0.0);
                 other.pos = local_to_world_2d(new_piece, new_local);
             }
-            GladeKind::Door | GladeKind::Window | GladeKind::Terrain | GladeKind::Path => {}
+            GladeKind::Stairs
+            | GladeKind::Door
+            | GladeKind::Window
+            | GladeKind::Terrain
+            | GladeKind::Path
+            | GladeKind::Tree => {}
         }
     }
 }
@@ -1610,11 +1649,11 @@ pub fn is_attached_to_building(fixture: &Piece, building: &Piece) -> bool {
     if !is_building_shape(bld_shape) {
         return false;
     }
-    // Buildings, terrain, and paths are independent structural/landscape pieces.
+    // Buildings, terrain, paths, and trees are independent structural/landscape pieces.
     if is_building_shape(fix_shape)
         || matches!(
             glade_kind(fix_shape),
-            Some(GladeKind::Terrain | GladeKind::Path)
+            Some(GladeKind::Terrain | GladeKind::Path | GladeKind::Tree)
         )
     {
         return false;
@@ -1673,13 +1712,7 @@ pub fn find_host_building(fixture: &Piece, pieces: &[Piece]) -> Option<u32> {
 
 /// Intersect a 3D camera ray with a vertical wall quad `(w0 -> w1)` spanning `y0..=y1`.
 /// Returns `Some((ray_distance_2d, segment_t))` when the ray hits the wall face.
-fn ray_segment_wall_hit(
-    ray: Ray3d,
-    w0: Vec2,
-    w1: Vec2,
-    y0: f32,
-    y1: f32,
-) -> Option<(f32, f32)> {
+fn ray_segment_wall_hit(ray: Ray3d, w0: Vec2, w1: Vec2, y0: f32, y1: f32) -> Option<(f32, f32)> {
     let ro = Vec2::new(ray.origin.x, ray.origin.z);
     let rd = Vec2::new(ray.direction.x, ray.direction.z);
     let v = w1 - w0;
@@ -1826,10 +1859,9 @@ pub fn compute_arch_openings(
         let half_w = arch_width * 0.5;
         let margin = (half_w + 0.08).min(seg_len * 0.5);
         let c = (t * seg_len).clamp(margin, (seg_len - margin).max(margin));
-        if openings
-            .last()
-            .is_some_and(|prev| (c - prev.center_dist).abs() < (arch_width + prev.width) * 0.5 + 0.22)
-        {
+        if openings.last().is_some_and(|prev| {
+            (c - prev.center_dist).abs() < (arch_width + prev.width) * 0.5 + 0.22
+        }) {
             continue;
         }
         openings.push(ArchOpening {
@@ -1939,6 +1971,8 @@ struct MeshBuf {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
+    uvs_b: Vec<[f32; 2]>,
+    colors: Vec<[f32; 4]>,
     indices: Vec<u32>,
 }
 
@@ -1959,6 +1993,7 @@ impl MeshBuf {
         let ax = n.x.abs();
         let ay = n.y.abs();
         let az = n.z.abs();
+        let has_colors = !self.colors.is_empty();
         for v in verts {
             self.positions.push(v.to_array());
             self.normals.push(n.to_array());
@@ -1972,6 +2007,9 @@ impl MeshBuf {
                 [v.x * 0.5, v.y * 0.5]
             };
             self.uvs.push(uv);
+            if has_colors {
+                self.colors.push([1.0, 1.0, 1.0, 1.0]);
+            }
         }
         self.indices.extend([first, first + 1, first + 2]);
     }
@@ -1990,10 +2028,58 @@ impl MeshBuf {
             uvs.swap(1, 2);
         }
         let first = self.positions.len() as u32;
+        let has_colors = !self.colors.is_empty();
         for (v, uv) in verts.into_iter().zip(uvs) {
             self.positions.push(v.to_array());
             self.normals.push(n.to_array());
             self.uvs.push(uv);
+            if has_colors {
+                self.colors.push([1.0, 1.0, 1.0, 1.0]);
+            }
+        }
+        self.indices.extend([first, first + 1, first + 2]);
+    }
+
+    fn push_tri_smooth_colored(
+        &mut self,
+        mut verts: [Vec3; 3],
+        mut normals: [Vec3; 3],
+        mut colors: [[f32; 4]; 3],
+    ) {
+        let area2 = (verts[1] - verts[0]).cross(verts[2] - verts[0]);
+        if area2.length_squared() < 1e-12 {
+            return;
+        }
+        let avg_n = (normals[0] + normals[1] + normals[2]).normalize_or_zero();
+        if avg_n == Vec3::ZERO {
+            return;
+        }
+        if area2.dot(avg_n) < 0.0 {
+            verts.swap(1, 2);
+            normals.swap(1, 2);
+            colors.swap(1, 2);
+        }
+        if self.colors.len() < self.positions.len() {
+            self.colors
+                .resize(self.positions.len(), [1.0, 1.0, 1.0, 1.0]);
+        }
+        let first = self.positions.len() as u32;
+        for ((v, n), c) in verts.into_iter().zip(normals).zip(colors) {
+            let n = n.normalize_or_zero();
+            let ax = n.x.abs();
+            let ay = n.y.abs();
+            let az = n.z.abs();
+            let uv = if ay >= ax && ay >= az {
+                [v.x * 0.5, v.z * 0.5]
+            } else if ax >= az {
+                [v.z * 0.5, v.y * 0.5]
+            } else {
+                [v.x * 0.5, v.y * 0.5]
+            };
+            self.positions.push(v.to_array());
+            self.normals.push(n.to_array());
+            self.uvs.push(uv);
+            self.colors.push(c);
         }
         self.indices.extend([first, first + 1, first + 2]);
     }
@@ -2031,7 +2117,8 @@ impl MeshBuf {
         ];
         let c: [Vec3; 8] = std::array::from_fn(|i| {
             if jitter_amount > 0.0 {
-                raw_corners[i] + organic_jitter(raw_corners[i], seed.wrapping_add(i as u32)) * jitter_amount
+                raw_corners[i]
+                    + organic_jitter(raw_corners[i], seed.wrapping_add(i as u32)) * jitter_amount
             } else {
                 raw_corners[i]
             }
@@ -2051,15 +2138,30 @@ impl MeshBuf {
         self.push_quad(c[0], c[1], c[5], c[4], -up);
     }
 
-    fn finish(self) -> Mesh {
-        Mesh::new(
+    fn finish(mut self) -> Mesh {
+        let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
         )
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals)
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
-        .with_inserted_indices(Indices::U32(self.indices))
+        .with_inserted_indices(Indices::U32(self.indices));
+        if !self.uvs_b.is_empty() {
+            let count = mesh.count_vertices();
+            if self.uvs_b.len() < count {
+                self.uvs_b.resize(count, [0.0, 0.0]);
+            }
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, self.uvs_b);
+        }
+        if !self.colors.is_empty() {
+            let count = mesh.count_vertices();
+            if self.colors.len() < count {
+                self.colors.resize(count, [1.0, 1.0, 1.0, 1.0]);
+            }
+            mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.colors);
+        }
+        mesh
     }
 }
 
@@ -2067,11 +2169,11 @@ impl MeshBuf {
 /// have Tiny Glade's soft, hand-sculpted silhouette rather than rigid CAD lines.
 pub fn organic_jitter(pos: Vec3, seed: u32) -> Vec3 {
     let s = seed as f32 * 1.37;
-    let jx = (pos.x * 3.7 + pos.y * 5.1 + pos.z * 2.3 + s).sin()
-        * (pos.z * 4.3 - pos.y * 2.9 + s).cos();
+    let jx =
+        (pos.x * 3.7 + pos.y * 5.1 + pos.z * 2.3 + s).sin() * (pos.z * 4.3 - pos.y * 2.9 + s).cos();
     let jy = (pos.y * 4.1 + pos.x * 2.7 - pos.z * 3.5 + s).sin() * 0.6;
-    let jz = (pos.z * 3.9 - pos.x * 4.7 + pos.y * 3.1 + s).cos()
-        * (pos.x * 3.3 + pos.y * 2.1 + s).sin();
+    let jz =
+        (pos.z * 3.9 - pos.x * 4.7 + pos.y * 3.1 + s).cos() * (pos.x * 3.3 + pos.y * 2.1 + s).sin();
     Vec3::new(jx, jy, jz) * 0.022
 }
 
@@ -2116,6 +2218,9 @@ pub fn build_glade_meshes_with_spine(
 
     match kind {
         GladeKind::Path => {}
+        GladeKind::Tree => {
+            build_tree_mesh(piece, shape, details, seed, &mut stone, &mut roof);
+        }
         GladeKind::Terrain => {
             build_terrain_mesh(
                 piece,
@@ -2132,7 +2237,9 @@ pub fn build_glade_meshes_with_spine(
             build_door_portal_mesh(piece, shape, details, seed, &mut stone, &mut roof);
         }
         GladeKind::Window => {
-            build_window_mesh(piece, shape, details, seed, &mut stone, &mut glass, &mut roof);
+            build_window_mesh(
+                piece, shape, details, seed, &mut stone, &mut glass, &mut roof,
+            );
         }
         GladeKind::Wall => {
             build_free_wall_mesh(
@@ -2147,6 +2254,9 @@ pub fn build_glade_meshes_with_spine(
                 &mut stone,
                 &mut roof,
             );
+        }
+        GladeKind::Stairs => {
+            build_stairs_mesh(piece, shape, wall_spine, details, seed, &mut stone);
         }
         GladeKind::Room | GladeKind::Tower => {
             let is_tent = is_tent_house(piece, shape);
@@ -2190,27 +2300,12 @@ pub fn build_glade_meshes_with_spine(
                 }
                 GladeRoofStyle::Gable => {
                     build_gable_roof(
-                        ext.x,
-                        ext.z,
-                        ext.y,
-                        rise,
-                        overhang,
-                        details,
-                        seed,
-                        &mut stone,
-                        &mut roof,
+                        ext.x, ext.z, ext.y, rise, overhang, details, seed, &mut stone, &mut roof,
                     );
                 }
                 GladeRoofStyle::Hipped => {
                     build_hipped_roof(
-                        ext.x,
-                        ext.z,
-                        ext.y,
-                        rise,
-                        overhang,
-                        details,
-                        seed,
-                        &mut roof,
+                        ext.x, ext.z, ext.y, rise, overhang, details, seed, &mut roof,
                     );
                 }
                 GladeRoofStyle::Battlements => {
@@ -2304,9 +2399,8 @@ fn emit_faceted_boulder(
         for k in 0..6 {
             let idx = r_idx * 6 + k;
             let v_seed = seed.wrapping_add((idx as u32).wrapping_mul(79));
-            let angle = phase
-                + k as f32 * std::f32::consts::FRAC_PI_3
-                + (hash_f32(v_seed) - 0.5) * 0.26;
+            let angle =
+                phase + k as f32 * std::f32::consts::FRAC_PI_3 + (hash_f32(v_seed) - 0.5) * 0.26;
             let r_jit = rad * (0.82 + hash_f32(v_seed.wrapping_add(5)) * 0.34);
             let y_jit = ry + (hash_f32(v_seed.wrapping_add(9)) - 0.5) * 0.22;
             let (s, c) = angle.sin_cos();
@@ -2367,83 +2461,6 @@ fn emit_faceted_boulder(
     }
 }
 
-/// Emit a lush 3D meadow grass clump (`6` tapered, slightly curved 3D grass
-/// blades fanned out in azimuth) at `base_pos`.
-fn emit_meadow_grass_clump(
-    buf: &mut MeshBuf,
-    base_pos: Vec3,
-    scale: f32,
-    seed: u32,
-) {
-    let blades: [(f32, f32, f32, f32, f32, f32); 6] = [
-        (0.00, 0.00, 0.04, -0.05, 0.048, 0.44),
-        (0.15, 0.06, 0.12, 0.04, 0.044, 0.36),
-        (-0.14, 0.08, -0.11, 0.06, 0.044, 0.38),
-        (0.06, -0.15, 0.05, -0.12, 0.040, 0.32),
-        (-0.08, -0.13, -0.07, -0.10, 0.040, 0.34),
-        (0.19, -0.08, 0.14, -0.05, 0.036, 0.28),
-    ];
-    let yaw = hash_f32(seed) * std::f32::consts::TAU;
-    let (sy, cy) = yaw.sin_cos();
-    let wind_x = (base_pos.x * 0.35 + base_pos.z * 0.25).sin() * 0.04 * scale;
-    let wind_z = (base_pos.z * 0.31 - base_pos.x * 0.22).cos() * 0.04 * scale;
-
-    for (i, (bx, bz, lx, lz, w, h)) in blades.into_iter().enumerate() {
-        let b_seed = seed.wrapping_add((i as u32).wrapping_mul(31));
-        let h_var = h * scale * (0.85 + hash_f32(b_seed) * 0.32);
-        let w_var = w * scale.clamp(0.75, 1.35);
-
-        let rx = bx * cy - bz * sy;
-        let rz = bx * sy + bz * cy;
-        let rlx = lx * cy - lz * sy + wind_x;
-        let rlz = lx * sy + lz * cy + wind_z;
-
-        // Blade tangent perpendicular to blade azimuth
-        let blade_ang = yaw + i as f32 * 0.52;
-        let tx = blade_ang.cos() * w_var;
-        let tz = blade_ang.sin() * w_var;
-
-        // Upward-biased normal so directional sun lights the meadow grass softly from every angle
-        let n = Vec3::new(rlx * 0.35, 0.90, rlz * 0.35).normalize_or_zero();
-
-        // 3 vertical segments (root -> mid1 -> mid2 -> pointed tip) with uv.y in 0.0..=1.0
-        // for smooth shader wind/trample bending and root-to-tip shading.
-        let p00 = base_pos + Vec3::new(rx * scale - tx, -0.02, rz * scale - tz);
-        let p01 = base_pos + Vec3::new(rx * scale + tx, -0.02, rz * scale + tz);
-        let p10 = base_pos
-            + Vec3::new(
-                rx * scale + rlx * scale * 0.16 - tx * 0.72,
-                h_var * 0.35,
-                rz * scale + rlz * scale * 0.16 - tz * 0.72,
-            );
-        let p11 = base_pos
-            + Vec3::new(
-                rx * scale + rlx * scale * 0.16 + tx * 0.72,
-                h_var * 0.35,
-                rz * scale + rlz * scale * 0.16 + tz * 0.72,
-            );
-        let p20 = base_pos
-            + Vec3::new(
-                rx * scale + rlx * scale * 0.52 - tx * 0.38,
-                h_var * 0.70,
-                rz * scale + rlz * scale * 0.52 - tz * 0.38,
-            );
-        let p21 = base_pos
-            + Vec3::new(
-                rx * scale + rlx * scale * 0.52 + tx * 0.38,
-                h_var * 0.70,
-                rz * scale + rlz * scale * 0.52 + tz * 0.38,
-            );
-        let tip = base_pos + Vec3::new(rx * scale + rlx * scale, h_var, rz * scale + rlz * scale);
-
-        buf.push_tri_uv([p00, p01, p11], [[0.0, 0.0], [1.0, 0.0], [1.0, 0.35]], n);
-        buf.push_tri_uv([p00, p11, p10], [[0.0, 0.0], [1.0, 0.35], [0.0, 0.35]], n);
-        buf.push_tri_uv([p10, p11, p21], [[0.0, 0.35], [1.0, 0.35], [1.0, 0.70]], n);
-        buf.push_tri_uv([p10, p21, p20], [[0.0, 0.35], [1.0, 0.70], [0.0, 0.70]], n);
-        buf.push_tri_uv([p20, p21, tip], [[0.0, 0.70], [1.0, 0.70], [0.5, 1.0]], n);
-    }
-}
-
 /// Emit a wildflower & broad-leaf meadow clover patch at `base_pos` (like the
 /// yellow and white wildflowers in `ref.jpg`).
 fn emit_wildflower_cluster(
@@ -2486,7 +2503,7 @@ fn emit_wildflower_cluster(
 }
 
 /// Shortest 2D distance from `world_pt` to any segment in `polylines`.
-fn min_distance_to_polylines(world_pt: Vec2, polylines: &[Vec<Vec2>]) -> f32 {
+pub(crate) fn min_distance_to_polylines(world_pt: Vec2, polylines: &[Vec<Vec2>]) -> f32 {
     let mut best = f32::INFINITY;
     for line in polylines {
         for pair in line.windows(2) {
@@ -2497,6 +2514,597 @@ fn min_distance_to_polylines(world_pt: Vec2, polylines: &[Vec<Vec2>]) -> f32 {
         }
     }
     best
+}
+
+fn tree_hash01(seed: u32) -> f32 {
+    let mut x = seed ^ 0x9e37_79b9;
+    x = x.wrapping_mul(0x85eb_ca6b);
+    x ^= x >> 13;
+    x = x.wrapping_mul(0xc2b2_ae35);
+    x ^= x >> 16;
+    (x & 0x00ff_ffff) as f32 / 16_777_215.0
+}
+
+fn tree_signed(seed: u32) -> f32 {
+    tree_hash01(seed) * 2.0 - 1.0
+}
+
+/// Emit a smooth, organic tapered limb/trunk along `points` (`(pos, radius)`),
+/// with optional flared buttress roots near the base and vertex-colored bark.
+fn push_tapered_limb(
+    buf: &mut MeshBuf,
+    points: &[(Vec3, f32)],
+    segments: usize,
+    root_flare: f32,
+    seed: u32,
+    bark_color: impl Fn(f32, f32, Vec3, u32) -> [f32; 4],
+) {
+    if points.len() < 2 || segments < 3 {
+        return;
+    }
+    let n_rings = points.len();
+    let mut rings: Vec<Vec<(Vec3, Vec3, [f32; 4])>> = Vec::with_capacity(n_rings);
+    let mut prev_tangent = (points[1].0 - points[0].0).normalize_or_zero();
+    if prev_tangent == Vec3::ZERO {
+        prev_tangent = Vec3::Y;
+    }
+    let mut ref_up = if prev_tangent.y.abs() < 0.92 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
+    let mut right = prev_tangent.cross(ref_up).normalize_or_zero();
+    if right == Vec3::ZERO {
+        right = Vec3::X;
+    }
+    let mut forward;
+
+    for (ring_idx, &(center, base_radius)) in points.iter().enumerate() {
+        let t = ring_idx as f32 / (n_rings - 1) as f32;
+        let tangent = if ring_idx == 0 {
+            (points[1].0 - points[0].0).normalize_or_zero()
+        } else if ring_idx == n_rings - 1 {
+            (points[n_rings - 1].0 - points[n_rings - 2].0).normalize_or_zero()
+        } else {
+            (points[ring_idx + 1].0 - points[ring_idx - 1].0).normalize_or_zero()
+        };
+        let tangent = if tangent == Vec3::ZERO {
+            prev_tangent
+        } else {
+            tangent
+        };
+        // Parallel-transport frame so curved branches never twist or pinch.
+        let rot = bevy::math::Quat::from_rotation_arc(prev_tangent, tangent);
+        right = (rot * right).normalize_or_zero();
+        forward = tangent.cross(right).normalize_or_zero();
+        prev_tangent = tangent;
+        let _ = &mut ref_up;
+
+        let mut ring = Vec::with_capacity(segments);
+        let root_weight = if root_flare > 0.0 && t < 0.28 {
+            let u = 1.0 - t / 0.28;
+            u * u
+        } else {
+            0.0
+        };
+        let root_phase = tree_hash01(seed.wrapping_add(17)) * std::f32::consts::TAU;
+
+        for s in 0..segments {
+            let angle = std::f32::consts::TAU * s as f32 / segments as f32;
+            let radial = right * angle.cos() + forward * angle.sin();
+            let buttress = if root_weight > 0.0 {
+                let wave = (angle * 5.0 + root_phase).cos().max(0.0);
+                1.0 + root_flare * root_weight * (0.35 + 0.85 * wave)
+            } else {
+                1.0
+            };
+            let wobble = 1.0 + 0.06 * tree_signed(seed.wrapping_add((ring_idx * 31 + s) as u32));
+            let r = (base_radius * buttress * wobble).max(0.012);
+            let pos = center + radial * r;
+            let col = bark_color(t, angle, pos, seed.wrapping_add((ring_idx * 19 + s) as u32));
+            ring.push((pos, radial, col));
+        }
+        rings.push(ring);
+    }
+
+    for r in 0..n_rings - 1 {
+        let a = &rings[r];
+        let b = &rings[r + 1];
+        for s in 0..segments {
+            let sn = (s + 1) % segments;
+            let (p00, n00, c00) = a[s];
+            let (p01, n01, c01) = a[sn];
+            let (p10, n10, c10) = b[s];
+            let (p11, n11, c11) = b[sn];
+            buf.push_tri_smooth_colored([p00, p01, p11], [n00, n01, n11], [c00, c01, c11]);
+            buf.push_tri_smooth_colored([p00, p11, p10], [n00, n11, n10], [c00, c11, c10]);
+        }
+    }
+
+    // Cap the top tip of the limb.
+    if let Some(top_ring) = rings.last() {
+        let top_center = points.last().map(|p| p.0).unwrap_or(Vec3::ZERO);
+        let top_col = top_ring[0].2;
+        for s in 0..segments {
+            let sn = (s + 1) % segments;
+            let (p0, n0, c0) = top_ring[s];
+            let (p1, n1, c1) = top_ring[sn];
+            buf.push_tri_smooth_colored(
+                [p0, p1, top_center],
+                [n0, n1, prev_tangent],
+                [c0, c1, top_col],
+            );
+        }
+    }
+}
+
+/// Emit a billowing, organically perturbed geodesic foliage cluster (`roof` buffer)
+/// with soft painterly normals and sunlit-top / shaded-underside vertex colours.
+fn push_foliage_blob(buf: &mut MeshBuf, center: Vec3, radii: Vec3, tint: [f32; 3], seed: u32) {
+    let t = (1.0 + 5.0_f32.sqrt()) * 0.5;
+    let base_verts = [
+        Vec3::new(-1.0, t, 0.0),
+        Vec3::new(1.0, t, 0.0),
+        Vec3::new(-1.0, -t, 0.0),
+        Vec3::new(1.0, -t, 0.0),
+        Vec3::new(0.0, -1.0, t),
+        Vec3::new(0.0, 1.0, t),
+        Vec3::new(0.0, -1.0, -t),
+        Vec3::new(0.0, 1.0, -t),
+        Vec3::new(t, 0.0, -1.0),
+        Vec3::new(t, 0.0, 1.0),
+        Vec3::new(-t, 0.0, -1.0),
+        Vec3::new(-t, 0.0, 1.0),
+    ]
+    .map(|v| v.normalize());
+
+    const BASE_FACES: [[usize; 3]; 20] = [
+        [0, 11, 5],
+        [0, 5, 1],
+        [0, 1, 7],
+        [0, 7, 10],
+        [0, 10, 11],
+        [1, 5, 9],
+        [5, 11, 4],
+        [11, 10, 2],
+        [10, 7, 6],
+        [7, 1, 8],
+        [3, 9, 4],
+        [3, 4, 2],
+        [3, 2, 6],
+        [3, 6, 8],
+        [3, 8, 9],
+        [4, 9, 5],
+        [2, 4, 11],
+        [6, 2, 10],
+        [8, 6, 7],
+        [9, 8, 1],
+    ];
+
+    let phase = tree_hash01(seed) * std::f32::consts::TAU;
+    let displace_vertex = |dir: Vec3| -> (Vec3, Vec3, [f32; 4]) {
+        let wave = (dir.x * 3.7 + phase).sin() * (dir.z * 3.1 - phase * 0.7).cos() * 0.14
+            + (dir.y * 4.3 + dir.x * 2.1 + phase).sin() * 0.08;
+        let scale = 1.0 + wave;
+        let local = Vec3::new(
+            dir.x * radii.x * scale,
+            dir.y * radii.y * scale,
+            dir.z * radii.z * scale,
+        );
+        let pos = center + local;
+        // Blend outward radial normal with subtle upward bias for soft stylized foliage shading.
+        let normal = (dir + Vec3::Y * 0.30).normalize_or_zero();
+        // Vertical gradient from cool shaded underside to warm sunlit top.
+        let h_grad = (dir.y * 0.5 + 0.5).clamp(0.0, 1.0);
+        let r_shade = (0.56 + 0.56 * h_grad) * tint[0];
+        let g_shade = (0.60 + 0.55 * h_grad) * tint[1];
+        let b_shade = (0.64 + 0.34 * h_grad) * tint[2];
+        (pos, normal, [r_shade, g_shade, b_shade, 1.0])
+    };
+
+    for [i0, i1, i2] in BASE_FACES {
+        let a = base_verts[i0];
+        let b = base_verts[i1];
+        let c = base_verts[i2];
+        let ab = (a + b).normalize();
+        let bc = (b + c).normalize();
+        let ca = (c + a).normalize();
+
+        let sub_tris = [[a, ab, ca], [ab, b, bc], [ca, bc, c], [ab, bc, ca]];
+        for [d0, d1, d2] in sub_tris {
+            let (p0, n0, c0) = displace_vertex(d0);
+            let (p1, n1, c1) = displace_vertex(d1);
+            let (p2, n2, c2) = displace_vertex(d2);
+            buf.push_tri_smooth_colored([p0, p1, p2], [n0, n1, n2], [c0, c1, c2]);
+        }
+    }
+}
+
+fn broadleaf_bark_color(t: f32, _angle: f32, pos: Vec3, seed: u32) -> [f32; 4] {
+    let moss = (1.0 - (pos.y / 0.55).clamp(0.0, 1.0)) * 0.65;
+    let grain = 0.90 + 0.16 * tree_hash01(seed);
+    let r = (0.34 * (1.0 - moss) + 0.22 * moss + 0.06 * t) * grain;
+    let g = (0.23 * (1.0 - moss) + 0.30 * moss + 0.05 * t) * grain;
+    let b = (0.16 * (1.0 - moss) + 0.15 * moss + 0.03 * t) * grain;
+    [r, g, b, 1.0]
+}
+
+fn pine_bark_color(t: f32, _angle: f32, pos: Vec3, seed: u32) -> [f32; 4] {
+    let moss = (1.0 - (pos.y / 0.45).clamp(0.0, 1.0)) * 0.45;
+    let grain = 0.88 + 0.18 * tree_hash01(seed);
+    let r = (0.32 * (1.0 - moss) + 0.20 * moss + 0.04 * t) * grain;
+    let g = (0.19 * (1.0 - moss) + 0.25 * moss + 0.03 * t) * grain;
+    let b = (0.13 * (1.0 - moss) + 0.13 * moss + 0.02 * t) * grain;
+    [r, g, b, 1.0]
+}
+
+fn birch_bark_color(_t: f32, angle: f32, pos: Vec3, seed: u32) -> [f32; 4] {
+    let base_moss = 1.0 - (pos.y / 0.32).clamp(0.0, 1.0);
+    // Characteristic dark horizontal lenticel bands on pale birch bark.
+    let band_wave = (pos.y * 11.5 + (angle * 1.5).sin() * 0.6 + tree_hash01(seed) * 0.5).sin();
+    let is_band = if band_wave > 0.78 && pos.y > 0.30 {
+        ((band_wave - 0.78) / 0.22).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let pale = [0.85, 0.83, 0.78];
+    let dark = [0.19, 0.17, 0.16];
+    let moss = [0.24, 0.29, 0.17];
+    let r = pale[0] * (1.0 - is_band) + dark[0] * is_band;
+    let g = pale[1] * (1.0 - is_band) + dark[1] * is_band;
+    let b = pale[2] * (1.0 - is_band) + dark[2] * is_band;
+    [
+        r * (1.0 - base_moss) + moss[0] * base_moss,
+        g * (1.0 - base_moss) + moss[1] * base_moss,
+        b * (1.0 - base_moss) + moss[2] * base_moss,
+        1.0,
+    ]
+}
+
+fn build_broadleaf_tree(
+    ext: Vec3,
+    fullness: f32,
+    details: bool,
+    seed: u32,
+    stone: &mut MeshBuf,
+    roof: &mut MeshBuf,
+) {
+    let h = ext.y;
+    let rx = ext.x * 0.5;
+    let rz = ext.z * 0.5;
+    let avg_r = (rx + rz) * 0.5;
+    let trunk_r = (avg_r * 0.14 + h * 0.012).clamp(0.11, 0.72);
+    let lean_x = tree_signed(seed.wrapping_add(1)) * rx * 0.10;
+    let lean_z = tree_signed(seed.wrapping_add(2)) * rz * 0.10;
+
+    // Keep foliage clouds rounded/slightly oblate relative to canopy width
+    // rather than stretching them vertically when the tree is tall.
+    let crown_rx = (rx * (0.58 + 0.22 * fullness)).max(0.55);
+    let crown_rz = (rz * (0.58 + 0.22 * fullness)).max(0.55);
+    let crown_avg = (crown_rx + crown_rz) * 0.5;
+    let crown_r = Vec3::new(
+        crown_rx,
+        (crown_avg * (0.78 + 0.12 * fullness))
+            .min(h * 0.34)
+            .max(0.50),
+        crown_rz,
+    );
+    let crown_center_y = (h - crown_r.y * 0.85).max(crown_r.y * 0.9);
+
+    let blob_scale = 0.78 + 0.42 * fullness;
+    let blob_horiz = (avg_r * 0.46 * blob_scale).max(0.45);
+    let blob_r = Vec3::new(
+        blob_horiz,
+        (blob_horiz * 0.88).min(h * 0.24).max(0.40),
+        blob_horiz,
+    );
+
+    let canopy_depth = (crown_r.y * 1.75 + blob_r.y * 0.8).min(h * 0.72);
+    let fork_y = (h - canopy_depth).clamp(h * 0.24, h * 0.62);
+
+    let trunk_pts = [
+        (Vec3::new(0.0, -0.10, 0.0), trunk_r * 1.25),
+        (
+            Vec3::new(lean_x * 0.25, fork_y * 0.38, lean_z * 0.25),
+            trunk_r * 0.88,
+        ),
+        (
+            Vec3::new(lean_x * 0.70, fork_y * 0.74, lean_z * 0.70),
+            trunk_r * 0.74,
+        ),
+        (Vec3::new(lean_x, fork_y, lean_z), trunk_r * 0.58),
+    ];
+    push_tapered_limb(stone, &trunk_pts, 9, 0.45, seed, broadleaf_bark_color);
+
+    let fork_origin = trunk_pts[3].0;
+    let branch_count = if details { 5 } else { 4 };
+    let base_angle = tree_hash01(seed.wrapping_add(5)) * std::f32::consts::TAU;
+    let canopy_rise = (crown_center_y - fork_y).max(0.5);
+
+    for i in 0..branch_count {
+        let b_seed = seed.wrapping_add(100 + i as u32 * 37);
+        let a = base_angle
+            + std::f32::consts::TAU * i as f32 / branch_count as f32
+            + tree_signed(b_seed) * 0.30;
+        let reach = 0.55 + 0.25 * tree_hash01(b_seed.wrapping_add(1));
+        let tip_x = fork_origin.x + a.cos() * rx * reach;
+        let tip_z = fork_origin.z + a.sin() * rz * reach;
+        let tip_y =
+            fork_origin.y + canopy_rise * (0.52 + 0.26 * tree_hash01(b_seed.wrapping_add(2)));
+        let mid_pt = Vec3::new(
+            (fork_origin.x + tip_x) * 0.5 + tree_signed(b_seed.wrapping_add(3)) * 0.18,
+            (fork_origin.y + tip_y) * 0.5 - 0.08,
+            (fork_origin.z + tip_z) * 0.5 + tree_signed(b_seed.wrapping_add(4)) * 0.18,
+        );
+        let tip_pt = Vec3::new(tip_x, tip_y, tip_z);
+
+        let b_pts = [
+            (fork_origin, trunk_r * 0.48),
+            (mid_pt, trunk_r * 0.30),
+            (tip_pt, trunk_r * 0.14),
+        ];
+        push_tapered_limb(stone, &b_pts, 6, 0.0, b_seed, broadleaf_bark_color);
+
+        let tint_var = 0.92 + 0.16 * tree_hash01(b_seed.wrapping_add(7));
+        push_foliage_blob(
+            roof,
+            tip_pt + Vec3::Y * (blob_r.y * 0.25),
+            blob_r,
+            [tint_var, tint_var * 1.02, tint_var * 0.95],
+            b_seed.wrapping_add(11),
+        );
+
+        if details {
+            // Secondary twig and flanking leaf cluster.
+            let twig_a = a + tree_signed(b_seed.wrapping_add(13)) * 0.85;
+            let twig_tip = mid_pt
+                + Vec3::new(
+                    twig_a.cos() * rx * 0.34,
+                    canopy_rise * 0.28,
+                    twig_a.sin() * rz * 0.34,
+                );
+            push_tapered_limb(
+                stone,
+                &[(mid_pt, trunk_r * 0.22), (twig_tip, trunk_r * 0.09)],
+                5,
+                0.0,
+                b_seed.wrapping_add(19),
+                broadleaf_bark_color,
+            );
+            push_foliage_blob(
+                roof,
+                twig_tip,
+                blob_r * 0.72,
+                [tint_var * 0.96, tint_var, tint_var * 0.92],
+                b_seed.wrapping_add(23),
+            );
+        }
+    }
+
+    // Central upper crown cloud.
+    push_foliage_blob(
+        roof,
+        Vec3::new(lean_x * 0.85, crown_center_y, lean_z * 0.85),
+        crown_r,
+        [1.04, 1.06, 0.98],
+        seed.wrapping_add(501),
+    );
+    if fullness > 0.35 {
+        let lower_r = crown_r * 0.78;
+        push_foliage_blob(
+            roof,
+            Vec3::new(
+                lean_x + tree_signed(seed.wrapping_add(503)) * rx * 0.18,
+                fork_y + lower_r.y * 0.55,
+                lean_z + tree_signed(seed.wrapping_add(505)) * rz * 0.18,
+            ),
+            lower_r,
+            [0.94, 0.97, 0.94],
+            seed.wrapping_add(507),
+        );
+    }
+}
+
+fn build_pine_tree(
+    ext: Vec3,
+    fullness: f32,
+    details: bool,
+    seed: u32,
+    stone: &mut MeshBuf,
+    roof: &mut MeshBuf,
+) {
+    let h = ext.y;
+    let rx = ext.x * 0.5;
+    let rz = ext.z * 0.5;
+    let avg_r = (rx + rz) * 0.5;
+    let trunk_r = (avg_r * 0.12).clamp(0.09, 0.48);
+    let sway_x = tree_signed(seed.wrapping_add(1)) * rx * 0.05;
+    let sway_z = tree_signed(seed.wrapping_add(2)) * rz * 0.05;
+
+    let trunk_pts = [
+        (Vec3::new(0.0, -0.10, 0.0), trunk_r * 1.2),
+        (
+            Vec3::new(sway_x * 0.4, h * 0.32, sway_z * 0.4),
+            trunk_r * 0.82,
+        ),
+        (
+            Vec3::new(sway_x * 0.8, h * 0.66, sway_z * 0.8),
+            trunk_r * 0.48,
+        ),
+        (Vec3::new(sway_x, h * 0.94, sway_z), trunk_r * 0.12),
+    ];
+    push_tapered_limb(stone, &trunk_pts, 8, 0.30, seed, pine_bark_color);
+
+    let aspect_tiers = ((h / avg_r.max(0.8)) - 3.2).clamp(0.0, 5.0).round() as usize;
+    let tier_count = (4 + (fullness * 3.5).round() as usize + aspect_tiers).clamp(4, 12);
+    let start_y = h * (0.28 - 0.12 * fullness).clamp(0.12, 0.35);
+    let radial_pts = if details { 18 } else { 14 };
+
+    for tier in 0..tier_count {
+        let tf = tier as f32 / (tier_count - 1).max(1) as f32;
+        let t_seed = seed.wrapping_add(300 + tier as u32 * 41);
+        let tier_base_y = start_y + tf * (h * 0.84 - start_y);
+        let tier_h = ((h - start_y) / tier_count as f32) * (1.35 + 0.35 * fullness);
+        let apex_y = (tier_base_y + tier_h).min(h);
+        let scale = (1.0 - tf * 0.78).max(0.20);
+        let tier_rx = rx * scale * (0.95 + 0.12 * tree_hash01(t_seed));
+        let tier_rz = rz * scale * (0.95 + 0.12 * tree_hash01(t_seed.wrapping_add(1)));
+        let twist = tree_hash01(t_seed.wrapping_add(2)) * std::f32::consts::TAU;
+
+        let center_x = sway_x * (tier_base_y / h);
+        let center_z = sway_z * (tier_base_y / h);
+        let apex = Vec3::new(center_x, apex_y, center_z);
+        let under_center = Vec3::new(center_x, tier_base_y + tier_h * 0.18, center_z);
+
+        let mut rim = Vec::with_capacity(radial_pts);
+        for s in 0..radial_pts {
+            let a = twist + std::f32::consts::TAU * s as f32 / radial_pts as f32;
+            // Scalloped bough tips alternating outward and slightly tucked in.
+            let scallop = if s % 2 == 0 {
+                1.0 + 0.14 * tree_hash01(t_seed.wrapping_add(10 + s as u32))
+            } else {
+                0.76 + 0.10 * tree_hash01(t_seed.wrapping_add(10 + s as u32))
+            };
+            let droop = if s % 2 == 0 { -tier_h * 0.12 } else { 0.02 };
+            let p = Vec3::new(
+                center_x + a.cos() * tier_rx * scallop,
+                (tier_base_y + droop).max(0.15),
+                center_z + a.sin() * tier_rz * scallop,
+            );
+            let out_n = Vec3::new(a.cos(), 0.45, a.sin()).normalize();
+            rim.push((p, out_n));
+        }
+
+        let top_col = [0.96 + 0.12 * tf, 1.02 + 0.10 * tf, 0.92 + 0.06 * tf, 1.0];
+        let rim_col = [0.72 + 0.14 * tf, 0.78 + 0.14 * tf, 0.76 + 0.08 * tf, 1.0];
+        let under_col = [0.46, 0.52, 0.56, 1.0];
+
+        for s in 0..radial_pts {
+            let sn = (s + 1) % radial_pts;
+            let (p0, n0) = rim[s];
+            let (p1, n1) = rim[sn];
+            // Upper needle skirt face.
+            roof.push_tri_smooth_colored(
+                [p0, apex, p1],
+                [n0, Vec3::Y, n1],
+                [rim_col, top_col, rim_col],
+            );
+            // Shaded underside face.
+            roof.push_tri_smooth_colored(
+                [p0, p1, under_center],
+                [Vec3::NEG_Y, Vec3::NEG_Y, Vec3::NEG_Y],
+                [under_col, under_col, under_col],
+            );
+        }
+    }
+}
+
+fn build_birch_tree(
+    ext: Vec3,
+    fullness: f32,
+    details: bool,
+    seed: u32,
+    stone: &mut MeshBuf,
+    roof: &mut MeshBuf,
+) {
+    let h = ext.y;
+    let rx = ext.x * 0.5;
+    let rz = ext.z * 0.5;
+    let avg_r = (rx + rz) * 0.5;
+    let trunk_r = (avg_r * 0.10).clamp(0.07, 0.36);
+    let fork_y = h * 0.36;
+    let lean_x = tree_signed(seed.wrapping_add(1)) * rx * 0.10;
+    let lean_z = tree_signed(seed.wrapping_add(2)) * rz * 0.10;
+
+    let trunk_pts = [
+        (Vec3::new(0.0, -0.10, 0.0), trunk_r * 1.25),
+        (
+            Vec3::new(lean_x * 0.4, fork_y * 0.5, lean_z * 0.4),
+            trunk_r * 0.85,
+        ),
+        (Vec3::new(lean_x, fork_y, lean_z), trunk_r * 0.68),
+    ];
+    push_tapered_limb(stone, &trunk_pts, 8, 0.25, seed, birch_bark_color);
+
+    let fork_origin = trunk_pts[2].0;
+    let stem_count = if details { 3 } else { 2 };
+    let base_a = tree_hash01(seed.wrapping_add(9)) * std::f32::consts::TAU;
+
+    for i in 0..stem_count {
+        let s_seed = seed.wrapping_add(200 + i as u32 * 53);
+        let a = base_a + std::f32::consts::TAU * i as f32 / stem_count as f32;
+        let spread = 0.42 + 0.18 * tree_hash01(s_seed);
+        let top_pt = Vec3::new(
+            fork_origin.x + a.cos() * rx * spread,
+            h * (0.86 + 0.08 * tree_hash01(s_seed.wrapping_add(1))),
+            fork_origin.z + a.sin() * rz * spread,
+        );
+        let mid_pt = Vec3::new(
+            (fork_origin.x + top_pt.x) * 0.5 + a.cos() * rx * 0.12,
+            (fork_origin.y + top_pt.y) * 0.5,
+            (fork_origin.z + top_pt.z) * 0.5 + a.sin() * rz * 0.12,
+        );
+        push_tapered_limb(
+            stone,
+            &[
+                (fork_origin, trunk_r * 0.54),
+                (mid_pt, trunk_r * 0.34),
+                (top_pt, trunk_r * 0.12),
+            ],
+            6,
+            0.0,
+            s_seed,
+            birch_bark_color,
+        );
+
+        let aspect_extra = ((h / avg_r.max(0.8)) - 3.0).clamp(0.0, 4.0).round() as usize;
+        let clusters = 3 + (fullness * 2.0).round() as usize + aspect_extra;
+        let br = (avg_r * (0.28 + 0.14 * fullness)).max(0.32);
+        let bh = (br * (0.82 + 0.10 * fullness)).min(h * 0.22).max(0.28);
+        for c in 0..clusters {
+            let c_seed = s_seed.wrapping_add(30 + c as u32 * 13);
+            let frac = (c as f32 + 0.5) / clusters as f32;
+            let pos = mid_pt.lerp(top_pt, frac)
+                + Vec3::new(
+                    tree_signed(c_seed) * rx * 0.24,
+                    tree_signed(c_seed.wrapping_add(1)) * (bh * 0.35).min(h * 0.05),
+                    tree_signed(c_seed.wrapping_add(2)) * rz * 0.24,
+                );
+            let tint = 0.94 + 0.14 * tree_hash01(c_seed.wrapping_add(3));
+            push_foliage_blob(
+                roof,
+                pos,
+                Vec3::new(br, bh, br),
+                [tint * 1.04, tint * 1.06, tint * 0.92],
+                c_seed.wrapping_add(5),
+            );
+        }
+    }
+}
+
+/// Synthesize a procedural Tiny Glade–style tree (`glade_tree`) with organic
+/// tapered trunk/branches (`stone` buffer) and vertex-shaded foliage (`roof` buffer).
+fn build_tree_mesh(
+    piece: &Piece,
+    shape: &Shape,
+    details: bool,
+    seed: u32,
+    stone: &mut MeshBuf,
+    roof: &mut MeshBuf,
+) {
+    let ext = piece_extents(piece, shape);
+    let fullness = model::sanitize_trigger_alpha(piece.trigger_alpha);
+    match tree_style(piece) {
+        GladeTreeStyle::Broadleaf => {
+            build_broadleaf_tree(ext, fullness, details, seed, stone, roof);
+        }
+        GladeTreeStyle::Pine => {
+            build_pine_tree(ext, fullness, details, seed, stone, roof);
+        }
+        GladeTreeStyle::Birch => {
+            build_birch_tree(ext, fullness, details, seed, stone, roof);
+        }
+    }
 }
 
 /// Synthesize a procedural Tiny Glade terrain chunk (`glade_terrain`) with:
@@ -2569,11 +3177,7 @@ fn build_terrain_mesh(
                     seed.wrapping_add((r * 41 + s) as u32),
                 );
                 local_y = (local_y + j.y * 1.15).max(0.0);
-                pt = Vec3::new(
-                    contour.x + j.x * 1.35,
-                    local_y,
-                    contour.y + j.z * 1.35,
-                );
+                pt = Vec3::new(contour.x + j.x * 1.35, local_y, contour.y + j.z * 1.35);
             }
             grid[r][s] = pt;
         }
@@ -2634,7 +3238,8 @@ fn build_terrain_mesh(
 
             // Determine whether this cell is steep enough to expose craggy cliff rock.
             let cliff_cos = (TERRAIN_CLIFF_NORMAL_Y + (falloff - 0.5) * 0.22).clamp(0.55, 0.85);
-            let is_cliff = r > 0 && (cell_normal.y < cliff_cos || (falloff > 0.62 && r >= rings / 2));
+            let is_cliff =
+                r > 0 && (cell_normal.y < cliff_cos || (falloff > 0.62 && r >= rings / 2));
 
             let target_buf: &mut MeshBuf = if is_cliff { stone } else { roof };
             if r == 0 {
@@ -2675,7 +3280,6 @@ fn build_terrain_mesh(
                         cell_seed,
                         0.45,
                     );
-                    emit_meadow_grass_clump(roof, (v00 + v10) * 0.5, 1.15, cell_seed.wrapping_add(11));
                 }
 
                 // 2. If a path crosses this cliff cell, carve a cleft and place stone steps!
@@ -2707,7 +3311,7 @@ fn build_terrain_mesh(
                     );
                 }
 
-                // 3. Faceted talus boulders and grass tufts resting at the foot of steep cliffs
+                // 3. Faceted talus boulders resting at the foot of steep cliffs
                 if r + 1 == rings && s % 2 == 0 && path_dist > 0.72 {
                     let boulder_pos = (v01 + v11) * 0.5 + radial_out * 0.18 + Vec3::Y * 0.16;
                     emit_faceted_boulder(
@@ -2719,18 +3323,9 @@ fn build_terrain_mesh(
                         Vec3::new(0.34, 0.24, 0.30),
                         cell_seed.wrapping_add(73),
                     );
-                    emit_meadow_grass_clump(
-                        roof,
-                        (v01 + v11) * 0.5 + radial_out * 0.32,
-                        1.20,
-                        cell_seed.wrapping_add(97),
-                    );
                 }
             } else if details && !is_cliff && path_dist > 0.58 {
-                // Lush 3D grass clumps across the upper grassy plateau and gentle slopes
-                if (r == 0 && s % 4 == 0) || (r > 0 && (r + s) % 2 == 0) {
-                    emit_meadow_grass_clump(roof, mid_local, 1.0, cell_seed.wrapping_add(5));
-                }
+                let _ = mid_local;
             }
         }
     }
@@ -2749,8 +3344,6 @@ fn build_terrain_mesh(
 /// - `turf`: Continuous grassy meadow & plateau ground mesh,
 /// - `rock_light`: Primary weathered limestone faceted cliff boulders & stone steps,
 /// - `rock_dark`: Secondary crevice boulders, dark rock slabs, & step risers,
-/// - `grass_sun`: Batched multi-blade 3D sunlit chartreuse grass clumps,
-/// - `grass_lush`: Batched multi-blade 3D deep meadow green grass clumps & tower ivy,
 /// - `grass_clover`: Broad-leaf meadow clover/weed rosettes & ivy leaves,
 /// - `flower_yellow`: 3D yellow buttercup/dandelion wildflower blossoms,
 /// - `flower_white`: 3D white daisy wildflower blossoms,
@@ -2759,55 +3352,30 @@ pub struct WorldTerrainMeshes {
     pub turf: Mesh,
     pub rock_light: Mesh,
     pub rock_dark: Mesh,
-    pub grass_sun: Mesh,
-    pub grass_lush: Mesh,
     pub grass_clover: Mesh,
     pub flower_yellow: Mesh,
     pub flower_white: Mesh,
     pub path_sand: Mesh,
 }
 
-/// Compute all active path polylines across the world terrain:
-/// 1. User-authored paths (`path_polylines` from `route`, `plan`, and `movers`),
-/// 2. The scenic hillside trail climbing the built-in `(-X, -Z)` cliff plateau,
-/// 3. Automatic hilltop access trails descending from any building perched on an
-///    elevated terrain plateau (`elevation >= 0.75m`) down into the meadow.
 /// Collect all 2D world-space path polylines used for sandy meadow paths,
-/// automatic cliff stone stairs, and archway cutouts:
-/// 1. User-authored route/plan/mover `path_polylines`, plus
-/// 2. The built-in scenic hillside path climbing up the `(-X, -Z)` cliff cleft.
+/// automatic cliff stone stairs, and archway cutouts from user-authored
+/// route/plan/mover `path_polylines`.
 pub fn compute_world_terrain_paths(
-    all_pieces: &[Piece],
+    _all_pieces: &[Piece],
     path_polylines: &[Vec<Vec2>],
 ) -> Vec<Vec<Vec2>> {
-    let mut out: Vec<Vec<Vec2>> = path_polylines
+    path_polylines
         .iter()
         .filter(|line| line.len() >= 2)
         .cloned()
-        .collect();
-
-    // Built-in scenic hillside path climbing up the (-X, -Z) cliff cleft (like ref.jpg right side)
-    let builtin_path = vec![
-        Vec2::new(-1.4, -2.2),
-        Vec2::new(-2.6, -3.4),
-        Vec2::new(-4.1, -4.8),
-        Vec2::new(-5.6, -6.0),
-        Vec2::new(-7.2, -6.9),
-    ];
-    let blocked_by_carve = all_pieces.iter().any(|p| {
-        p.elevation < -0.05 && p.pos.distance(Vec2::new(-6.0, -6.0)) < 6.0
-    });
-    if !blocked_by_carve {
-        out.push(builtin_path);
-    }
-
-    out
+        .collect()
 }
 
 /// Shortest 2D distance from `world_pt` to the exterior boundary (and interior status)
 /// of any solid building footprint (`glade_tower`, `glade_room`, `floor`, `block`).
 /// Returns `(is_inside_footprint, min_boundary_dist)`.
-fn building_footprint_proximity(world_pt: Vec2, all_pieces: &[Piece]) -> (bool, f32) {
+pub(crate) fn building_footprint_proximity(world_pt: Vec2, all_pieces: &[Piece]) -> (bool, f32) {
     let mut min_dist = f32::INFINITY;
     let mut inside = false;
     for p in all_pieces {
@@ -2818,8 +3386,10 @@ fn building_footprint_proximity(world_pt: Vec2, all_pieces: &[Piece]) -> (bool, 
         if kind == Some(GladeKind::Terrain) {
             continue;
         }
-        let is_solid = matches!(kind, Some(GladeKind::Tower | GladeKind::Room | GladeKind::Wall))
-            || matches!(shape.id, "floor" | "block" | "ramp");
+        let is_solid = matches!(
+            kind,
+            Some(GladeKind::Tower | GladeKind::Room | GladeKind::Wall)
+        ) || matches!(shape.id, "floor" | "block" | "ramp");
         if !is_solid {
             continue;
         }
@@ -2928,8 +3498,20 @@ fn emit_terrain_paths_and_stairs(
                 world_terrain_height_at(p1 + right2 * half_w, all_pieces) + edge_lift,
                 p1.y + right2.y * half_w,
             );
-            path_sand.push_quad(l0, c0, c1, l1, Vec3::new(-right2.x * 0.12, 0.98, -right2.y * 0.12));
-            path_sand.push_quad(c0, r0, r1, c1, Vec3::new(right2.x * 0.12, 0.98, right2.y * 0.12));
+            path_sand.push_quad(
+                l0,
+                c0,
+                c1,
+                l1,
+                Vec3::new(-right2.x * 0.12, 0.98, -right2.y * 0.12),
+            );
+            path_sand.push_quad(
+                c0,
+                r0,
+                r1,
+                c1,
+                Vec3::new(right2.x * 0.12, 0.98, right2.y * 0.12),
+            );
 
             // Where the path climbs a steep terrain slope or cliff (`grade > 0.26`),
             // automatically place chiseled stone steps / flagstones (`ref.jpg` right)!
@@ -3000,11 +3582,7 @@ fn emit_terrain_paths_and_stairs(
 /// Emit 3D climbing ivy vines and leaf clusters clinging to the exterior masonry
 /// walls of `glade_tower` and `glade_room` pieces (like the ivy on the hilltop
 /// stone tower in `ref.jpg`).
-fn emit_building_ivy(
-    all_pieces: &[Piece],
-    grass_lush: &mut MeshBuf,
-    grass_clover: &mut MeshBuf,
-) {
+fn emit_building_ivy(all_pieces: &[Piece], grass_clover: &mut MeshBuf) {
     for p in all_pieces {
         if !details_enabled(p) {
             continue;
@@ -3051,7 +3629,8 @@ fn emit_building_ivy(
                 let base2 = w0.lerp(w1, u_frac);
                 let ground_y = world_terrain_height_at(base2, all_pieces).max(p.elevation);
                 let max_climb = (p.elevation + seg.top_y - ground_y - 0.25).clamp(0.6, 2.35);
-                let climb_h = max_climb * (0.55 + hash_f32(v_seed.wrapping_add(v as u32 * 19)) * 0.45);
+                let climb_h =
+                    max_climb * (0.55 + hash_f32(v_seed.wrapping_add(v as u32 * 19)) * 0.45);
                 let leaves = ((climb_h / 0.18).ceil() as usize).clamp(4, 14);
                 for l in 0..leaves {
                     let lf = l as f32 / leaves as f32;
@@ -3061,12 +3640,7 @@ fn emit_building_ivy(
                         + right * sway
                         + outward * (0.045 + (1.0 - lf) * 0.02);
                     let leaf_r = 0.085 * (1.15 - lf * 0.35);
-                    let target = if (l + v) % 2 == 0 {
-                        &mut *grass_clover
-                    } else {
-                        &mut *grass_lush
-                    };
-                    target.push_quad(
+                    grass_clover.push_quad(
                         pos - right * leaf_r,
                         pos + outward * (leaf_r * 0.7) - Vec3::Y * (leaf_r * 0.6),
                         pos + right * leaf_r,
@@ -3083,7 +3657,7 @@ fn emit_building_ivy(
 /// Tiny Glade landscape, integrating:
 /// - Smooth meadow & plateau heightfield surface (`turf`),
 /// - Multi-faceted 3D angular cliff boulders (`rock_light` & `rock_dark`),
-/// - Dense 3D grass blades (`grass_sun` & `grass_lush`), clover (`grass_clover`),
+/// - Clover (`grass_clover`),
 ///   and wildflowers (`flower_yellow` & `flower_white`),
 /// - 3D sandy paths (`path_sand`) and automatic cliff stone stairs,
 /// - Climbing ivy vines on stone towers and rooms.
@@ -3094,8 +3668,6 @@ pub fn build_world_terrain_meshes(
     let mut turf = MeshBuf::default();
     let mut rock_light = MeshBuf::default();
     let mut rock_dark = MeshBuf::default();
-    let mut grass_sun = MeshBuf::default();
-    let mut grass_lush = MeshBuf::default();
     let mut grass_clover = MeshBuf::default();
     let mut flower_yellow = MeshBuf::default();
     let mut flower_white = MeshBuf::default();
@@ -3220,7 +3792,7 @@ pub fn build_world_terrain_meshes(
                     );
                 }
 
-                // Overhanging grassy turf pillow + tall rim grass tufts at upper cliff edge
+                // Overhanging grassy turf pillow at the upper cliff edge
                 if max_h > 0.9 && min_h > max_h - step_drop * 1.15 && (ix + iz) % 2 == 0 {
                     let rim_pos = Vec3::new(mid2.x, max_h - 0.04, mid2.y) + outward * 0.10;
                     turf.push_oriented_box(
@@ -3232,15 +3804,9 @@ pub fn build_world_terrain_meshes(
                         cell_seed.wrapping_add(61),
                         0.45,
                     );
-                    emit_meadow_grass_clump(
-                        &mut grass_sun,
-                        rim_pos + Vec3::Y * 0.06,
-                        1.25,
-                        cell_seed.wrapping_add(67),
-                    );
                 }
 
-                // Tumbled talus boulders + tall grass pockets at the foot of the cliff
+                // Tumbled talus boulders at the foot of the cliff
                 if min_h < 0.55 && (ix + iz) % 2 == 1 {
                     let foot_pos =
                         Vec3::new(mid2.x, min_h + 0.14, mid2.y) + outward * (step * 0.58);
@@ -3253,19 +3819,22 @@ pub fn build_world_terrain_meshes(
                         Vec3::new(0.32, 0.22, 0.28),
                         cell_seed.wrapping_add(89),
                     );
-                    emit_meadow_grass_clump(
-                        &mut grass_lush,
-                        Vec3::new(foot_pos.x, min_h, foot_pos.z) + outward * 0.22,
-                        1.32,
-                        cell_seed.wrapping_add(97),
-                    );
                 }
             } else if !is_cliff && !inside_bldg {
                 // Low rocky spur outcrops emerging through the grass on moderate ridge slopes
                 // (like the foreground rock seam in `ref.jpg`)
-                if mid_h > 0.18 && mid_h < 1.15 && cell_n.y < 0.92 && (ix + iz) % 3 == 0 && path_dist > 0.72 {
+                if mid_h > 0.18
+                    && mid_h < 1.15
+                    && cell_n.y < 0.92
+                    && (ix + iz) % 3 == 0
+                    && path_dist > 0.72
+                {
                     let slope_out = Vec3::new(cell_n.x, 0.0, cell_n.z).normalize_or_zero();
-                    let outward = if slope_out == Vec3::ZERO { Vec3::Z } else { slope_out };
+                    let outward = if slope_out == Vec3::ZERO {
+                        Vec3::Z
+                    } else {
+                        slope_out
+                    };
                     let right = Vec3::new(-outward.z, 0.0, outward.x);
                     emit_faceted_boulder(
                         &mut rock_light,
@@ -3278,7 +3847,8 @@ pub fn build_world_terrain_meshes(
                     );
                 }
 
-                // 3. Dense 3D Meadow Grass Clumps & Wildflowers (`ref.jpg` foreground & hilltop)
+                // 3. Wildflowers & clover patches (`ref.jpg` foreground & hilltop).
+                // Meadow grass rendering was removed; flowers and clover stay.
                 if path_dist > 0.52 {
                     let jx = (hash_f32(cell_seed.wrapping_add(3)) - 0.5) * step * 0.75;
                     let jz = (hash_f32(cell_seed.wrapping_add(9)) - 0.5) * step * 0.75;
@@ -3299,31 +3869,7 @@ pub fn build_world_terrain_meshes(
                         lush_scale *= 1.22;
                     }
 
-                    let grass_target = if (ix + iz) % 2 == 0 {
-                        &mut grass_sun
-                    } else {
-                        &mut grass_lush
-                    };
-                    emit_meadow_grass_clump(grass_target, gpos, lush_scale, cell_seed);
-
-                    // Second offset sub-tuft in lush meadow zones for extra Tiny Glade density
-                    if lush_scale > 1.02 || gh > 0.5 {
-                        let sub_pt2 = mid2 - Vec2::new(jx * 0.7, jz * 0.7);
-                        let sub_h = world_terrain_height_at(sub_pt2, all_pieces);
-                        let other_grass = if (ix + iz) % 2 == 0 {
-                            &mut grass_lush
-                        } else {
-                            &mut grass_sun
-                        };
-                        emit_meadow_grass_clump(
-                            other_grass,
-                            Vec3::new(sub_pt2.x, sub_h, sub_pt2.y),
-                            lush_scale * 0.88,
-                            cell_seed.wrapping_add(151),
-                        );
-                    }
-
-                    // Natural wildflower & clover patches (~11% of grassy meadow cells)
+                    // Natural wildflower & clover patches (~11% of meadow cells)
                     let flower_noise = (gpt2.x * 0.38).sin() * (gpt2.y * 0.41).cos();
                     if flower_noise > 0.32 && hash_f32(cell_seed.wrapping_add(179)) > 0.42 {
                         let flower_target = if hash_f32(cell_seed.wrapping_add(191)) > 0.32 {
@@ -3380,21 +3926,6 @@ pub fn build_world_terrain_meshes(
                 rock_light.push_quad(v00, v01, v11, v10, n);
             } else {
                 turf.push_quad(v00, v01, v11, v10, n);
-                let cell_seed = ((iz * 97 + ix * 41) as u32).wrapping_add(777);
-                if (ix + iz) % 3 == 0 && mid2.length() < 90.0 {
-                    let mh = (h00 + h10 + h11 + h01) * 0.25;
-                    let target = if (ix + iz) % 4 == 0 {
-                        &mut grass_sun
-                    } else {
-                        &mut grass_lush
-                    };
-                    emit_meadow_grass_clump(
-                        target,
-                        Vec3::new(mid2.x, mh, mid2.y),
-                        1.15,
-                        cell_seed,
-                    );
-                }
             }
         }
     }
@@ -3409,14 +3940,12 @@ pub fn build_world_terrain_meshes(
     );
 
     // 6. Climbing ivy vines on stone towers and rooms
-    emit_building_ivy(all_pieces, &mut grass_lush, &mut grass_clover);
+    emit_building_ivy(all_pieces, &mut grass_clover);
 
     WorldTerrainMeshes {
         turf: turf.finish(),
         rock_light: rock_light.finish(),
         rock_dark: rock_dark.finish(),
-        grass_sun: grass_sun.finish(),
-        grass_lush: grass_lush.finish(),
         grass_clover: grass_clover.finish(),
         flower_yellow: flower_yellow.finish(),
         flower_white: flower_white.finish(),
@@ -3464,10 +3993,7 @@ pub fn world_terrain_elevated_collider(all_pieces: &[Piece]) -> (Vec<Vec3>, Vec<
 
 /// Compute a 64-bit reactive signature for the unified world terrain so it
 /// rebuilds only when sculpted terrain, building footprints, or paths change.
-pub fn compute_world_terrain_signature(
-    all_pieces: &[Piece],
-    path_polylines: &[Vec<Vec2>],
-) -> u64 {
+pub fn compute_world_terrain_signature(all_pieces: &[Piece], path_polylines: &[Vec<Vec2>]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     0x7E44_A190_u64.hash(&mut hasher);
     for p in all_pieces {
@@ -3741,10 +4267,7 @@ pub fn collect_tower_door_cutters(
                 let w1 = local_to_world_2d(piece, seg.p1);
                 if let Some((t, _)) = segment_intersection_2d(w0, w1, pair[0], pair[1]) {
                     let hit_local = seg.p0.lerp(seg.p1, t);
-                    if cutters
-                        .iter()
-                        .all(|(c, _, _)| c.distance(hit_local) > 0.85)
-                    {
+                    if cutters.iter().all(|(c, _, _)| c.distance(hit_local) > 0.85) {
                         cutters.push((hit_local, 1.05, 1.85));
                     }
                 }
@@ -4147,6 +4670,115 @@ fn build_building_walls(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// True when a `glade_wall` should drape over `glade_terrain` hills instead
+/// of staying on a flat elevated platform/roof.
+pub fn wall_follows_terrain(piece: &Piece, all_pieces: &[Piece], world_pts: &[Vec2]) -> bool {
+    if piece.elevation <= 0.05 {
+        return true;
+    }
+    world_pts
+        .iter()
+        .any(|&pt| world_terrain_height_at(pt, all_pieces).abs() > 0.05)
+}
+
+/// World-space base Y elevation of a `glade_wall` at `world_pt`, following hills
+/// when the wall is on or crosses terrain.
+pub fn wall_surface_y_at(
+    piece: &Piece,
+    world_pt: Vec2,
+    all_pieces: &[Piece],
+    spine: Option<&[Vec2]>,
+) -> f32 {
+    let follows = match spine {
+        Some(pts) if !pts.is_empty() => wall_follows_terrain(piece, all_pieces, pts),
+        _ => wall_follows_terrain(piece, all_pieces, &[piece.pos, world_pt]),
+    };
+    if follows {
+        world_terrain_height_at(world_pt, all_pieces)
+    } else {
+        piece.elevation
+    }
+}
+
+fn emit_sloped_wall_segment(
+    stone: &mut MeshBuf,
+    p0: Vec2,
+    p1: Vec2,
+    y0_bot: f32,
+    y0_top: f32,
+    y1_bot: f32,
+    y1_top: f32,
+    right: Vec3,
+    outward: Vec3,
+    thick: f32,
+    corner_start: bool,
+    corner_end: bool,
+) {
+    let half_t = thick * 0.5;
+    let off = outward * half_t;
+    let a0 = Vec3::new(p0.x, y0_bot, p0.y);
+    let a1 = Vec3::new(p1.x, y1_bot, p1.y);
+    let b0 = Vec3::new(p0.x, y0_top, p0.y);
+    let b1 = Vec3::new(p1.x, y1_top, p1.y);
+
+    // Front (+outward) and back (-outward) faces
+    stone.push_quad(a0 + off, a1 + off, b1 + off, b0 + off, outward);
+    stone.push_quad(a1 - off, a0 - off, b0 - off, b1 - off, -outward);
+
+    // Sloped top and bottom caps
+    let slope_dir = (b1 - b0).normalize_or_zero();
+    let top_n = outward.cross(slope_dir).normalize_or_zero();
+    let top_n = if top_n.y < 0.0 { -top_n } else { top_n };
+    let top_n = if top_n == Vec3::ZERO { Vec3::Y } else { top_n };
+    stone.push_quad(b0 + off, b1 + off, b1 - off, b0 - off, top_n);
+    stone.push_quad(a0 - off, a1 - off, a1 + off, a0 + off, -top_n);
+
+    if corner_start {
+        stone.push_quad(a0 - off, a0 + off, b0 + off, b0 - off, -right);
+    }
+    if corner_end {
+        stone.push_quad(a1 + off, a1 - off, b1 - off, b1 + off, right);
+    }
+}
+
+fn emit_sloped_coping_stones(
+    buf: &mut MeshBuf,
+    p0: Vec2,
+    p1: Vec2,
+    y0: f32,
+    y1: f32,
+    right: Vec3,
+    outward: Vec3,
+    cap_width: f32,
+    seed: u32,
+) {
+    let seg_vec = p1 - p0;
+    let seg_len = seg_vec.length();
+    if seg_len < 0.1 {
+        return;
+    }
+    let count = (seg_len / 0.34).round().max(1.0) as usize;
+    let step = seg_len / count as f32;
+    let start = Vec3::new(p0.x, y0, p0.y);
+    let end = Vec3::new(p1.x, y1, p1.y);
+    let slope_up = Vec3::Y;
+    for i in 0..count {
+        let t = (i as f32 + 0.5) / count as f32;
+        let center = start.lerp(end, t) + Vec3::Y * 0.04;
+        let s = seed.wrapping_add(i as u32 * 29);
+        let j = organic_jitter(center, s);
+        buf.push_oriented_box(
+            center + Vec3::Y * (j.y * 0.4),
+            right,
+            slope_up,
+            outward,
+            Vec3::new(step * 0.47, 0.055 + j.x.abs() * 0.4, cap_width * 0.5),
+            s,
+            0.45,
+        );
+    }
+}
+
 fn build_free_wall_mesh(
     piece: &Piece,
     shape: &Shape,
@@ -4175,10 +4807,30 @@ fn build_free_wall_mesh(
         vec![Vec2::new(-half_len, 0.0), Vec2::new(half_len, 0.0)]
     };
 
+    let world_points: Vec<Vec2> = local_points
+        .iter()
+        .map(|&lp| local_to_world_2d(piece, lp))
+        .collect();
+    let follows_terrain = wall_follows_terrain(piece, all_pieces, &world_points);
+    let local_ys: Vec<f32> = world_points
+        .iter()
+        .map(|&wp| {
+            if follows_terrain {
+                world_terrain_height_at(wp, all_pieces) - piece.elevation
+            } else {
+                0.0
+            }
+        })
+        .collect();
+
     let num_segs = local_points.len().saturating_sub(1);
     for (seg_idx, pair) in local_points.windows(2).enumerate() {
         let p0 = pair[0];
         let p1 = pair[1];
+        let y0 = local_ys[seg_idx];
+        let y1 = local_ys[seg_idx + 1];
+        let mid_y = (y0 + y1) * 0.5;
+        let skirt = if follows_terrain { 0.35 } else { 0.0 };
         let seg_vec = p1 - p0;
         let seg_len = seg_vec.length();
         if seg_len < 0.05 {
@@ -4193,8 +4845,8 @@ fn build_free_wall_mesh(
             p0,
             p1,
             normal: normal_2d,
-            base_y: 0.0,
-            top_y: height,
+            base_y: mid_y - skirt,
+            top_y: mid_y + height,
             corner_start: seg_idx == 0,
             corner_end: seg_idx + 1 == num_segs,
             seam_start: seg_idx > 0,
@@ -4205,28 +4857,46 @@ fn build_free_wall_mesh(
         let openings = compute_arch_openings(piece, &seg, all_pieces, path_polylines);
         let window_openings = compute_window_openings(piece, &seg, all_pieces);
 
-        // Front, back, and end caps of the thick wall segment with arch & window cutouts.
-        emit_thick_wall_with_arches(
-            stone,
-            &seg,
-            right,
-            outward,
-            thick,
-            &openings,
-            &window_openings,
-            details,
-            seg_seed,
-        );
+        if openings.is_empty() && window_openings.is_empty() && (y1 - y0).abs() > 0.015 {
+            emit_sloped_wall_segment(
+                stone,
+                p0,
+                p1,
+                y0 - skirt,
+                y0 + height,
+                y1 - skirt,
+                y1 + height,
+                right,
+                outward,
+                thick,
+                seg.corner_start,
+                seg.corner_end,
+            );
+        } else {
+            // Front, back, and end caps of the thick wall segment with arch & window cutouts.
+            emit_thick_wall_with_arches(
+                stone,
+                &seg,
+                right,
+                outward,
+                thick,
+                &openings,
+                &window_openings,
+                details,
+                seg_seed,
+            );
+        }
 
-        // Fill a cylindrical stone joint post at interior curve bends so curved
-        // walls look seamlessly connected at every vertex.
+        // Fill a stone joint post at interior curve bends so curved
+        // walls look seamlessly connected at every vertex on flat ground and hills.
         if seg_idx > 0 {
+            let post_h = height + skirt;
             stone.push_oriented_box(
-                Vec3::new(p0.x, height * 0.5, p0.y),
+                Vec3::new(p0.x, y0 - skirt + post_h * 0.5, p0.y),
                 right,
                 Vec3::Y,
                 outward,
-                Vec3::new(thick * 0.48, height * 0.5, thick * 0.48),
+                Vec3::new(thick * 0.48, post_h * 0.5, thick * 0.48),
                 seg_seed.wrapping_add(5),
                 0.25,
             );
@@ -4235,11 +4905,12 @@ fn build_free_wall_mesh(
         match tier {
             WallTier::LowFence => {
                 if details {
-                    emit_coping_stones(
+                    emit_sloped_coping_stones(
                         stone,
                         seg.p0,
                         seg.p1,
-                        height,
+                        y0 + height,
+                        y1 + height,
                         right,
                         outward,
                         thick * 1.15,
@@ -4249,11 +4920,12 @@ fn build_free_wall_mesh(
             }
             WallTier::StandardWall => {
                 if details {
-                    emit_coping_stones(
+                    emit_sloped_coping_stones(
                         roof,
                         seg.p0,
                         seg.p1,
-                        height,
+                        y0 + height,
+                        y1 + height,
                         right,
                         outward,
                         thick * 1.18,
@@ -4262,7 +4934,7 @@ fn build_free_wall_mesh(
                     if seg.corner_start {
                         emit_quoin_column(
                             stone,
-                            Vec3::new(p0.x, 0.0, p0.y),
+                            Vec3::new(p0.x, y0, p0.y),
                             height,
                             right,
                             outward,
@@ -4273,7 +4945,7 @@ fn build_free_wall_mesh(
                     if seg.corner_end {
                         emit_quoin_column(
                             stone,
-                            Vec3::new(p1.x, 0.0, p1.y),
+                            Vec3::new(p1.x, y1, p1.y),
                             height,
                             -right,
                             outward,
@@ -4289,10 +4961,11 @@ fn build_free_wall_mesh(
                 let step = merlon_len + gap;
                 let count = (seg_len / step).floor().max(1.0) as usize;
                 let actual_step = seg_len / count as f32;
-                let start_3d = Vec3::new(p0.x, 0.0, p0.y);
+                let start_3d = Vec3::new(p0.x, y0, p0.y);
+                let end_3d = Vec3::new(p1.x, y1, p1.y);
                 for i in 0..count {
-                    let u = (i as f32 + 0.5) * actual_step;
-                    let base_m = start_3d + right * u;
+                    let t = (i as f32 + 0.5) * actual_step / seg_len;
+                    let base_m = start_3d.lerp(end_3d, t);
                     stone.push_oriented_box(
                         base_m + Vec3::Y * (height + 0.18),
                         right,
@@ -4315,6 +4988,140 @@ fn build_free_wall_mesh(
                     }
                 }
             }
+        }
+    }
+}
+
+fn build_stairs_mesh(
+    piece: &Piece,
+    shape: &Shape,
+    spine: Option<&[Vec2]>,
+    details: bool,
+    seed: u32,
+    stone: &mut MeshBuf,
+) {
+    let ext = piece_extents(piece, shape);
+    let half_len = ext.x * 0.5;
+    let total_rise = ext.y;
+    let half_w = ext.z * 0.5;
+
+    let local_points: Vec<Vec2> = if let Some(world_pts) = spine.filter(|pts| pts.len() >= 2) {
+        world_pts
+            .iter()
+            .map(|&wp| world_to_local_2d(piece, wp))
+            .collect()
+    } else {
+        vec![Vec2::new(-half_len, 0.0), Vec2::new(half_len, 0.0)]
+    };
+
+    let mut cum = Vec::with_capacity(local_points.len());
+    cum.push(0.0_f32);
+    for pair in local_points.windows(2) {
+        let prev = *cum.last().unwrap();
+        cum.push(prev + pair[0].distance(pair[1]));
+    }
+    let total_len = *cum.last().unwrap_or(&0.0);
+    if total_len < 0.05 {
+        return;
+    }
+
+    let sample_at = |dist: f32| -> (Vec2, Vec2) {
+        let d = dist.clamp(0.0, total_len);
+        for i in 0..local_points.len() - 1 {
+            let d0 = cum[i];
+            let d1 = cum[i + 1];
+            if d <= d1 || i + 2 == local_points.len() {
+                let span = (d1 - d0).max(1e-5);
+                let u = ((d - d0) / span).clamp(0.0, 1.0);
+                let pos = local_points[i].lerp(local_points[i + 1], u);
+                let tan = (local_points[i + 1] - local_points[i]).normalize_or(Vec2::X);
+                return (pos, tan);
+            }
+        }
+        (local_points[0], Vec2::X)
+    };
+
+    let num_steps = (total_len / 0.30).round().clamp(3.0, 48.0) as usize;
+    let curb_w = 0.14;
+    let curb_h = 0.22;
+
+    for k in 0..num_steps {
+        let t0 = k as f32 / num_steps as f32;
+        let t1 = (k + 1) as f32 / num_steps as f32;
+        let (p0, tan0) = sample_at(total_len * t0);
+        let (p1, tan1) = sample_at(total_len * t1);
+        let n0 = Vec2::new(-tan0.y, tan0.x);
+        let n1 = Vec2::new(-tan1.y, tan1.x);
+
+        let y_prev = total_rise * t0;
+        let y_top = total_rise * t1;
+        let forward = Vec3::new(tan0.x, 0.0, tan0.y);
+        let side_mid =
+            Vec3::new((n0.x + n1.x) * 0.5, 0.0, (n0.y + n1.y) * 0.5).normalize_or(Vec3::Z);
+
+        let l0 = p0 - n0 * half_w;
+        let r0 = p0 + n0 * half_w;
+        let l1 = p1 - n1 * half_w;
+        let r1 = p1 + n1 * half_w;
+
+        let tl0 = Vec3::new(l0.x, y_top, l0.y);
+        let tr0 = Vec3::new(r0.x, y_top, r0.y);
+        let tl1 = Vec3::new(l1.x, y_top, l1.y);
+        let tr1 = Vec3::new(r1.x, y_top, r1.y);
+
+        // Tread top
+        stone.push_quad(tl0, tr0, tr1, tl1, Vec3::Y);
+
+        // Step riser
+        let rl0 = Vec3::new(l0.x, y_prev, l0.y);
+        let rr0 = Vec3::new(r0.x, y_prev, r0.y);
+        stone.push_quad(rl0, rr0, tr0, tl0, -forward);
+
+        // Solid masonry sides down to y = 0
+        let bl0 = Vec3::new(l0.x, 0.0, l0.y);
+        let bl1 = Vec3::new(l1.x, 0.0, l1.y);
+        let br0 = Vec3::new(r0.x, 0.0, r0.y);
+        let br1 = Vec3::new(r1.x, 0.0, r1.y);
+        stone.push_quad(bl0, bl1, tl1, tl0, -side_mid);
+        stone.push_quad(br1, br0, tr0, tr1, side_mid);
+
+        // Bottom & end caps
+        stone.push_quad(bl0, br0, br1, bl1, Vec3::NEG_Y);
+        if k + 1 == num_steps {
+            stone.push_quad(br1, bl1, tl1, tr1, Vec3::new(tan1.x, 0.0, tan1.y));
+        }
+
+        // Low chiseled stone side curbs framing the curved staircase
+        if details {
+            let step_len = p0.distance(p1).max(0.08);
+            let mid_l = Vec3::new(
+                (l0.x + l1.x) * 0.5,
+                y_top + curb_h * 0.5,
+                (l0.y + l1.y) * 0.5,
+            ) - side_mid * (curb_w * 0.5);
+            let mid_r = Vec3::new(
+                (r0.x + r1.x) * 0.5,
+                y_top + curb_h * 0.5,
+                (r0.y + r1.y) * 0.5,
+            ) + side_mid * (curb_w * 0.5);
+            stone.push_oriented_box(
+                mid_l,
+                forward,
+                Vec3::Y,
+                side_mid,
+                Vec3::new(step_len * 1.04, curb_h, curb_w),
+                seed.wrapping_add(k as u32 * 31),
+                0.25,
+            );
+            stone.push_oriented_box(
+                mid_r,
+                forward,
+                Vec3::Y,
+                side_mid,
+                Vec3::new(step_len * 1.04, curb_h, curb_w),
+                seed.wrapping_add(k as u32 * 37 + 11),
+                0.25,
+            );
         }
     }
 }
@@ -4380,18 +5187,8 @@ fn emit_wall_face_with_arches(
     }
 
     emit_wall_openings_spans(
-        stone,
-        origin,
-        right,
-        outward,
-        seg.base_y,
-        seg.top_y,
-        seg_len,
-        wall_depth,
-        openings,
-        windows,
-        details,
-        seed,
+        stone, origin, right, outward, seg.base_y, seg.top_y, seg_len, wall_depth, openings,
+        windows, details, seed,
     );
 }
 
@@ -4708,7 +5505,8 @@ fn emit_archway_span(
         let b_a0 = f_a0 + back_offset;
         let b_a1 = f_a1 + back_offset;
         let mid_angle = (a0 + a1) * 0.5;
-        let inward_normal = (-right * mid_angle.cos() - Vec3::Y * mid_angle.sin()).normalize_or_zero();
+        let inward_normal =
+            (-right * mid_angle.cos() - Vec3::Y * mid_angle.sin()).normalize_or_zero();
         stone.push_quad(f_a1, f_a0, b_a0, b_a1, inward_normal);
 
         // Decorative voussoir arch stones & prominent central keystone
@@ -4757,10 +5555,7 @@ fn emit_quoin_column(
             0.16
         };
         let cy = (i as f32 + 0.5) * actual_h;
-        let center = base_pos
-            + Vec3::Y * cy
-            + inward_tangent * (len * 0.42)
-            + outward * 0.025;
+        let center = base_pos + Vec3::Y * cy + inward_tangent * (len * 0.42) + outward * 0.025;
         stone.push_oriented_box(
             center,
             inward_tangent,
@@ -4854,12 +5649,8 @@ fn build_conical_roof(
             let p01 = Vec3::new(a0.cos() * rx1, y1, a0.sin() * rz1);
 
             let mid_a = (a0 + a1) * 0.5;
-            let normal = Vec3::new(
-                mid_a.cos() * rise,
-                (r_x + r_z) * 0.5,
-                mid_a.sin() * rise,
-            )
-            .normalize_or_zero();
+            let normal = Vec3::new(mid_a.cos() * rise, (r_x + r_z) * 0.5, mid_a.sin() * rise)
+                .normalize_or_zero();
 
             if ring + 1 == rings {
                 roof.push_tri([p00, p10, Vec3::new(0.0, y1, 0.0)], normal);
@@ -5456,7 +6247,11 @@ pub fn build_glade_modular_kit_meshes() -> Vec<(String, &'static str, Mesh)> {
                 seed + 17,
                 0.35,
             );
-            items.push((frame_name.to_owned(), "Mat_Glade_Brick_Dressed", frame.finish()));
+            items.push((
+                frame_name.to_owned(),
+                "Mat_Glade_Brick_Dressed",
+                frame.finish(),
+            ));
 
             let mut glass = MeshBuf::default();
             glass.push_quad(
@@ -5667,14 +6462,27 @@ mod tests {
     fn overlapping_rooms_cull_interior_walls_and_merge_footprints() {
         let room_shape = &shapes()[model::shape_index("glade_room").unwrap()];
         // Single isolated 4x4 room has 4 exposed perimeter wall segments (total length 16m).
-        let a = make_glade_piece(1, "glade_room", Vec2::new(-1.0, 0.0), Vec3::new(4.0, 2.6, 4.0));
+        let a = make_glade_piece(
+            1,
+            "glade_room",
+            Vec2::new(-1.0, 0.0),
+            Vec3::new(4.0, 2.6, 4.0),
+        );
         let solo_segs = compute_exposed_wall_segments(&a, room_shape, &[a]);
         let solo_len: f32 = solo_segs.iter().map(ExposedWallSegment::length).sum();
-        assert!((solo_len - 16.0).abs() < 0.05, "solo perimeter = {solo_len}");
+        assert!(
+            (solo_len - 16.0).abs() < 0.05,
+            "solo perimeter = {solo_len}"
+        );
 
         // Place an overlapping 4x4 room shifted +2m in X (overlapping by 2m).
         // The internal wall portions inside the overlap must be culled!
-        let b = make_glade_piece(2, "glade_room", Vec2::new(1.0, 0.0), Vec3::new(4.0, 2.6, 4.0));
+        let b = make_glade_piece(
+            2,
+            "glade_room",
+            Vec2::new(1.0, 0.0),
+            Vec3::new(4.0, 2.6, 4.0),
+        );
         let all = [a, b];
         let exposed_a = compute_exposed_wall_segments(&a, room_shape, &all);
         let exposed_b = compute_exposed_wall_segments(&b, room_shape, &all);
@@ -5705,14 +6513,21 @@ mod tests {
     fn taller_tower_overlapping_shorter_room_keeps_its_upper_facade() {
         let tower_shape = &shapes()[model::shape_index("glade_tower").unwrap()];
         let tower = make_glade_piece(1, "glade_tower", Vec2::ZERO, Vec3::new(2.4, 4.5, 2.4));
-        let room = make_glade_piece(2, "glade_room", Vec2::new(1.0, 0.0), Vec3::new(3.6, 2.2, 3.6));
+        let room = make_glade_piece(
+            2,
+            "glade_room",
+            Vec2::new(1.0, 0.0),
+            Vec3::new(3.6, 2.2, 3.6),
+        );
         let all = [tower, room];
 
         let tower_segs = compute_exposed_wall_segments(&tower, tower_shape, &all);
         // Segments inside the room footprint should start at the room's roof base (y = 2.2)
         // rather than being culled all the way to the top!
         assert!(
-            tower_segs.iter().any(|s| (s.base_y - 2.2).abs() < 0.05 && (s.top_y - 4.5).abs() < 0.05),
+            tower_segs
+                .iter()
+                .any(|s| (s.base_y - 2.2).abs() < 0.05 && (s.top_y - 4.5).abs() < 0.05),
             "tower rising out of shorter room keeps its upper facade: {tower_segs:?}"
         );
     }
@@ -5758,7 +6573,12 @@ mod tests {
         let window_shape = &shapes()[model::shape_index("glade_window").unwrap()];
 
         let room = make_glade_piece(1, "glade_room", Vec2::ZERO, Vec3::new(5.2, 4.2, 4.0));
-        let tower = make_glade_piece(2, "glade_tower", Vec2::new(8.0, 0.0), Vec3::new(2.8, 3.6, 2.8));
+        let tower = make_glade_piece(
+            2,
+            "glade_tower",
+            Vec2::new(8.0, 0.0),
+            Vec3::new(2.8, 3.6, 2.8),
+        );
         let room_meshes = build_glade_meshes(&room, room_shape, &[room], &[]);
         let tower_meshes = build_glade_meshes(&tower, tower_shape, &[tower], &[]);
 
@@ -5830,9 +6650,18 @@ mod tests {
         );
 
         let win_meshes = build_glade_meshes(&win, window_shape, &[room, win], &[]);
-        assert!(vertex_count(&win_meshes.glass) > 0, "glade_window emits glass");
-        assert!(vertex_count(&win_meshes.stone) > 0, "glade_window emits stone frame");
-        assert!(vertex_count(&win_meshes.roof) > 0, "glade_window emits timber lintel & mullions");
+        assert!(
+            vertex_count(&win_meshes.glass) > 0,
+            "glade_window emits glass"
+        );
+        assert!(
+            vertex_count(&win_meshes.stone) > 0,
+            "glade_window emits stone frame"
+        );
+        assert!(
+            vertex_count(&win_meshes.roof) > 0,
+            "glade_window emits timber lintel & mullions"
+        );
     }
 
     #[test]
@@ -5865,7 +6694,10 @@ mod tests {
             .iter()
             .map(|seg| compute_arch_openings(&room, seg, &[room, door], &[]).len())
             .sum();
-        assert_eq!(total_openings, 1, "glade_door cuts an archway in the room wall");
+        assert_eq!(
+            total_openings, 1,
+            "glade_door cuts an archway in the room wall"
+        );
 
         // And the door itself builds stone jambs/voussoirs and wooden leaves.
         let door_meshes = build_glade_meshes(&door, door_shape, &[room, door], &[]);
@@ -5873,7 +6705,12 @@ mod tests {
         assert!(vertex_count(&door_meshes.roof) > 12);
 
         // Placing a door on a cylindrical tower also carves an archway cutout into the tower wall!
-        let tower = make_glade_piece(3, "glade_tower", Vec2::new(6.0, 0.0), Vec3::new(2.4, 4.0, 2.4));
+        let tower = make_glade_piece(
+            3,
+            "glade_tower",
+            Vec2::new(6.0, 0.0),
+            Vec3::new(2.4, 4.0, 2.4),
+        );
         let tower_door = make_glade_piece(
             4,
             "glade_door",
@@ -5901,8 +6738,7 @@ mod tests {
             Vec2::new(1.2, 1.2),
             Vec2::new(3.2, -0.4),
         ];
-        let curved =
-            build_glade_meshes_with_spine(&wall, wall_shape, &[wall], &[], Some(&spine));
+        let curved = build_glade_meshes_with_spine(&wall, wall_shape, &[wall], &[], Some(&spine));
 
         assert!(
             vertex_count(&curved.stone) > vertex_count(&straight.stone)
@@ -5949,8 +6785,12 @@ mod tests {
         );
         // Even if `piece.pos` (the y=0 projection) is far behind at z = -1.5, the 3D ray hits
         // the front wall at z = +1.5!
-        let far_ground_door =
-            make_glade_piece(2, "glade_door", Vec2::new(0.0, -1.5), default_size(door_shape));
+        let far_ground_door = make_glade_piece(
+            2,
+            "glade_door",
+            Vec2::new(0.0, -1.5),
+            default_size(door_shape),
+        );
         let (ray_pos, ray_rot) =
             snap_door_to_glade_wall_with_ray(&far_ground_door, &[tower], Some(ray), &[])
                 .expect("3D ray hits front tower wall");
@@ -5965,7 +6805,12 @@ mod tests {
         );
 
         // 3. Test snapping tangentially onto a diagonal segment of a curved path-following wall.
-        let wall = make_glade_piece(3, "glade_wall", Vec2::new(10.0, 0.0), Vec3::new(3.0, 2.4, 0.36));
+        let wall = make_glade_piece(
+            3,
+            "glade_wall",
+            Vec2::new(10.0, 0.0),
+            Vec3::new(3.0, 2.4, 0.36),
+        );
         let spine = vec![Vec2::new(8.0, 0.0), Vec2::new(11.0, 3.0)]; // 45-degree segment
         let wall_door = make_glade_piece(
             4,
@@ -5973,13 +6818,9 @@ mod tests {
             Vec2::new(9.6, 1.4),
             default_size(door_shape),
         );
-        let (_, spine_rot) = snap_door_to_glade_wall_with_ray(
-            &wall_door,
-            &[wall],
-            None,
-            &[(wall.id, spine)],
-        )
-        .expect("snaps to diagonal spine wall");
+        let (_, spine_rot) =
+            snap_door_to_glade_wall_with_ray(&wall_door, &[wall], None, &[(wall.id, spine)])
+                .expect("snaps to diagonal spine wall");
         let expected_angle = std::f32::consts::FRAC_PI_4;
         assert!(
             (spine_rot - expected_angle).abs() < 1e-3,
@@ -6007,14 +6848,25 @@ mod tests {
         let has_floor_down = normals
             .iter()
             .any(|&[nx, ny, nz]| ny < -0.95 && nx.abs() < 0.1 && nz.abs() < 0.1);
-        assert!(has_floor_up, "interior floor must be visible with upward normals");
+        assert!(
+            has_floor_up,
+            "interior floor must be visible with upward normals"
+        );
         assert!(has_floor_down, "exterior floor must have downward normals");
 
         // Walls should have both outward and inward normals (e.g. +Z and -Z, +X and -X)
-        let has_wall_pos_z = normals.iter().any(|&[_nx, ny, nz]| nz > 0.95 && ny.abs() < 0.1);
-        let has_wall_neg_z = normals.iter().any(|&[_nx, ny, nz]| nz < -0.95 && ny.abs() < 0.1);
-        let has_wall_pos_x = normals.iter().any(|&[nx, ny, _nz]| nx > 0.95 && ny.abs() < 0.1);
-        let has_wall_neg_x = normals.iter().any(|&[nx, ny, _nz]| nx < -0.95 && ny.abs() < 0.1);
+        let has_wall_pos_z = normals
+            .iter()
+            .any(|&[_nx, ny, nz]| nz > 0.95 && ny.abs() < 0.1);
+        let has_wall_neg_z = normals
+            .iter()
+            .any(|&[_nx, ny, nz]| nz < -0.95 && ny.abs() < 0.1);
+        let has_wall_pos_x = normals
+            .iter()
+            .any(|&[nx, ny, _nz]| nx > 0.95 && ny.abs() < 0.1);
+        let has_wall_neg_x = normals
+            .iter()
+            .any(|&[nx, ny, _nz]| nx < -0.95 && ny.abs() < 0.1);
 
         assert!(
             has_wall_pos_z && has_wall_neg_z,
@@ -6027,7 +6879,8 @@ mod tests {
     }
 
     #[test]
-    fn glade_terrain_supports_adjustable_dimensions_doubled_height_and_slope_to_cliff_transitions() {
+    fn glade_terrain_supports_adjustable_dimensions_doubled_height_and_slope_to_cliff_transitions()
+    {
         let terrain_shape = &shapes()[model::shape_index("glade_terrain").unwrap()];
         assert_eq!(glade_kind(terrain_shape), Some(GladeKind::Terrain));
 
@@ -6042,7 +6895,10 @@ mod tests {
         let mid_slope_h = terrain_height_at(Vec2::new(2.2, 0.0), &[gentle]);
         let outside_h = terrain_height_at(Vec2::new(5.0, 0.0), &[gentle]);
         assert!((center_h - 2.8).abs() < 0.2, "center_h = {center_h}");
-        assert!(mid_slope_h > 0.3 && mid_slope_h < center_h, "mid_slope_h = {mid_slope_h}");
+        assert!(
+            mid_slope_h > 0.3 && mid_slope_h < center_h,
+            "mid_slope_h = {mid_slope_h}"
+        );
         assert_eq!(outside_h, 0.0);
 
         // 2. Steep cliff plateau with doubled height range (height = 16.0m, falloff alpha = 0.90)
@@ -6095,25 +6951,22 @@ mod tests {
 
         // Place a room perched on the sloped hillside of chunk_a: its walls must extend
         // a battered stone foundation skirt below y = 0.0 down to meet the terrain slope!
-        let mut hillside_room =
-            make_glade_piece(3, "glade_room", Vec2::new(0.2, 0.0), Vec3::new(3.0, 2.4, 2.6));
-        hillside_room.elevation = terrain_height_at(hillside_room.pos, &[chunk_a]);
-        let room_meshes = build_glade_meshes(
-            &hillside_room,
-            room_shape,
-            &[chunk_a, hillside_room],
-            &[],
+        let mut hillside_room = make_glade_piece(
+            3,
+            "glade_room",
+            Vec2::new(0.2, 0.0),
+            Vec3::new(3.0, 2.4, 2.6),
         );
+        hillside_room.elevation = terrain_height_at(hillside_room.pos, &[chunk_a]);
+        let room_meshes =
+            build_glade_meshes(&hillside_room, room_shape, &[chunk_a, hillside_room], &[]);
         let positions = room_meshes
             .stone
             .attribute(Mesh::ATTRIBUTE_POSITION)
             .expect("positions")
             .as_float3()
             .expect("float3");
-        let min_local_y = positions
-            .iter()
-            .map(|p| p[1])
-            .fold(f32::INFINITY, f32::min);
+        let min_local_y = positions.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
         assert!(
             min_local_y < -0.15,
             "hillside building extends stone foundation skirt below y=0 (min_local_y = {min_local_y})"
@@ -6126,16 +6979,14 @@ mod tests {
         let tower_shape = &shapes()[model::shape_index("glade_tower").unwrap()];
 
         // Standard cottage room has no automatic windows (`glass` == 0)
-        let normal_room =
-            make_glade_piece(1, "glade_room", Vec2::ZERO, Vec3::new(3.6, 2.6, 3.0));
+        let normal_room = make_glade_piece(1, "glade_room", Vec2::ZERO, Vec3::new(3.6, 2.6, 3.0));
         assert!(!is_tent_house(&normal_room, room_shape));
         let normal_meshes = build_glade_meshes(&normal_room, room_shape, &[normal_room], &[]);
         assert_eq!(vertex_count(&normal_meshes.glass), 0);
 
         // Squash the room's wall height down to 0.25m (<= TENT_MAX_WALL_HEIGHT):
         // it transforms into a tent-like A-frame house!
-        let tent_room =
-            make_glade_piece(1, "glade_room", Vec2::ZERO, Vec3::new(3.6, 0.25, 3.0));
+        let tent_room = make_glade_piece(1, "glade_room", Vec2::ZERO, Vec3::new(3.6, 0.25, 3.0));
         assert!(is_tent_house(&tent_room, room_shape));
         let tent_meshes = build_glade_meshes(&tent_room, room_shape, &[tent_room], &[]);
 
@@ -6170,19 +7021,19 @@ mod tests {
         );
 
         // Circular tower also supports tent/pavilion mode when squashed down
-        let tent_tower =
-            make_glade_piece(2, "glade_tower", Vec2::ZERO, Vec3::new(2.8, 0.20, 2.8));
+        let tent_tower = make_glade_piece(2, "glade_tower", Vec2::ZERO, Vec3::new(2.8, 0.20, 2.8));
         assert!(is_tent_house(&tent_tower, tower_shape));
         let tower_meshes = build_glade_meshes(&tent_tower, tower_shape, &[tent_tower], &[]);
         assert_eq!(vertex_count(&tower_meshes.glass), 0);
     }
 
     #[test]
-    fn world_terrain_generates_continuous_meadow_faceted_cliff_boulders_3d_grass_flowers_paths_and_stairs() {
-        // Central clearing stays level at 0.0 across the expanded 10x flat
-        // buildable area (r <= FLAT_CLEARING_RADIUS) while the built-in Tiny
-        // Glade hillside rises in the (-X, -Z) quadrant at (-7.6, -6.8).
+    fn world_terrain_generates_continuous_meadow_faceted_cliff_boulders_3d_grass_flowers_paths_and_stairs()
+     {
+        // Central clearing stays level at 0.0 across the entire flat
+        // buildable area (r <= FLAT_CLEARING_RADIUS).
         assert!((base_meadow_height_at(Vec2::ZERO)).abs() < 1e-4);
+        assert!((base_meadow_height_at(Vec2::new(-7.6, -6.8))).abs() < 1e-4);
         assert!((base_meadow_height_at(Vec2::new(6.0, 0.0))).abs() < 1e-4);
         assert!((base_meadow_height_at(Vec2::new(30.0, 0.0))).abs() < 1e-4);
         assert!((base_meadow_height_at(Vec2::new(0.0, 48.0))).abs() < 1e-4);
@@ -6190,29 +7041,33 @@ mod tests {
             base_meadow_height_at(Vec2::new(75.0, 0.0)) > 0.5,
             "outer hills rise beyond FLAT_CLEARING_RADIUS"
         );
-        let hill_h = base_meadow_height_at(Vec2::new(-7.6, -6.8));
         assert!(
-            hill_h > 2.0,
-            "built-in scenic plateau hillside rises above 2m (got {hill_h})"
+            compute_world_terrain_paths(&[], &[]).is_empty(),
+            "empty level has no automatic path blobs"
         );
 
-        // Place a stone tower on the hilltop plateau and a sculpted terrain ridge
-        let mut tower = make_glade_piece(
-            1,
-            "glade_tower",
-            Vec2::new(-7.6, -6.8),
-            Vec3::new(2.8, 4.2, 2.8),
-        );
-        tower.elevation = world_terrain_height_at(tower.pos, &[]);
+        // Place a sculpted terrain ridge, a stone tower on top of it, and a user-authored path
         let custom_ridge = make_glade_piece(
             2,
             "glade_terrain",
             Vec2::new(4.0, -5.0),
             Vec3::new(11.0, 2.8, 11.0),
         );
+        let mut tower = make_glade_piece(
+            1,
+            "glade_tower",
+            Vec2::new(4.0, -5.0),
+            Vec3::new(2.8, 4.2, 2.8),
+        );
+        tower.elevation = world_terrain_height_at(tower.pos, &[custom_ridge]);
         let pieces = vec![tower, custom_ridge];
+        let user_paths = vec![vec![
+            Vec2::new(-1.0, -2.0),
+            Vec2::new(1.5, -3.5),
+            Vec2::new(4.0, -5.0),
+        ]];
 
-        let world_meshes = build_world_terrain_meshes(&pieces, &[]);
+        let world_meshes = build_world_terrain_meshes(&pieces, &user_paths);
         assert!(
             vertex_count(&world_meshes.turf) > 5_000,
             "continuous 88m x 88m world turf mesh is generated"
@@ -6223,10 +7078,8 @@ mod tests {
             "steep cliff slopes and talus emit multi-faceted 3D angular rock boulders"
         );
         assert!(
-            vertex_count(&world_meshes.grass_sun) > 2_000
-                && vertex_count(&world_meshes.grass_lush) > 1_500
-                && vertex_count(&world_meshes.grass_clover) > 200,
-            "dense 3D grass blades, clover rosettes, and tower ivy are generated across meadow & plateau"
+            vertex_count(&world_meshes.grass_clover) > 200,
+            "clover rosettes and tower ivy are generated across meadow & plateau"
         );
         assert!(
             vertex_count(&world_meshes.flower_yellow) > 100
@@ -6252,7 +7105,12 @@ mod tests {
         let door_shape = &shapes()[model::shape_index("glade_door").unwrap()];
 
         // Place a building on an elevated plateau away from the built-in hillside path
-        let mut room = make_glade_piece(1, "glade_room", Vec2::new(14.0, 14.0), Vec3::new(3.6, 2.6, 3.0));
+        let mut room = make_glade_piece(
+            1,
+            "glade_room",
+            Vec2::new(14.0, 14.0),
+            Vec3::new(3.6, 2.6, 3.0),
+        );
         room.elevation = 2.4;
 
         // Placing a building must NOT spawn an automatic path attached to it
@@ -6282,7 +7140,8 @@ mod tests {
             room.elevation
         );
 
-        let mut placed_door = make_glade_piece(2, "glade_door", snapped_pos, default_size(door_shape));
+        let mut placed_door =
+            make_glade_piece(2, "glade_door", snapped_pos, default_size(door_shape));
         placed_door.rot = snapped_rot;
         placed_door.elevation = wall_elev;
 
@@ -6294,6 +7153,185 @@ mod tests {
         assert_eq!(
             openings, 1,
             "door cuts an open archway into the elevated building wall"
+        );
+    }
+
+    #[test]
+    fn glade_tree_generates_distinct_procedural_species_with_vertex_colored_bark_and_foliage() {
+        let tree_idx = model::shape_index("glade_tree").expect("glade_tree shape registered");
+        let tree_shape = &shapes()[tree_idx];
+        assert_eq!(glade_kind(tree_shape), Some(GladeKind::Tree));
+        assert!(tree_shape.is_glade());
+
+        for (style_shape, expected_style) in [
+            (TriggerShape::Box, GladeTreeStyle::Broadleaf),
+            (TriggerShape::Cylinder, GladeTreeStyle::Pine),
+            (TriggerShape::Sphere, GladeTreeStyle::Birch),
+        ] {
+            let mut tree = make_glade_piece(
+                10,
+                "glade_tree",
+                Vec2::new(2.0, -3.0),
+                Vec3::new(4.0, 6.5, 4.0),
+            );
+            tree.trigger_shape_override = style_shape;
+            tree.trigger_color = DEFAULT_TREE_COLOR;
+            assert_eq!(tree_style(&tree), expected_style);
+
+            let parts = build_glade_meshes(&tree, tree_shape, &[tree], &[]);
+            assert!(
+                parts.stone.count_vertices() > 24,
+                "{:?} trunk/branches should have substantial vertices",
+                expected_style
+            );
+            assert!(
+                parts.roof.count_vertices() > 60,
+                "{:?} foliage canopy should have substantial vertices",
+                expected_style
+            );
+            assert!(
+                parts.stone.attribute(Mesh::ATTRIBUTE_COLOR).is_some(),
+                "{:?} bark mesh should carry vertex colors",
+                expected_style
+            );
+            assert!(
+                parts.roof.attribute(Mesh::ATTRIBUTE_COLOR).is_some(),
+                "{:?} foliage mesh should carry vertex colors",
+                expected_style
+            );
+
+            // Verify all vertex positions are finite and foliage reaches near target height.
+            let roof_pos = parts
+                .roof
+                .attribute(Mesh::ATTRIBUTE_POSITION)
+                .unwrap()
+                .as_float3()
+                .unwrap();
+            let max_y = roof_pos
+                .iter()
+                .map(|p| p[1])
+                .fold(f32::NEG_INFINITY, f32::max);
+            assert!(
+                max_y >= 5.0 && max_y <= 8.5,
+                "{:?} canopy top {max_y} should match requested height ~6.5",
+                expected_style
+            );
+        }
+
+        // Tall tree vs short tree scales geometry appropriately
+        let short_tree = make_glade_piece(11, "glade_tree", Vec2::ZERO, Vec3::new(2.0, 2.5, 2.0));
+        let tall_tree = make_glade_piece(12, "glade_tree", Vec2::ZERO, Vec3::new(6.0, 12.0, 6.0));
+        let short_parts = build_glade_meshes(&short_tree, tree_shape, &[short_tree], &[]);
+        let tall_parts = build_glade_meshes(&tall_tree, tree_shape, &[tall_tree], &[]);
+        let short_max_y = short_parts
+            .roof
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap()
+            .iter()
+            .map(|p| p[1])
+            .fold(0.0_f32, f32::max);
+        let tall_max_y = tall_parts
+            .roof
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap()
+            .iter()
+            .map(|p| p[1])
+            .fold(0.0_f32, f32::max);
+        assert!(
+            tall_max_y > short_max_y * 2.5,
+            "tall tree ({tall_max_y}) should be much taller than short tree ({short_max_y})"
+        );
+
+        // Foliage defaults to lush green rather than terracotta roof color
+        let default_tree = make_glade_piece(13, "glade_tree", Vec2::ZERO, default_size(tree_shape));
+        assert_eq!(
+            roof_color(&default_tree),
+            model::trigger_color_to_bevy(DEFAULT_TREE_COLOR)
+        );
+
+        // Tall slender trees keep rounded foliage proportions instead of stretching vertically.
+        for style_shape in [
+            TriggerShape::Box,
+            TriggerShape::Cylinder,
+            TriggerShape::Sphere,
+        ] {
+            let mut slender_tall =
+                make_glade_piece(14, "glade_tree", Vec2::ZERO, Vec3::new(3.6, 14.0, 3.6));
+            slender_tall.trigger_shape_override = style_shape;
+            let parts = build_glade_meshes(&slender_tall, tree_shape, &[slender_tall], &[]);
+            let roof_pos = parts
+                .roof
+                .attribute(Mesh::ATTRIBUTE_POSITION)
+                .unwrap()
+                .as_float3()
+                .unwrap();
+            let min_y = roof_pos.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+            let max_y = roof_pos
+                .iter()
+                .map(|p| p[1])
+                .fold(f32::NEG_INFINITY, f32::max);
+            assert!(
+                max_y >= 11.5 && max_y <= 15.0,
+                "{style_shape:?} tall tree top {max_y} should reach near 14.0"
+            );
+            assert!(
+                min_y >= 2.0,
+                "{style_shape:?} tall tree canopy base {min_y} should sit above the lower trunk"
+            );
+        }
+    }
+
+    #[test]
+    fn glade_wall_follows_curved_bezier_spine_over_terrain_hills() {
+        let wall_shape = &shapes()[model::shape_index("glade_wall").unwrap()];
+        let terrain_shape = &shapes()[model::shape_index("glade_terrain").unwrap()];
+        assert_eq!(glade_kind(wall_shape), Some(GladeKind::Wall));
+        assert_eq!(glade_kind(terrain_shape), Some(GladeKind::Terrain));
+
+        let hill = make_glade_piece(
+            1,
+            "glade_terrain",
+            Vec2::new(0.0, 0.0),
+            Vec3::new(10.0, 4.0, 10.0),
+        );
+        let wall = make_glade_piece(
+            2,
+            "glade_wall",
+            Vec2::new(0.0, 0.0),
+            Vec3::new(14.0, 2.2, 0.36),
+        );
+        let spine = vec![
+            Vec2::new(-8.0, 0.0),
+            Vec2::new(-3.0, 1.5),
+            Vec2::new(0.0, 0.0),
+            Vec2::new(3.0, -1.5),
+            Vec2::new(8.0, 0.0),
+        ];
+
+        let hill_h = world_terrain_height_at(Vec2::ZERO, &[hill]);
+        assert!(hill_h > 2.5, "hill should rise significantly ({hill_h})");
+
+        let parts =
+            build_glade_meshes_with_spine(&wall, wall_shape, &[hill, wall], &[], Some(&spine));
+        let pos = parts
+            .stone
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+        let max_y = pos.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max);
+        let min_y = pos.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+        assert!(
+            max_y >= hill_h + 1.8,
+            "wall top ({max_y}) should climb over the hill ({hill_h} + 2.2)"
+        );
+        assert!(
+            min_y <= 0.1,
+            "wall ends on flat ground ({min_y}) should stay grounded at ~0"
         );
     }
 }

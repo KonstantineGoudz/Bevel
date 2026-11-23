@@ -570,7 +570,7 @@ git commit -m "feat: run counter hud"
 
 **Interfaces:**
 - Produces: `game/scripts/build-web.sh` → `game/web/pkg/party_dungeon.js` + `party_dungeon_bg.wasm`, loadable from any static host with no server config.
-- Produces: `game/scripts/serve-web.sh` → the site on `http://localhost:8082/`.
+- Produces: `game/scripts/serve-web.sh` → the site on `http://localhost:6082/`.
 
 - [ ] **Step 1: Add the wasm target and the bindgen CLI**
 
@@ -612,7 +612,7 @@ wasm-bindgen \
   --out-dir web/pkg \
   --target web \
   target/wasm32-unknown-unknown/wasm-release/party_dungeon.wasm
-echo "Built web/pkg — serve with: python3 -m http.server 8082 -d web"
+echo "Built web/pkg — serve with: python3 -m http.server 6082 -d web"
 ```
 
 `chmod +x game/scripts/build-web.sh`.
@@ -621,9 +621,9 @@ echo "Built web/pkg — serve with: python3 -m http.server 8082 -d web"
 
 ```bash
 ./scripts/build-web.sh
-python3 -m http.server 8082 -d web &
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8082/            # 200
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8082/pkg/party_dungeon.js   # 200
+python3 -m http.server 6082 -d web &
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:6082/            # 200
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:6082/pkg/party_dungeon.js   # 200
 ```
 
 - [ ] **Step 5: Prove the paths are relative**
@@ -633,7 +633,7 @@ Expected: `0` for both files. Any absolute path here breaks the itch.io upload l
 
 - [ ] **Step 6: Check it in a browser**
 
-Open `http://localhost:8082/`, hold W. Expected: the capsule moves, the frame rate is stable, the console has no errors. WebGL2 is Bevy's default; do not add the `webgpu` feature for this slice.
+Open `http://localhost:6082/`, hold W. Expected: the capsule moves, the frame rate is stable, the console has no errors. WebGL2 is Bevy's default; do not add the `webgpu` feature for this slice.
 
 - [ ] **Step 7: Commit**
 
@@ -890,7 +890,7 @@ Pushing needs a remote. If there is none, leave the commit local and report that
 Sections, one command block each, with the prerequisites inline:
 
 - Desktop: `cargo run -p party-dungeon`
-- Web: `./scripts/build-web.sh` then `python3 -m http.server 8082 -d web`
+- Web: `./scripts/build-web.sh` then `python3 -m http.server 6082 -d web`
 - Android: the two commands from Task 8 plus `adb install`
 - iOS: `cd ios && make run` (macOS only)
 - Tests: `cargo test --workspace`

@@ -265,9 +265,53 @@ pub(super) fn tangent_hit(
     best.map(|(_, waypoint, side)| (waypoint, side))
 }
 
-/// Which mover waypoint/tangent handle is under a screen point, if any.
-/// Mover handles win while the Motion tool is armed on a selected piece with
-/// a path; indices double as handle ids.
+/// Whether mover/curve handles are live for the current selection: either the
+/// Motion tool is armed, or a `glade_wall`/`glade_path` is selected in an
+/// authoring mode with no placement tool armed.
+pub(super) fn mover_editing_active(editor: &Editor) -> bool {
+    if editor.actor_tool == Some(ActorTool::Platform) {
+        return true;
+    }
+    object_editing_allowed(editor.mode)
+        && editor.tool.is_none()
+        && editor.actor_tool.is_none()
+        && editor
+            .selection
+            .primary()
+            .and_then(|id| editor.pieces.iter().find(|p| p.id == id))
+            .is_some_and(movers::is_glade_curve_piece)
+}
+
+/// World-space Y height of a curve handle (`Waypoint`, `Tangent`, or `Insert`)
+/// for `piece` at `pt` and normalized curve progress `frac` (`0.0..=1.0`).
+/// Shared between `mover_handle_at`, `draw`, and `sync_bezier_control_meshes`
+/// so solid 3D handles and touch/mouse hit-testing stay aligned.
+pub(super) fn glade_curve_handle_y(
+    piece: &Piece,
+    shape: Option<&model::Shape>,
+    pieces: &[Piece],
+    track_pts: Option<&[Vec2]>,
+    pt: Vec2,
+    frac: f32,
+) -> f32 {
+    let is_wall = shape.is_some_and(|s| s.id == "glade_wall");
+    let is_stairs = shape.is_some_and(|s| s.id == "glade_stairs");
+    if is_wall {
+        let ext_y = crate::glade::piece_extents(piece, shape.unwrap()).y;
+        crate::glade::wall_surface_y_at(piece, pt, pieces, track_pts) + ext_y + 0.18
+    } else if is_stairs {
+        let ext_y = crate::glade::piece_extents(piece, shape.unwrap()).y;
+        piece.elevation + ext_y * frac + 0.22
+    } else if shape.is_some_and(|s| s.id == "glade_path") {
+        piece.elevation + 0.10
+    } else {
+        piece.elevation + 0.06
+    }
+}
+
+/// Which mover waypoint/tangent/insert handle is under a screen point, if any.
+/// Mover handles win while the Motion tool is armed or a Glade wall/path is
+/// selected; indices double as handle ids.
 pub(super) fn mover_handle_at(
     editor: &Editor,
     movers: &Movers,
@@ -276,7 +320,7 @@ pub(super) fn mover_handle_at(
     screen: Vec2,
     radius: f32,
 ) -> Option<PathHandle> {
-    if editor.actor_tool != Some(ActorTool::Platform) {
+    if !mover_editing_active(editor) {
         return None;
     }
     let id = editor.selection.primary()?;
@@ -285,10 +329,15 @@ pub(super) fn mover_handle_at(
         return None;
     }
     let piece = editor.pieces.iter().find(|p| p.id == id)?;
-    let y = piece.elevation + 0.06;
+    let shape = shapes().get(piece.shape);
+    let wp_count = mover.waypoints.len().max(2);
+    let track_pts = mover.track.as_ref().map(|t| t.points());
+    let y_at = |pt: Vec2, frac: f32| -> f32 {
+        glade_curve_handle_y(piece, shape, &editor.pieces, track_pts, pt, frac)
+    };
     let mut best: Option<(f32, PathHandle)> = None;
-    let mut consider = |screen_pos: Vec2, handle: PathHandle| {
-        let at = Vec3::new(screen_pos.x, y, screen_pos.y);
+    let mut consider = |screen_pos: Vec2, frac: f32, handle: PathHandle| {
+        let at = Vec3::new(screen_pos.x, y_at(screen_pos, frac), screen_pos.y);
         let Ok(target) = camera.world_to_viewport(camera_transform, at) else {
             return;
         };
@@ -303,11 +352,14 @@ pub(super) fn mover_handle_at(
     let controls = mover.controls();
     for (index, waypoint) in mover.waypoints.iter().enumerate() {
         let id = index as u32;
-        consider(waypoint.pos, PathHandle::Waypoint(id));
+        let frac = index as f32 / (wp_count - 1) as f32;
+        consider(waypoint.pos, frac, PathHandle::Waypoint(id));
         if let Some(ctrl) = controls.get(index) {
             if let Some(incoming) = ctrl.incoming {
+                let tan_frac = ((index as f32 - 0.33).max(0.0)) / (wp_count - 1) as f32;
                 consider(
                     incoming,
+                    tan_frac,
                     PathHandle::Tangent {
                         waypoint: id,
                         side: TangentSide::Incoming,
@@ -315,8 +367,11 @@ pub(super) fn mover_handle_at(
                 );
             }
             if let Some(outgoing) = ctrl.outgoing {
+                let tan_frac =
+                    ((index as f32 + 0.33).min((wp_count - 1) as f32)) / (wp_count - 1) as f32;
                 consider(
                     outgoing,
+                    tan_frac,
                     PathHandle::Tangent {
                         waypoint: id,
                         side: TangentSide::Outgoing,
@@ -334,7 +389,8 @@ pub(super) fn mover_handle_at(
         && let Some(waypoint) = mover.waypoints.get(selected)
     {
         let id = selected as u32;
-        let at = Vec3::new(waypoint.pos.x, y, waypoint.pos.y);
+        let frac = selected as f32 / (wp_count - 1) as f32;
+        let at = Vec3::new(waypoint.pos.x, y_at(waypoint.pos, frac), waypoint.pos.y);
         for axis in [Vec3::X, Vec3::Z] {
             let (Ok(a), Ok(b)) = (
                 camera.world_to_viewport(camera_transform, at - axis * MOVER_GIZMO_REACH),
@@ -347,6 +403,22 @@ pub(super) fn mover_handle_at(
                 if best.is_none_or(|(best_distance, _)| distance < best_distance) {
                     best = Some((distance, PathHandle::Waypoint(id)));
                 }
+            }
+        }
+    }
+    if best.is_none() {
+        for (segment, midpoint) in mover.midpoints().into_iter().enumerate() {
+            let frac = (segment as f32 + 0.5) / (wp_count - 1) as f32;
+            let at = Vec3::new(midpoint.x, y_at(midpoint, frac), midpoint.y);
+            let Ok(target) = camera.world_to_viewport(camera_transform, at) else {
+                continue;
+            };
+            if !within_radius(screen, target, radius) {
+                continue;
+            }
+            let distance = screen.distance(target);
+            if best.is_none_or(|(best_distance, _)| distance < best_distance) {
+                best = Some((distance, PathHandle::Insert { segment }));
             }
         }
     }
@@ -373,6 +445,10 @@ pub(super) fn select_mover_handle(
     let index = match handle {
         PathHandle::Waypoint(id) => id as usize,
         PathHandle::Tangent { waypoint, .. } => waypoint as usize,
+        PathHandle::Insert { segment } => {
+            editor.commit();
+            return movers::insert_mover_waypoint(editor, movers, segment).is_some();
+        }
     };
     let Some(id) = editor.selection.primary() else {
         return false;
@@ -394,10 +470,10 @@ pub(super) fn path_handle_at(
     touch_enabled: bool,
     orbit: &Orbit,
 ) -> Option<PathHandle> {
-    let radius = if touch_enabled { 24.0 } else { 10.0 };
-    // Motion handles belong to the selected piece's path and are only live
-    // while the Motion tool is armed.
-    if editor.actor_tool == Some(ActorTool::Platform) {
+    let radius = if touch_enabled { 40.0 } else { 14.0 };
+    // Mover handles belong to the selected piece's path and are live while the
+    // Motion tool is armed or a Glade wall/path is selected.
+    if mover_editing_active(editor) {
         return mover_handle_at(editor, movers, camera, camera_transform, screen, radius);
     }
     // Play can still reshape the route handles; object editing is what Play
@@ -463,6 +539,7 @@ pub(super) fn apply_path_drag(
                 filter,
             )
         }
+        PathHandle::Insert { .. } => false,
     }
 }
 

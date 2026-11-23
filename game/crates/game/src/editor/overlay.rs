@@ -35,6 +35,11 @@ pub(super) fn update_palette(
             PaletteAction::Grass => editor.actor_tool == Some(ActorTool::Grass),
             PaletteAction::GrassErase => editor.grass_erase,
             PaletteAction::GrassSlow => editor.grass_slows,
+            PaletteAction::GrassSize => editor.grass_brush_radius != 1,
+            PaletteAction::GrassDensity => editor.grass_brush_strength > 1,
+            PaletteAction::GrassClear => false,
+            PaletteAction::Vine => editor.actor_tool == Some(ActorTool::Vine),
+            PaletteAction::VineErase => editor.vine_erase,
             PaletteAction::Course => false,
             PaletteAction::CopyJson => false,
             PaletteAction::Home => false,
@@ -111,6 +116,20 @@ pub(super) fn sync_grass_actions(
     }
 }
 
+pub(super) fn sync_vine_actions(
+    editor: Res<Editor>,
+    mut row: Single<&mut Node, With<VineActions>>,
+) {
+    let display = if editor.actor_tool == Some(ActorTool::Vine) {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    if row.display != display {
+        row.display = display;
+    }
+}
+
 pub(super) fn update_status(
     editor: Res<Editor>,
     cursor: Res<Cursor>,
@@ -139,6 +158,7 @@ pub(super) fn update_status(
         Some(ActorTool::Plan) => "plan",
         Some(ActorTool::Platform) => "motion",
         Some(ActorTool::Grass) => "grass",
+        Some(ActorTool::Vine) => "vine",
         None => tool,
     };
 

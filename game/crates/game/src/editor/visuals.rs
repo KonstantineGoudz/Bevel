@@ -1,6 +1,7 @@
 //! visuals systems for the level editor.
 
 use super::*;
+use bevy_grass::prelude::{GrassField, GrassInteractor, GrassStyle};
 
 // ---------------------------------------------------------------------------
 // Visuals
@@ -63,7 +64,7 @@ pub(super) fn spawn_piece(
 
     if !ghost && shape.is_some_and(|s| matches!(s.id, "glade_terrain" | "glade_path")) {
         // The unified `WorldTerrainVisuals` renders the continuous 3D terrain
-        // surface, cliff boulders, grass, flowers, and paths across the whole
+        // surface, cliff boulders, clover, flowers, and paths across the whole
         // meadow, so placed `glade_terrain` / `glade_path` nodes need no per-piece mesh.
         return root;
     }
@@ -357,9 +358,7 @@ pub(super) fn sync_visuals(
         }
     }
 
-    if ghost_wanted
-        && let (Some(tool), Some(ghost)) = (editor.tool, editor.ghost)
-    {
+    if ghost_wanted && let (Some(tool), Some(ghost)) = (editor.tool, editor.ghost) {
         let piece = Piece {
             id: 0,
             shape: tool,
@@ -431,6 +430,10 @@ pub(super) fn sync_visuals(
                         // (which we move by hand, never by physics forces).
                         RigidBody::KinematicPositionBased,
                         collider,
+                        GrassInteractor {
+                            radius: 0.7,
+                            ..Default::default()
+                        },
                         transform,
                     ))
                     .id();
@@ -497,16 +500,15 @@ pub(super) fn sync_dynamic_pieces(
 pub(super) struct WorldTerrainRoot;
 
 /// Cached entities and materials for the continuous 3D world terrain,
-/// cliff boulders, 3D grass blades, clover, wildflowers, and paths/stairs.
+/// cliff boulders, clover, wildflowers, and paths/stairs.
 #[derive(Resource, Default)]
 pub(super) struct WorldTerrainVisuals {
     pub(super) root: Option<Entity>,
+    pub(super) grass_field: Option<Entity>,
     pub(super) signature: Option<u64>,
     pub(super) turf: Option<Handle<StandardMaterial>>,
     pub(super) rock_light: Option<Handle<StandardMaterial>>,
     pub(super) rock_dark: Option<Handle<StandardMaterial>>,
-    pub(super) grass_sun: Option<Handle<crate::grass_material::GrassMaterial>>,
-    pub(super) grass_lush: Option<Handle<crate::grass_material::GrassMaterial>>,
     pub(super) grass_clover: Option<Handle<StandardMaterial>>,
     pub(super) flower_yellow: Option<Handle<StandardMaterial>>,
     pub(super) flower_white: Option<Handle<StandardMaterial>>,
@@ -520,13 +522,10 @@ pub(super) fn sync_world_terrain(
     mut world_terrain: ResMut<WorldTerrainVisuals>,
     mut meshes: Option<ResMut<Assets<Mesh>>>,
     mut materials: Option<ResMut<Assets<StandardMaterial>>>,
-    mut grass_materials: Option<ResMut<Assets<crate::grass_material::GrassMaterial>>>,
+    mut styles: ResMut<Assets<GrassStyle>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
-    let (Some(meshes), Some(materials), Some(grass_materials)) = (
-        meshes.as_mut(),
-        materials.as_mut(),
-        grass_materials.as_mut(),
-    ) else {
+    let (Some(meshes), Some(materials)) = (meshes.as_mut(), materials.as_mut()) else {
         return;
     };
     let glade_paths = collect_glade_paths(&editor, &movers);
@@ -538,6 +537,9 @@ pub(super) fn sync_world_terrain(
 
     if let Some(old_root) = world_terrain.root.take() {
         commands.entity(old_root).despawn();
+    }
+    if let Some(old_field) = world_terrain.grass_field.take() {
+        commands.entity(old_field).despawn();
     }
 
     let turf_mat = world_terrain
@@ -572,38 +574,6 @@ pub(super) fn sync_world_terrain(
                 perceptual_roughness: 0.92,
                 metallic: 0.02,
                 ..default()
-            })
-        })
-        .clone();
-    let grass_sun_mat = world_terrain
-        .grass_sun
-        .get_or_insert_with(|| {
-            grass_materials.add(crate::grass_material::GrassMaterial {
-                base: StandardMaterial {
-                    base_color: Color::srgb_u8(0x98, 0xb8, 0x42),
-                    perceptual_roughness: 0.84,
-                    metallic: 0.01,
-                    double_sided: true,
-                    cull_mode: None,
-                    ..default()
-                },
-                extension: crate::grass_material::GrassExt::meadow_sun(),
-            })
-        })
-        .clone();
-    let grass_lush_mat = world_terrain
-        .grass_lush
-        .get_or_insert_with(|| {
-            grass_materials.add(crate::grass_material::GrassMaterial {
-                base: StandardMaterial {
-                    base_color: Color::srgb_u8(0x6b, 0x94, 0x34),
-                    perceptual_roughness: 0.86,
-                    metallic: 0.01,
-                    double_sided: true,
-                    cull_mode: None,
-                    ..default()
-                },
-                extension: crate::grass_material::GrassExt::meadow_lush(),
             })
         })
         .clone();
@@ -661,11 +631,8 @@ pub(super) fn sync_world_terrain(
         .clone();
 
     let parts = crate::glade::build_world_terrain_meshes(&editor.pieces, &glade_paths);
-    let mut root_cmd = commands.spawn((
-        WorldTerrainRoot,
-        Transform::default(),
-        Visibility::Visible,
-    ));
+    let mut root_cmd =
+        commands.spawn((WorldTerrainRoot, Transform::default(), Visibility::Visible));
     let (verts, tris) = crate::glade::world_terrain_elevated_collider(&editor.pieces);
     if !tris.is_empty()
         && let Ok(collider) = Collider::trimesh(verts, tris)
@@ -688,15 +655,35 @@ pub(super) fn sync_world_terrain(
             .id();
         commands.entity(root).add_child(child);
     }
-    for (mesh, mat) in [
-        (parts.grass_sun, grass_sun_mat),
-        (parts.grass_lush, grass_lush_mat),
-    ] {
-        let child = commands
-            .spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(mat)))
-            .id();
-        commands.entity(root).add_child(child);
-    }
-
     world_terrain.root = Some(root);
+
+    // GPU grass field (bevy_grass) baked from the same terrain functions that
+    // built the meshes above, so blades sit on the sculpted ground. Bare
+    // inside building footprints, on cliffs, and along paths.
+    let pieces = &editor.pieces;
+    let field = GrassField::new(Vec2::splat(64.0), GrassStyle::MEADOW, &mut styles)
+        .with_ground_from_fn(&mut images, 0.5, |point| {
+            crate::glade::world_terrain_height_at(Vec2::new(point.x, point.y), pieces)
+        })
+        .with_density_from_fn(&mut images, 0.5, |point| {
+            let pt = Vec2::new(point.x, point.y);
+            let (inside, bldg_dist) = crate::glade::building_footprint_proximity(pt, pieces);
+            if inside {
+                return 0.0;
+            }
+            if crate::glade::world_terrain_normal_at(pt, pieces).y
+                < crate::glade::TERRAIN_CLIFF_NORMAL_Y
+            {
+                return 0.0;
+            }
+            if crate::glade::min_distance_to_polylines(pt, &glade_paths) < 0.68 {
+                return 0.0;
+            }
+            (bldg_dist / 0.7).clamp(0.0, 1.0)
+        });
+    world_terrain.grass_field = Some(
+        commands
+            .spawn((field, Transform::default(), Visibility::Visible))
+            .id(),
+    );
 }

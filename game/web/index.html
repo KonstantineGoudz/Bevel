@@ -71,6 +71,15 @@
         transition: transform 0.12s ease, background 0.15s ease, border-color 0.15s ease;
       }
       button:active { transform: translateY(1px); }
+      a.primary {
+        display: inline-block;
+        font: 600 14px/1 ui-sans-serif, system-ui, sans-serif;
+        letter-spacing: 0.02em;
+        padding: 14px 26px;
+        border-radius: 10px;
+        text-decoration: none;
+      }
+      a.primary:active { transform: translateY(1px); }
       .primary {
         background: var(--amber);
         color: #1a1305;
@@ -85,70 +94,6 @@
       button:focus-visible, a:focus-visible, input:focus-visible {
         outline: 2px solid var(--amber);
         outline-offset: 3px;
-      }
-      .maps-section { margin-top: 52px; }
-      .section-heading {
-        display: flex;
-        align-items: baseline;
-        justify-content: space-between;
-        gap: 16px;
-      }
-      .section-heading h2 {
-        margin: 0;
-        font-size: 20px;
-        letter-spacing: -0.02em;
-      }
-      .map-list {
-        list-style: none;
-        display: grid;
-        gap: 10px;
-        margin: 16px 0 0;
-        padding: 0;
-      }
-      .map-row {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 12px;
-        border: 1px solid var(--line);
-        border-radius: 12px;
-        background: color-mix(in srgb, var(--panel) 78%, transparent);
-      }
-      .map-link {
-        display: block;
-        flex: 1;
-        min-width: 0;
-        padding: 4px;
-        color: inherit;
-        text-decoration: none;
-        border-radius: 6px;
-      }
-      .map-link:hover .map-name { color: var(--amber); }
-      .map-name {
-        display: block;
-        overflow-wrap: anywhere;
-        font-weight: 650;
-        line-height: 1.35;
-      }
-      .map-details {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 4px 14px;
-        margin-top: 4px;
-        color: var(--muted);
-        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-      }
-      .map-actions { display: flex; flex-shrink: 0; gap: 8px; }
-      .map-actions button {
-        padding: 10px 12px;
-        font-size: 12px;
-      }
-      .empty-state, .list-error {
-        margin: 16px 0 0;
-        padding: 18px;
-        color: var(--muted);
-        border: 1px dashed #354154;
-        border-radius: 12px;
       }
       .list-error, .inline-error { color: #ff9b8e; }
       dialog {
@@ -265,58 +210,24 @@
       footer a { color: inherit; }
       @media (max-width: 520px) {
         main { padding: 48px 18px; }
-        .map-row { align-items: stretch; flex-direction: column; }
-        .map-actions { justify-content: flex-end; }
       }
     </style>
   </head>
   <body>
     <main>
-      <div class="kicker">Web build &middot; saved maps</div>
+      <div class="kicker">Web build &middot; one shared world</div>
       <h1>Party Dungeon</h1>
       <p class="lede">
-        Assemble a party of classes, portal into procedurally generated maps
-        stacked with verticality, and build a dungeon you can open to the
-        public.
+        One persistent world, one character per adventurer. Log in and the
+        sim streams you the live dungeon — no maps to juggle.
       </p>
       <div class="actions">
-        <button class="primary" id="new-map" type="button">New map</button>
+        <a class="primary" id="enter-world" href="./game.html">Enter the world</a>
         <button class="ghost" id="controls" type="button">Controls</button>
         <button class="ghost" id="view-model" type="button">Import &amp; view 3D model (Bevy)</button>
       </div>
-      <section class="maps-section" aria-labelledby="maps-title">
-        <div class="section-heading">
-          <h2 id="maps-title">Your maps</h2>
-        </div>
-        <ul class="map-list" id="map-list" aria-label="Your saved maps" hidden></ul>
-        <p class="empty-state" id="empty-state">No maps yet. Create a map to get started.</p>
-        <p class="list-error" id="list-error" role="alert" hidden></p>
-      </section>
-      <p class="note">Maps are saved in this browser. You can rename or delete them here.</p>
+      <p class="note">Your character persists across sessions. Tune controls here or in-game.</p>
     </main>
-    <dialog id="name-dialog" aria-labelledby="name-dialog-title">
-      <form id="name-form">
-        <h2 id="name-dialog-title">New map</h2>
-        <label for="map-name">Map name</label>
-        <input id="map-name" name="name" type="text" maxlength="120" autocomplete="off" />
-        <p class="inline-error" id="name-error" role="alert" aria-live="polite"></p>
-        <div class="dialog-actions">
-          <button class="ghost" id="name-cancel" type="button">Cancel</button>
-          <button class="primary" type="submit">Confirm</button>
-        </div>
-      </form>
-    </dialog>
-    <dialog id="delete-dialog" aria-labelledby="delete-dialog-title">
-      <form id="delete-form">
-        <h2 id="delete-dialog-title">Delete map?</h2>
-        <p>Delete <strong id="delete-map-name"></strong>? This cannot be undone.</p>
-        <p class="inline-error" id="delete-error" role="alert" aria-live="polite"></p>
-        <div class="dialog-actions">
-          <button class="ghost" id="delete-cancel" type="button">Cancel</button>
-          <button class="danger" type="submit">Delete</button>
-        </div>
-      </form>
-    </dialog>
     <dialog id="controls-dialog" class="wide" aria-labelledby="controls-dialog-title">
       <h2 id="controls-dialog-title">Controls</h2>
       <p class="control-hint">
@@ -334,314 +245,11 @@
     </dialog>
     <footer>
       <span>v0.1.0 &middot; built for web &middot; <a href="./game.html">editor build</a> &middot; <a href="./viewer-bevy.html?viewer=1">model viewer (Bevy)</a></span>
-      <span>localhost:8082</span>
+      <span>localhost:6082</span>
     </footer>
     <script type="module">
-      const INDEX_KEY = "party-dungeon.index.v1";
-      const SESSION_PREFIX = "party-dungeon.session.";
-      const SESSION_SUFFIX = ".v1";
-
-      class InvalidIndexError extends Error {}
-
-      const mapList = document.querySelector("#map-list");
-      const emptyState = document.querySelector("#empty-state");
-      const listError = document.querySelector("#list-error");
-      const nameDialog = document.querySelector("#name-dialog");
-      const nameForm = document.querySelector("#name-form");
-      const nameInput = document.querySelector("#map-name");
-      const nameTitle = document.querySelector("#name-dialog-title");
-      const nameSubmit = nameForm.querySelector('[type="submit"]');
-      const nameError = document.querySelector("#name-error");
-      const deleteDialog = document.querySelector("#delete-dialog");
-      const deleteMapName = document.querySelector("#delete-map-name");
-      const deleteError = document.querySelector("#delete-error");
-      let maps = [];
-      let nameDialogMode = "create";
-      let nameDialogMapId = null;
-      let deleteMapId = null;
-
-      function sessionKey(id) {
-        return `${SESSION_PREFIX}${id}${SESSION_SUFFIX}`;
-      }
-
-      function readRawIndex() {
-        const raw = localStorage.getItem(INDEX_KEY);
-        if (raw === null) return [];
-        let entries;
-        try {
-          entries = JSON.parse(raw);
-        } catch (error) {
-          throw new InvalidIndexError("Could not parse the saved map index.", { cause: error });
-        }
-        if (!Array.isArray(entries)) throw new InvalidIndexError("The saved map index is not an array.");
-        return entries;
-      }
-
-      function readIndex() {
-        let entries;
-        try {
-          entries = readRawIndex();
-        } catch (error) {
-          if (!(error instanceof InvalidIndexError)) throw error;
-          console.warn("Could not read the saved map index.", error);
-          return [];
-        }
-
-        return entries
-          .filter((entry, index) => {
-            if (
-              !entry ||
-              typeof entry.id !== "string" ||
-              entry.id.trim() === "" ||
-              typeof entry.name !== "string" ||
-              entry.name.trim() === "" ||
-              !Number.isFinite(entry.createdAt) ||
-              !Number.isFinite(entry.updatedAt)
-            ) {
-              console.warn(`Ignoring invalid saved map metadata at index ${index}:`, entry);
-              return false;
-            }
-            if (!Number.isInteger(entry.pieceCount) || entry.pieceCount < 0) {
-              console.warn(`Ignoring saved map ${entry.id}: pieceCount must be a non-negative integer.`);
-              return false;
-            }
-            if (localStorage.getItem(sessionKey(entry.id)) === null) {
-              console.warn(`Ignoring saved map ${entry.id}: its session data is missing.`);
-              return false;
-            }
-            return true;
-          })
-          .sort((a, b) => b.updatedAt - a.updatedAt);
-      }
-
-      function writeIndex(nextMaps) {
-        localStorage.setItem(INDEX_KEY, JSON.stringify(nextMaps));
-      }
-
-      function newId() {
-        try {
-          if (typeof globalThis.crypto?.randomUUID === "function") {
-            return globalThis.crypto.randomUUID();
-          }
-        } catch (error) {
-          console.warn("Could not generate a UUID; using a fallback map id.", error);
-        }
-        return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-      }
-
-      function formatUpdatedAt(timestamp) {
-        try {
-          return new Intl.DateTimeFormat(undefined, {
-            dateStyle: "medium",
-            timeStyle: "short",
-          }).format(new Date(timestamp));
-        } catch {
-          return "Unknown date";
-        }
-      }
-
-      function render() {
-        mapList.replaceChildren();
-        listError.hidden = true;
-        emptyState.hidden = maps.length !== 0;
-        mapList.hidden = maps.length === 0;
-
-        for (const map of maps) {
-          const item = document.createElement("li");
-          item.className = "map-row";
-
-          const link = document.createElement("a");
-          link.className = "map-link";
-          link.href = `./game.html?session=${encodeURIComponent(map.id)}`;
-
-          const mapName = document.createElement("span");
-          mapName.className = "map-name";
-          mapName.textContent = map.name;
-          link.append(mapName);
-
-          const details = document.createElement("span");
-          details.className = "map-details";
-          const updated = document.createElement("time");
-          updated.textContent = `Updated ${formatUpdatedAt(map.updatedAt)}`;
-          const date = new Date(map.updatedAt);
-          if (Number.isFinite(date.getTime())) updated.dateTime = date.toISOString();
-          const pieceCount = document.createElement("span");
-          const count = map.pieceCount;
-          pieceCount.textContent = `${new Intl.NumberFormat().format(count)} ${count === 1 ? "piece" : "pieces"}`;
-          details.append(updated, pieceCount);
-          link.append(details);
-
-          const actions = document.createElement("div");
-          actions.className = "map-actions";
-          const renameButton = document.createElement("button");
-          renameButton.type = "button";
-          renameButton.className = "ghost";
-          renameButton.textContent = "Rename";
-          renameButton.setAttribute("aria-label", `Rename ${map.name}`);
-          renameButton.addEventListener("click", () => openNameDialog("rename", map.id));
-          const deleteButton = document.createElement("button");
-          deleteButton.type = "button";
-          deleteButton.className = "ghost";
-          deleteButton.textContent = "Delete";
-          deleteButton.setAttribute("aria-label", `Delete ${map.name}`);
-          deleteButton.addEventListener("click", () => openDeleteDialog(map.id));
-          actions.append(renameButton, deleteButton);
-
-          item.append(link, actions);
-          mapList.append(item);
-        }
-      }
-
-      function openNameDialog(mode, id = null) {
-        nameDialogMode = mode;
-        nameDialogMapId = id;
-        const map = mode === "rename" ? maps.find((entry) => entry.id === id) : null;
-        if (mode === "rename" && !map) return;
-
-        nameTitle.textContent = mode === "create" ? "New map" : "Rename map";
-        nameSubmit.textContent = "Confirm";
-        nameInput.value = mode === "create" ? "Untitled map" : map.name;
-        nameError.textContent = "";
-        nameDialog.showModal();
-        nameInput.focus();
-        nameInput.select();
-      }
-
-      function createMap(name) {
-        const id = newId();
-        const timestamp = Date.now();
-        const map = { id, name, createdAt: timestamp, updatedAt: timestamp, pieceCount: 0 };
-        let nextMaps;
-        try {
-          nextMaps = [...readRawIndex(), map];
-        } catch (error) {
-          console.error("Could not read the map index.", error);
-          nameError.textContent = "Could not read the map list in browser storage. Please try again.";
-          return false;
-        }
-
-        try {
-          localStorage.setItem(sessionKey(id), JSON.stringify({ version: 1 }));
-        } catch (error) {
-          console.error("Could not create the map session.", error);
-          nameError.textContent = "Could not create the map in browser storage. Please try again.";
-          return false;
-        }
-
-        try {
-          writeIndex(nextMaps);
-        } catch (error) {
-          try {
-            localStorage.removeItem(sessionKey(id));
-          } catch (cleanupError) {
-            console.warn("Could not remove the unsaved map session.", cleanupError);
-          }
-          console.error("Could not save the map index.", error);
-          nameError.textContent = "Could not save the map list in browser storage. Please try again.";
-          return false;
-        }
-
-        window.location.assign(`./game.html?session=${encodeURIComponent(id)}`);
-        return true;
-      }
-
-      function renameMap(id, name) {
-        if (!maps.some((map) => map.id === id)) {
-          nameError.textContent = "This map is no longer available. Refresh the page and try again.";
-          return false;
-        }
-        let nextMaps;
-        try {
-          nextMaps = readRawIndex().map((map) => map?.id === id ? { ...map, name } : map);
-          if (!nextMaps.some((map) => map?.id === id)) {
-            nameError.textContent = "This map is no longer available. Refresh the page and try again.";
-            return false;
-          }
-          writeIndex(nextMaps);
-        } catch (error) {
-          console.error("Could not rename the map.", error);
-          nameError.textContent = "Could not save the new name in browser storage. Please try again.";
-          return false;
-        }
-        maps = maps.map((map) => map.id === id ? { ...map, name } : map);
-        render();
-        return true;
-      }
-
-      function deleteMap(id) {
-        let rawMaps;
-        let nextMaps;
-        let sessionState;
-        try {
-          rawMaps = readRawIndex();
-          if (!rawMaps.some((map) => map?.id === id)) {
-            deleteError.textContent = "This map is no longer available. Refresh the page and try again.";
-            return false;
-          }
-          nextMaps = rawMaps.filter((map) => map?.id !== id);
-          sessionState = localStorage.getItem(sessionKey(id));
-          writeIndex(nextMaps);
-        } catch (error) {
-          console.error("Could not update the map list.", error);
-          deleteError.textContent = "Could not save the map list in browser storage. Please try again.";
-          return false;
-        }
-
-        try {
-          localStorage.removeItem(sessionKey(id));
-        } catch (error) {
-          try {
-            if (sessionState !== null) localStorage.setItem(sessionKey(id), sessionState);
-            writeIndex(rawMaps);
-          } catch (rollbackError) {
-            console.warn("Could not fully restore the map after a failed delete.", rollbackError);
-          }
-          console.error("Could not delete the map session.", error);
-          deleteError.textContent = "Could not delete this map from browser storage. Please try again.";
-          return false;
-        }
-
-        maps = maps.filter((map) => map.id !== id);
-        render();
-        return true;
-      }
-
-      function openDeleteDialog(id) {
-        const map = maps.find((entry) => entry.id === id);
-        if (!map) return;
-        deleteMapId = id;
-        deleteMapName.textContent = map.name;
-        deleteError.textContent = "";
-        deleteDialog.showModal();
-      }
-
-      document.querySelector("#new-map").addEventListener("click", () => openNameDialog("create"));
       document.querySelector("#view-model").addEventListener("click", () => {
         window.location.assign("./viewer-bevy.html?viewer=1");
-      });
-      document.querySelector("#name-cancel").addEventListener("click", () => nameDialog.close());
-      nameForm.addEventListener("submit", (event) => {
-        event.preventDefault();
-        const name = nameInput.value.trim();
-        const characterCount = Array.from(name).length;
-        if (characterCount === 0) {
-          nameError.textContent = "Enter a map name.";
-          return;
-        }
-        if (characterCount > 60) {
-          nameError.textContent = "Map names must be 60 characters or fewer.";
-          return;
-        }
-
-        const saved = nameDialogMode === "create"
-          ? createMap(name)
-          : renameMap(nameDialogMapId, name);
-        if (saved) nameDialog.close();
-      });
-      document.querySelector("#delete-cancel").addEventListener("click", () => deleteDialog.close());
-      document.querySelector("#delete-form").addEventListener("submit", (event) => {
-        event.preventDefault();
-        if (deleteMap(deleteMapId)) deleteDialog.close();
       });
 
       // ---- Controls settings ----
@@ -1067,16 +675,6 @@
         controlsWarning.textContent = "Defaults restored.";
       });
       controlsDialog.addEventListener("close", () => cancelCapture());
-
-      try {
-        maps = readIndex();
-        render();
-      } catch (error) {
-        console.error("Could not read saved maps from browser storage.", error);
-        emptyState.hidden = true;
-        listError.textContent = "Saved maps could not be loaded from browser storage.";
-        listError.hidden = false;
-      }
     </script>
   </body>
 </html>

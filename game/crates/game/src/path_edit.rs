@@ -29,6 +29,7 @@ pub enum TangentSide {
 pub enum PathHandle {
     Waypoint(u32),
     Tangent { waypoint: u32, side: TangentSide },
+    Insert { segment: usize },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -260,6 +261,12 @@ impl Gesture {
     /// a tap selects without changing an automatic tangent.
     pub fn drag_target(&self) -> Option<PathDrag> {
         self.active.then_some(self.drag).flatten()
+    }
+
+    /// Pointer currently owning an active handle drag, if any (even before
+    /// crossing the tap movement threshold).
+    pub fn drag_pointer(&self) -> Option<PointerId> {
+        self.drag.map(|drag| drag.pointer)
     }
 
     pub fn screen(&self) -> Option<Vec2> {

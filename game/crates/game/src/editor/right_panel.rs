@@ -48,7 +48,11 @@ impl Default for RightPanelState {
 impl RightPanelState {
     pub(super) fn clamp_width(&self, width: f32, window_width: f32, touch: &TouchState) -> f32 {
         let s = if touch.enabled { touch.ui_scale } else { 1.0 };
-        let reserved_left = if touch.enabled { 40.0 } else { PANEL_WIDTH + 120.0 };
+        let reserved_left = if touch.enabled {
+            40.0
+        } else {
+            PANEL_WIDTH + 120.0
+        };
         let max_for_window = ((window_width / s) - reserved_left).max(RIGHT_PANEL_MIN_WIDTH);
         width.clamp(
             RIGHT_PANEL_MIN_WIDTH,
@@ -68,8 +72,13 @@ impl RightPanelState {
         } else {
             0.0
         };
-        let available = (window_height / s) - top - RIGHT_PANEL_HEADER_HEIGHT - RIGHT_PANEL_SPLITTER_HEIGHT - 16.0;
-        let max_h = (available - RIGHT_PANEL_MIN_SECTION_HEIGHT).max(RIGHT_PANEL_MIN_SECTION_HEIGHT);
+        let available = (window_height / s)
+            - top
+            - RIGHT_PANEL_HEADER_HEIGHT
+            - RIGHT_PANEL_SPLITTER_HEIGHT
+            - 16.0;
+        let max_h =
+            (available - RIGHT_PANEL_MIN_SECTION_HEIGHT).max(RIGHT_PANEL_MIN_SECTION_HEIGHT);
         height.clamp(RIGHT_PANEL_MIN_SECTION_HEIGHT, max_h)
     }
 }

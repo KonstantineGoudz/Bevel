@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Party Dungeon — open in app</title>
+    <style>
+      html, body {
+        margin: 0; min-height: 100%;
+        background: #0a0d12; color: #dfe8f0;
+        font: 16px/1.5 ui-monospace, Menlo, monospace;
+      }
+      main { max-width: 420px; margin: 0 auto; padding: 48px 20px; }
+      h1 { font-size: 22px; margin: 0 0 4px; }
+      p { color: #86a0b8; margin: 0 0 20px; }
+      label { display: block; margin: 12px 0 4px; color: #9aa7bb; }
+      input {
+        width: 100%; box-sizing: border-box;
+        padding: 12px; font-size: 17px; color: #eaf2f8;
+        background: #141b26; border: 1px solid #2a3a4f; border-radius: 8px;
+      }
+      button, a.big {
+        display: block; width: 100%; box-sizing: border-box;
+        margin-top: 18px; padding: 14px; text-align: center;
+        font-size: 17px; border-radius: 10px; text-decoration: none;
+        background: #e89b3d; color: #14100a; border: 0; font-weight: bold;
+      }
+      a.big { background: #3f7d4e; color: #fff; word-break: break-all; }
+      #error { color: #ff9a9a; margin-top: 12px; white-space: pre-wrap; }
+      #done { display: none; }
+      #done code { font-size: 12px; color: #6f8199; word-break: break-all; }
+      .hint { font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div id="form">
+        <h1>Party Dungeon</h1>
+        <p>Log in here, then open the session in the Android app — no typing on the phone keyboard needed.</p>
+        <label for="email">E-Mail</label>
+        <input id="email" type="email" autocomplete="email" />
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="current-password" />
+        <button id="go">Log in</button>
+        <div id="error"></div>
+      </div>
+      <div id="done">
+        <h1>Signed in</h1>
+        <p class="hint">Then in the app, tap <b>Paste login link</b> on the login form:</p>
+        <button id="copy" type="button">Copy app login link</button>
+        <div id="copied" class="hint"></div>
+        <p class="hint">The link carries a login token that expires like a normal session.</p>
+      </div>
+    </main>
+    <script type="module">
+      const $ = (id) => document.getElementById(id);
+      const fail = (m) => { $("error").textContent = m; };
+      $("go").addEventListener("click", async () => {
+        fail("");
+        const email = $("email").value.trim();
+        const password = $("password").value;
+        if (!email || !password) { fail("Enter both email and password."); return; }
+        let res;
+        try {
+          res = await fetch("./login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, password }),
+          });
+        } catch (e) {
+          fail(`Network error: ${e}`);
+          return;
+        }
+        let body = null;
+        try { body = await res.json(); } catch { /* fall through */ }
+        if (!res.ok || !body || !body.ok) {
+          fail((body && (body.error || body.message)) || `Login failed (HTTP ${res.status}).`);
+          return;
+        }
+        const token = body.token || {};
+        const id = token.id_token || body.id_token || "";
+        const refresh = token.refresh_token || body.refresh_token || "";
+        if (!id) { fail("Login succeeded but no identity token was issued."); return; }
+        // Display name for the app session label (best effort; the sim owns identity).
+        let name = email.split("@")[0];
+        const params = new URLSearchParams({
+          token: id,
+          refresh,
+          name,
+          exp: String(token.expires_in || body.expires_in || 1800),
+        });
+        const link = `partydungeon://login?${params.toString()}`;
+        window.__appLoginLink = link;
+        $("form").style.display = "none";
+        $("done").style.display = "block";
+      });
+      document.getElementById("copy").addEventListener("click", async () => {
+        const link = window.__appLoginLink || "";
+        const done = document.getElementById("copied");
+        try {
+          await navigator.clipboard.writeText(link);
+          done.textContent = "Copied — switch to the app and tap Paste login link.";
+        } catch (e) {
+          done.textContent = "Copy failed; long-press the link below to copy it manually.";
+          const a = document.createElement("a");
+          a.href = link;
+          a.textContent = "App login link";
+          done.appendChild(document.createElement("br"));
+          done.appendChild(a);
+        }
+      });
+    </script>
+  </body>
+</html>

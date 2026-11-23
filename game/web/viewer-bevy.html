@@ -39,7 +39,32 @@
     <pre id="error"></pre>
     <a id="back" href="./" hidden>Back to maps</a>
     <script type="module">
-      import init from "./pkg/party_dungeon.js";
+      // Build stamp and package location — the same contract as game.html: one
+      // immutable `pkg/<stamp>/` directory per build, chosen by the tiny
+      // `pkg/build.json` manifest (fetched `no-store`, so it is never stale).
+      // See web/nginx.conf and docs/web-caching.md.
+      const readBuildStamp = async () => {
+        try {
+          const response = await fetch("./pkg/build.json", { cache: "no-store" });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const manifest = await response.json();
+          if (typeof manifest?.build === "string" && manifest.build.length > 0) {
+            return manifest.build;
+          }
+          throw new Error("build.json has no build stamp");
+        } catch (error) {
+          console.warn("pkg/build.json unavailable; falling back to uncached paths.", error);
+          return null;
+        }
+      };
+
+      const bootViewer = async () => {
+        const build = await readBuildStamp();
+        const pkg = build ? `./pkg/${encodeURIComponent(build)}` : "./pkg";
+        const version = build ? "" : `?v=dev-${Date.now()}`;
+        const { default: init } = await import(`${pkg}/party_dungeon.js${version}`);
+        return init(`${pkg}/party_dungeon_bg.wasm${version}`);
+      };
 
       const showError = (message) => {
         const box = document.getElementById("error");
@@ -85,7 +110,7 @@
       packagedModelList()
         .then((models) => {
           window.__packagedModels = models;
-          return init();
+          return bootViewer();
         })
         .catch((err) => {
           showError(`Failed to start the Bevy viewer build:\n\n${err}`);

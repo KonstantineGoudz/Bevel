@@ -1,0 +1,85 @@
+name: party-dungeon
+
+# SurrealDB + Rauthy (self-hosted OIDC) for Party Dungeon.
+#
+#   cp .env.example .env        # set SURREAL_ROOT_PASS + DUNGEON_AUTH_PROVIDER=rauthy
+#   docker compose up -d        # surrealdb + rauthy on :6000/:6080
+#   ./scripts/bootstrap.sh      # renders schema.surql for your provider, loads it as root
+#
+# Storage is the embedded surrealkv engine on a named volume: replicated and
+# backed up per README.md ("Production" section). Nothing here is Swarm- or
+# Kubernetes-specific on purpose — see README for the K8s-later mapping
+# (env-driven config, stateless clients, CronJob exports).
+#
+# Swap the IdP without code change:
+#   DUNGEON_AUTH_PROVIDER=firebase  # + DUNGEON_FIREBASE_PROJECT_ID
+#   DUNGEON_AUTH_PROVIDER=oidc      # + DUNGEON_OIDC_ISSUER/AUDIENCE/JWKS_URL
+#   DUNGEON_AUTH_PROVIDER=rauthy    # self-hosted, default in .env.example
+#   DUNGEON_AUTH_PROVIDER=hs256     # local HS256, no external IdP
+
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v4.0.1
+    command:
+      - start
+      - surrealkv:///data/db
+      - --bind
+      - 0.0.0.0:6000
+      - --user
+      - ${SURREAL_ROOT_USER:-root}
+      - --password
+      - ${SURREAL_ROOT_PASS:?set SURREAL_ROOT_PASS in .env (dev default in .env.example)}
+    ports:
+      - "${SURREAL_PORT:-6000}:6000"
+    volumes:
+      - surreal-data:/data
+      - ./backups:/backups
+    env_file:
+      - .env
+    restart: unless-stopped
+    # Exec form (no shell in the image) + absolute binary path.
+    healthcheck:
+      test: ["CMD", "/surreal", "is-ready", "-e", "http://localhost:6000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  rauthy:
+    # Self-hosted OIDC — no code change to swap, just DUNGEON_AUTH_PROVIDER=rauthy.
+    # Uses hiqlite (embedded) so no external Postgres. See rauthy.cfg.example.
+    image: ghcr.io/sebadob/rauthy:0.30.0
+    ports:
+      - "${RAUTHY_PORT:-6080}:6080"
+    volumes:
+      - rauthy-data:/data
+      - ./rauthy.cfg:/app/rauthy.cfg:ro
+      # 0.30+ reads config.toml — mount the same file under both names.
+      - ./rauthy.cfg:/app/config.toml:ro
+    env_file:
+      - .env
+    environment:
+      PUB_URL: "${RAUTHY_PUB_URL}"
+      LISTEN_ADDRESS: "0.0.0.0"
+      LISTEN_PORT_HTTP: "6080"
+      LISTEN_SCHEME: "http"
+      PROXY_MODE: "true"
+      TRUSTED_PROXIES: "10.0.0.0/8\n172.16.0.0/12\n192.168.0.0/16"
+      ENC_KEYS: "${RAUTHY_ENC_KEYS}"
+      ENC_KEY_ACTIVE: "${RAUTHY_ENC_KEY_ACTIVE}"
+      RP_ID: "${RAUTHY_RP_ID}"
+      RP_ORIGIN: "${RAUTHY_RP_ORIGIN}"
+      HQL_SECRET_RAFT: "${RAUTHY_HQL_SECRET_RAFT}"
+      HQL_SECRET_API: "${RAUTHY_HQL_SECRET_API}"
+      HQL_DATA_DIR: "/data"
+      BOOTSTRAP_ADMIN_EMAIL: "${RAUTHY_ADMIN_EMAIL:-admin@party.dungeon}"
+      BOOTSTRAP_ADMIN_PASSWORD_PLAIN: "${RAUTHY_ADMIN_PASSWORD_PLAIN:-admin123}"
+    restart: unless-stopped
+    # No in-container healthcheck: distroless image has no shell/wget/curl.
+    # Check from the host: curl -s http://localhost:6080/auth/v1/health
+      timeout: 5s
+      retries: 10
+
+volumes:
+  surreal-data:
+  rauthy-data:

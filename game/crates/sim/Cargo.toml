@@ -1,0 +1,65 @@
+[package]
+name = "party-dungeon-sim"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Authoritative headless simulation for Party Dungeon: 60Hz Rapier world, WebRTC data channels, SurrealDB persistence."
+
+[features]
+default = []
+# Embedded `bevy_replicon` server path (replaces the legacy matchbox
+# HostNet/streaming path when the binary is run with DUNGEON_REPLICON=1).
+# Default OFF: the legacy path stays the production default and is untouched.
+replicon = [
+    "dep:bevy",
+    "dep:bevy_replicon",
+    "bevy_replicon/server",
+    "dep:party-dungeon-replication",
+    "party-dungeon-replication/server",
+    "dep:party-dungeon-repl-matchbox",
+    "party-dungeon-repl-matchbox/server",
+]
+
+[lib]
+name = "party_dungeon_sim"
+crate-type = ["lib"]
+
+[[bin]]
+name = "party-dungeon-sim"
+path = "src/main.rs"
+
+[dependencies]
+party-dungeon = { path = "../game" }
+party-dungeon-server = { path = "../server" }
+party-dungeon-net = { path = "../net" }
+rapier3d = "=0.36.1"
+bevy_math = "=0.20.0"
+# Minimal Bevy app for the embedded replicon server thread (feature `replicon`).
+# Bevy is already compiled with all features through `party-dungeon`; this keeps
+# the direct dependency set explicit for what the app actually uses.
+bevy = { version = "=0.20.0", default-features = false, features = ["std", "bevy_state", "bevy_log"], optional = true }
+bevy_replicon = { version = "0.45", default-features = false, optional = true }
+party-dungeon-replication = { path = "../replication", optional = true }
+party-dungeon-repl-matchbox = { path = "../repl_matchbox", optional = true }
+matchbox_socket = "0.15"
+matchbox_signaling = "0.15"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "net", "signal"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_urlencoded = "0.7"
+anyhow = "1"
+# Auth API (signup + login/refresh proxy). Rauthy is plain HTTP on the
+# internal compose network, so the proxy uses a small blocking client instead
+# of an HTTP/TLS stack.
+axum = "0.8"
+
+[dev-dependencies]
+# The `signal_probe` example can dial a `wss://` signaling URL; rustls 0.23
+# refuses to pick a CryptoProvider when more than one is linked, so the probe
+# installs one explicitly.
+rustls = "0.23"
+# In-memory replicon transport for the two-app tests (`--features replicon`).
+# A dev-dependency only: `testkit` (which implies server + client) must not be
+# compiled into the shipped server binary, so tests get the client plugin too.
+party-dungeon-repl-matchbox = { path = "../repl_matchbox", features = ["server", "testkit"] }

@@ -55,10 +55,7 @@ fn extract_raw_mesh(mesh: &Mesh) -> Option<RawMeshData> {
     };
     let uvs = match mesh.attribute(Mesh::ATTRIBUTE_UV_0) {
         Some(VertexAttributeValues::Float32x2(v)) if v.len() == positions.len() => v.clone(),
-        _ => positions
-            .iter()
-            .map(|p| [p[0] * 0.5, p[2] * 0.5])
-            .collect(),
+        _ => positions.iter().map(|p| [p[0] * 0.5, p[2] * 0.5]).collect(),
     };
     let indices = match mesh.indices() {
         Some(Indices::U32(idx)) if !idx.is_empty() => idx.clone(),
@@ -792,9 +789,11 @@ mod tests {
         let json_slice = &glb[20..20 + json_len];
 
         let bin_header_start = 20 + json_len;
-        let bin_len =
-            u32::from_le_bytes(glb[bin_header_start..bin_header_start + 4].try_into().unwrap())
-                as usize;
+        let bin_len = u32::from_le_bytes(
+            glb[bin_header_start..bin_header_start + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
         let bin_type = u32::from_le_bytes(
             glb[bin_header_start + 4..bin_header_start + 8]
                 .try_into()
@@ -940,6 +939,9 @@ mod tests {
         let assets_glb = manifest_dir.join("../../assets/glade_pieces_kit.glb");
         write_kit_glb(&assets_glb).expect("writing assets/glade_pieces_kit.glb should succeed");
         let meta = std::fs::metadata(&assets_glb).expect("glade_pieces_kit.glb exists on disk");
-        assert!(meta.len() > 50_000, "kit GLB should have substantial geometry");
+        assert!(
+            meta.len() > 50_000,
+            "kit GLB should have substantial geometry"
+        );
     }
 }

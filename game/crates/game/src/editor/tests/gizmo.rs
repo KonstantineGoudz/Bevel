@@ -865,7 +865,11 @@ fn glade_gizmo_handles_resize_width_length_height_and_roof_pitch() {
     };
 
     let handles = glade_handle_visuals(&start, room_shape);
-    assert_eq!(handles.len(), 6, "room has +X/-X width, +Z/-Z length, height, and roof pitch handles");
+    assert_eq!(
+        handles.len(),
+        6,
+        "room has +X/-X width, +Z/-Z length, height, and roof pitch handles"
+    );
 
     // Drag +X width handle outward by 0.5m -> width grows by 1.0m (from 3.2 to 4.2)
     let widened = dragged_piece(
@@ -964,18 +968,19 @@ fn glade_pieces_can_only_rotate_around_the_y_axis() {
     );
     assert_eq!(pitch_drag.pitch, 0.0, "Glade piece pitch must remain 0");
     assert_eq!(pitch_drag.roll, 0.0, "Glade piece roll must remain 0");
-    assert_eq!(pitch_drag.rot, start.rot, "Glade piece rot must remain untouched on pitch drag");
+    assert_eq!(
+        pitch_drag.rot, start.rot,
+        "Glade piece rot must remain untouched on pitch drag"
+    );
 
     // Roll handle drag must NOT tilt Glade objects
-    let roll_drag = dragged_piece(
-        start,
-        GizmoHandle::Roll,
-        origin + Vec3::X,
-        origin + Vec3::Y,
-    );
+    let roll_drag = dragged_piece(start, GizmoHandle::Roll, origin + Vec3::X, origin + Vec3::Y);
     assert_eq!(roll_drag.pitch, 0.0, "Glade piece pitch must remain 0");
     assert_eq!(roll_drag.roll, 0.0, "Glade piece roll must remain 0");
-    assert_eq!(roll_drag.rot, start.rot, "Glade piece rot must remain untouched on roll drag");
+    assert_eq!(
+        roll_drag.rot, start.rot,
+        "Glade piece rot must remain untouched on roll drag"
+    );
 
     // Yaw handle drag DOES rotate Glade objects around the Y axis
     let angle = 0.5_f32;
@@ -988,11 +993,17 @@ fn glade_pieces_can_only_rotate_around_the_y_axis() {
     );
     assert_eq!(yaw_drag.pitch, 0.0);
     assert_eq!(yaw_drag.roll, 0.0);
-    assert!((yaw_drag.rot - angle).abs() < 1e-4, "Glade piece rotates freely on Y axis (yaw)");
+    assert!(
+        (yaw_drag.rot - angle).abs() < 1e-4,
+        "Glade piece rotates freely on Y axis (yaw)"
+    );
 
     // set_piece_quat forces pitch and roll to 0 for Glade pieces
     let mut modified = start;
-    model::set_piece_quat(&mut modified, Quat::from_euler(bevy::math::EulerRot::XYZ, 0.4, 0.8, -0.3));
+    model::set_piece_quat(
+        &mut modified,
+        Quat::from_euler(bevy::math::EulerRot::XYZ, 0.4, 0.8, -0.3),
+    );
     assert_eq!(modified.pitch, 0.0, "pitch clamped to 0");
     assert_eq!(modified.roll, 0.0, "roll clamped to 0");
     assert!(modified.rot.abs() > 0.01, "yaw preserved");
@@ -1069,7 +1080,10 @@ fn glade_terrain_and_tent_houses_support_gizmo_reshaping_and_elevation_snapping(
 
     // Verify Rapier trimesh collider builds cleanly for `glade_terrain`
     let collider = piece_collider_for_glade(&terrain, terrain_shape, &[terrain], &[], None);
-    assert!(collider.is_some(), "glade_terrain generates a walkable 3D collider");
+    assert!(
+        collider.is_some(),
+        "glade_terrain generates a walkable 3D collider"
+    );
 
     // Verify continuous terrain brush stroke (`apply_terrain_brush_dab` + `finish_terrain_stroke`)
     // extends a large-scale plateau across a drag and lifts buildings sitting on it!
@@ -1093,8 +1107,16 @@ fn glade_terrain_and_tent_houses_support_gizmo_reshaping_and_elevation_snapping(
     });
     editor.next_id = 2;
 
-    assert!(apply_terrain_brush_dab(&mut editor, Vec2::new(0.0, 0.0), false));
-    assert!(apply_terrain_brush_dab(&mut editor, Vec2::new(3.2, 0.0), false));
+    assert!(apply_terrain_brush_dab(
+        &mut editor,
+        Vec2::new(0.0, 0.0),
+        false
+    ));
+    assert!(apply_terrain_brush_dab(
+        &mut editor,
+        Vec2::new(3.2, 0.0),
+        false
+    ));
     finish_terrain_stroke(&mut editor);
 
     let room_after = editor.pieces.iter().find(|p| p.id == 1).unwrap();
@@ -1109,15 +1131,15 @@ fn glade_terrain_and_tent_houses_support_gizmo_reshaping_and_elevation_snapping(
         "entire continuous terrain brush drag commits as a single undo step"
     );
 
-    // Shift+drag (`lower = true`) carves into the built-in hillside
-    let hill_pos = Vec2::new(-7.6, -6.8);
+    // Shift+drag (`lower = true`) carves into the built-in perimeter hills
+    let hill_pos = Vec2::new(75.0, 0.0);
     let before_hill = crate::glade::world_terrain_height_at(hill_pos, &editor.pieces);
     assert!(apply_terrain_brush_dab(&mut editor, hill_pos, true));
     finish_terrain_stroke(&mut editor);
     let after_hill = crate::glade::world_terrain_height_at(hill_pos, &editor.pieces);
     assert!(
         after_hill < before_hill - 0.5,
-        "lowering terrain brush carves into the built-in hillside ({before_hill} -> {after_hill})"
+        "lowering terrain brush carves into the built-in perimeter hills ({before_hill} -> {after_hill})"
     );
 }
 
@@ -1146,7 +1168,11 @@ fn glade_gizmo_provides_4_move_arrows_and_2_corner_rotation_arcs() {
     };
 
     let arrows = glade_move_arrows(&room, room_shape, false);
-    assert_eq!(arrows.len(), 4, "Glade building has 4 ground-plane move arrows");
+    assert_eq!(
+        arrows.len(),
+        4,
+        "Glade building has 4 ground-plane move arrows"
+    );
     let arcs = glade_rotation_arcs(&room, room_shape, false);
     assert_eq!(arcs.len(), 2, "Glade building has 2 corner rotation arcs");
 
@@ -1166,9 +1192,8 @@ fn glade_gizmo_provides_4_move_arrows_and_2_corner_rotation_arcs() {
         physical_size: UVec2::new(800, 600),
         scale_factor: 1.0,
     });
-    let cam_global = GlobalTransform::from(
-        Transform::from_xyz(0.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
-    );
+    let cam_global =
+        GlobalTransform::from(Transform::from_xyz(0.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y));
 
     for (base, tip) in &arrows {
         let mid = (*base + *tip) * 0.5;

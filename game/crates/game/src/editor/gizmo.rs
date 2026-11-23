@@ -20,7 +20,7 @@ pub(super) fn configure_xray_gizmos(app: &mut App) {
 }
 
 /// Draw a dashed line segment in 3D space.
-fn dashed_line<Config: GizmoConfigGroup>(
+pub(super) fn dashed_line<Config: GizmoConfigGroup>(
     gizmos: &mut Gizmos<Config>,
     a: Vec3,
     b: Vec3,
@@ -64,7 +64,14 @@ fn glade_arrowhead(
 }
 
 /// Draw a clean white 3D arrow from `base` to `tip` with a filled-outline head.
-fn glade_arrow(gizmos: &mut Gizmos, base: Vec3, tip: Vec3, head_len: f32, head_w: f32, colour: Color) {
+fn glade_arrow(
+    gizmos: &mut Gizmos,
+    base: Vec3,
+    tip: Vec3,
+    head_len: f32,
+    head_w: f32,
+    colour: Color,
+) {
     let dir = (tip - base).normalize_or_zero();
     if dir == Vec3::ZERO {
         return;
@@ -104,7 +111,14 @@ fn glade_transform_gizmo(
     let pt = |x: f32, y: f32, z: f32| root + rot * Vec3::new(x, y, z);
 
     // 1. Dashed wireframe bounding box + roof ridge
-    if !matches!(kind, Some(crate::glade::GladeKind::Terrain)) {
+    if !matches!(
+        kind,
+        Some(
+            crate::glade::GladeKind::Terrain
+                | crate::glade::GladeKind::Wall
+                | crate::glade::GladeKind::Stairs
+        )
+    ) {
         let b = [
             pt(-hx, 0.0, -hz),
             pt(hx, 0.0, -hz),
@@ -285,18 +299,22 @@ pub(super) fn glade_handle_visuals_for(
     let pad = if touch { 0.56 } else { 0.34 };
     let v_pad = if touch { 0.52 } else { 0.32 };
 
-    let mut out = vec![
-        (
+    let mut out = Vec::new();
+    if !matches!(
+        kind,
+        Some(crate::glade::GladeKind::Wall | crate::glade::GladeKind::Stairs)
+    ) {
+        out.push((
             GizmoHandle::GladeWidth,
             root + rot * Vec3::new(hx + pad, mid_y, 0.0),
             root + rot * Vec3::new(hx, mid_y, 0.0),
-        ),
-        (
+        ));
+        out.push((
             GizmoHandle::GladeWidth,
             root + rot * Vec3::new(-hx - pad, mid_y, 0.0),
             root + rot * Vec3::new(-hx, mid_y, 0.0),
-        ),
-    ];
+        ));
+    }
 
     if !matches!(
         kind,
@@ -316,13 +334,14 @@ pub(super) fn glade_handle_visuals_for(
 
     let height_anchor_xz = if matches!(
         kind,
-        Some(
-            crate::glade::GladeKind::Wall
-                | crate::glade::GladeKind::Door
-                | crate::glade::GladeKind::Window
-        )
+        Some(crate::glade::GladeKind::Door | crate::glade::GladeKind::Window)
     ) {
         Vec2::ZERO
+    } else if matches!(
+        kind,
+        Some(crate::glade::GladeKind::Wall | crate::glade::GladeKind::Stairs)
+    ) {
+        Vec2::new(0.0, hz + pad * 0.55)
     } else {
         Vec2::new(hx + pad * 0.55, hz + pad * 0.55)
     };
@@ -338,6 +357,7 @@ pub(super) fn glade_handle_visuals_for(
             crate::glade::GladeKind::Room
                 | crate::glade::GladeKind::Tower
                 | crate::glade::GladeKind::Terrain
+                | crate::glade::GladeKind::Tree
         )
     ) {
         let top_h = crate::glade::total_height(piece, shape);
@@ -732,7 +752,13 @@ pub(super) fn dragged_group(editor: &Editor, id: u32) -> Vec<Piece> {
         }
     }
     ids.into_iter()
-        .filter_map(|selected| editor.pieces.iter().find(|piece| piece.id == selected).copied())
+        .filter_map(|selected| {
+            editor
+                .pieces
+                .iter()
+                .find(|piece| piece.id == selected)
+                .copied()
+        })
         .collect()
 }
 
@@ -782,10 +808,9 @@ pub(super) fn gizmo_drag_point(ray: Ray3d, handle: GizmoHandle, origin: Vec3) ->
         }
         GizmoHandle::Xy => plane_ray_point(ray, origin, Vec3::Z),
         GizmoHandle::Zy => plane_ray_point(ray, origin, Vec3::X),
-        GizmoHandle::Xz
-        | GizmoHandle::Yaw
-        | GizmoHandle::GladeWidth
-        | GizmoHandle::GladeLength => plane_ray_point(ray, origin, Vec3::Y),
+        GizmoHandle::Xz | GizmoHandle::Yaw | GizmoHandle::GladeWidth | GizmoHandle::GladeLength => {
+            plane_ray_point(ray, origin, Vec3::Y)
+        }
         GizmoHandle::Pitch => plane_ray_point(ray, origin, Vec3::X),
         GizmoHandle::Roll => plane_ray_point(ray, origin, Vec3::Z),
     }
@@ -867,11 +892,16 @@ pub(super) fn dragged_piece(start: Piece, handle: GizmoHandle, grab: Vec3, curre
                     let sign = if local_grab.x >= 0.0 { 1.0 } else { -1.0 };
                     let dw = (local_curr.x - local_grab.x) * sign * 2.0;
                     let (min_w, max_w) = match kind {
-                        Some(crate::glade::GladeKind::Wall) => (0.8, crate::glade::GLADE_MAX_SPAN),
+                        Some(crate::glade::GladeKind::Wall | crate::glade::GladeKind::Stairs) => {
+                            (0.8, crate::glade::GLADE_MAX_SPAN)
+                        }
                         Some(crate::glade::GladeKind::Terrain) => (
                             crate::glade::TERRAIN_MIN_SPAN,
                             crate::glade::TERRAIN_MAX_SPAN,
                         ),
+                        Some(crate::glade::GladeKind::Tree) => {
+                            (crate::glade::TREE_MIN_SPAN, crate::glade::TREE_MAX_SPAN)
+                        }
                         _ => (1.0, crate::glade::GLADE_MAX_SPAN),
                     };
                     ext.x = (ext.x + dw).clamp(min_w, max_w);
@@ -885,10 +915,14 @@ pub(super) fn dragged_piece(start: Piece, handle: GizmoHandle, grab: Vec3, curre
                     let dz = (local_curr.z - local_grab.z) * sign * 2.0;
                     let (min_z, max_z) = match kind {
                         Some(crate::glade::GladeKind::Wall) => (0.22, 1.4),
+                        Some(crate::glade::GladeKind::Stairs) => (0.6, 4.0),
                         Some(crate::glade::GladeKind::Terrain) => (
                             crate::glade::TERRAIN_MIN_SPAN,
                             crate::glade::TERRAIN_MAX_SPAN,
                         ),
+                        Some(crate::glade::GladeKind::Tree) => {
+                            (crate::glade::TREE_MIN_SPAN, crate::glade::TREE_MAX_SPAN)
+                        }
                         _ => (1.0, crate::glade::GLADE_MAX_SPAN),
                     };
                     ext.z = (ext.z + dz).clamp(min_z, max_z);
@@ -903,6 +937,9 @@ pub(super) fn dragged_piece(start: Piece, handle: GizmoHandle, grab: Vec3, curre
                             crate::glade::TERRAIN_MIN_HEIGHT,
                             crate::glade::TERRAIN_MAX_HEIGHT,
                         ),
+                        Some(crate::glade::GladeKind::Tree) => {
+                            (crate::glade::TREE_MIN_HEIGHT, crate::glade::TREE_MAX_HEIGHT)
+                        }
                         _ => (
                             crate::glade::GLADE_MIN_HEIGHT,
                             crate::glade::GLADE_MAX_HEIGHT,
@@ -1005,6 +1042,46 @@ pub(super) fn snap_elevation(
     raw
 }
 
+pub(super) fn apply_gizmo_drag_with_movers(
+    editor: &mut Editor,
+    movers: &mut Movers,
+    drag: GizmoDrag,
+    ray: Option<Ray3d>,
+) {
+    let prev = editor.pieces.iter().find(|p| p.id == drag.id).copied();
+    apply_gizmo_drag(editor, drag.clone(), ray);
+    let Some(prev) = prev else {
+        return;
+    };
+    let Some(curr) = editor.pieces.iter().find(|p| p.id == drag.id).copied() else {
+        return;
+    };
+    if !matches!(
+        drag.handle,
+        GizmoHandle::X | GizmoHandle::Z | GizmoHandle::Xz | GizmoHandle::Yaw
+    ) {
+        return;
+    }
+    let Some(mover) = movers.map.get_mut(&drag.id) else {
+        return;
+    };
+    if !movers::is_glade_curve_piece(&curr) {
+        return;
+    }
+    let delta_rot = model::piece_quat(&curr) * model::piece_quat(&prev).inverse();
+    let transform_pt = |p: Vec2| -> Vec2 {
+        let rel = Vec3::new(p.x - prev.pos.x, 0.0, p.y - prev.pos.y);
+        let r = delta_rot * rel;
+        curr.pos + Vec2::new(r.x, r.z)
+    };
+    for wp in &mut mover.waypoints {
+        wp.pos = transform_pt(wp.pos);
+        wp.incoming = wp.incoming.map(transform_pt);
+        wp.outgoing = wp.outgoing.map(transform_pt);
+    }
+    mover.rebuild();
+}
+
 pub(super) fn apply_gizmo_drag(editor: &mut Editor, drag: GizmoDrag, ray: Option<Ray3d>) {
     let Some(ray) = ray else {
         return;
@@ -1030,7 +1107,12 @@ pub(super) fn apply_gizmo_drag(editor: &mut Editor, drag: GizmoDrag, ray: Option
         moving.push(drag.id);
         let candidates = snap_against(editor, &moving);
         if let Some((snapped_pos, snapped_rot, wall_elev)) =
-            crate::glade::snap_door_to_glade_wall_with_elevation(&piece, &candidates, Some(ray), &[])
+            crate::glade::snap_door_to_glade_wall_with_elevation(
+                &piece,
+                &candidates,
+                Some(ray),
+                &[],
+            )
         {
             piece.pos = snapped_pos;
             piece.rot = snapped_rot;
@@ -1075,7 +1157,11 @@ pub(super) fn apply_gizmo_drag(editor: &mut Editor, drag: GizmoDrag, ray: Option
         moved.pos = piece.pos + Vec2::new(rotated_rel.x, rotated_rel.z);
         moved.elevation = piece.elevation + rotated_rel.y;
         model::set_piece_quat(&mut moved, delta_rot * model::piece_quat(other));
-        if let Some(target) = editor.pieces.iter_mut().find(|target| target.id == other.id) {
+        if let Some(target) = editor
+            .pieces
+            .iter_mut()
+            .find(|target| target.id == other.id)
+        {
             *target = moved;
         }
     }

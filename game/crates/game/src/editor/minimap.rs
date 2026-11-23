@@ -39,8 +39,12 @@ const VIEW_CONE_FILL: Color = Color::srgba(0.42, 0.78, 1.0, 0.16);
 
 /// Marker for the top-down minimap camera. Main-camera queries exclude it
 /// with `Without<MinimapCamera>` so they keep working unchanged.
+///
+/// `pub(crate)` so headless mode (`crate::headless`) can drop the camera: its
+/// viewport/order are synced from the primary window every frame, and a
+/// windowless run never runs that sync.
 #[derive(Component)]
-pub(super) struct MinimapCamera;
+pub(crate) struct MinimapCamera;
 
 /// Root of the minimap UI (frame + toolbar). It carries no `InputLayer` so
 /// one instance serves desktop and touch; `sync_minimap` toggles it.
@@ -257,6 +261,8 @@ pub(super) fn spawn_minimap(commands: &mut Commands) {
     commands.spawn((
         MinimapCamera,
         Camera3d::default(),
+        // GPU grass skips the top-down map (saves fill rate, keeps it legible).
+        bevy_grass::prelude::NoGrass,
         RenderLayers::from_layers(&[0, MINIMAP_LAYER]),
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical {

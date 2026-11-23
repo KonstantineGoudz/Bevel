@@ -1,0 +1,14 @@
+# Keep the sim build context small — without this, `target/` (50GB+)
+# gets sent to the daemon (the 119GB "transferring context" stall).
+target/
+**/target/
+.git/
+.gitignore
+backups/
+**/backups/
+.env
+web/pkg/
+web/assets/
+levels/
+*.log
+.cargo-home/
